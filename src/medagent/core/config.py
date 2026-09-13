@@ -12,6 +12,13 @@ class Settings(BaseSettings):
 
     log_level: str = "INFO"
 
+    medical_mcp_command: str = "npx"
+    medical_mcp_args: list[str] = ["-y", "medical-mcp"]
+    healthcare_mcp_command: str = "node"
+    healthcare_mcp_args: list[str] = ["./vendor/healthcare-mcp/build/index.js"]
+    research_mcp_command: str = "node"
+    research_mcp_args: list[str] = ["./vendor/med-research-mcp-suite/dist/index.js"]
+
     database_path: str = "medagent.db"
     chroma_persist_dir: str = ".chroma"
 
