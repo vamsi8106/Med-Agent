@@ -68,3 +68,25 @@ async def test_uses_known_medications_from_context() -> None:
     result = await agent.run(context, "any interactions to worry about?")
 
     assert "No interactions found" in result
+
+
+async def test_run_result_returns_agent_result_with_interactions() -> None:
+    interactions = [
+        DrugInteraction(
+            drug_a="Metformin",
+            drug_b="Glimepiride",
+            severity=InteractionSeverity.MODERATE,
+            description="Increased risk of hypoglycemia when combined.",
+            source="med-research-mcp-suite",
+            checked_at=datetime.now(UTC),
+        )
+    ]
+    agent = DrugSafetyAgent(
+        llm=MockLLMProvider(fixed_response="Findings."),
+        interaction_checker=_FakeInteractionChecker(interactions),  # type: ignore[arg-type]
+    )
+
+    result = await agent.run_result(_patient(), "Check interactions for Metformin + Glimepiride")
+
+    assert result.role.value == "drug_safety"
+    assert result.interactions == interactions

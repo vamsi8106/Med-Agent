@@ -91,3 +91,10 @@ class LabFlag(BaseModel):
     flag: str
     reference_range: str | None = None
     explanation: str | None = None
+
+
+class AgentResult(BaseModel):
+    role: AgentRole
+    summary: str
+    evidence: list[ClinicalEvidence] = Field(default_factory=list)
+    interactions: list[DrugInteraction] = Field(default_factory=list)

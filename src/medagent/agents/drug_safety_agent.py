@@ -4,7 +4,8 @@ import re
 
 from medagent.core.exceptions import ToolError
 from medagent.core.interfaces import BaseAgent, BaseLLMProvider
-from medagent.core.models import DrugInteraction, Medication, Message, PatientContext
+from medagent.core.models import AgentResult, DrugInteraction, Medication, Message, PatientContext
+from medagent.core.types import AgentRole
 from medagent.infra.logging import get_logger
 from medagent.memory.session import SessionMemory
 from medagent.tools.custom.interaction_checker import InteractionCheckerTool
@@ -52,6 +53,18 @@ class DrugSafetyAgent(BaseAgent):
         self._session = session or SessionMemory()
 
     async def run(self, context: PatientContext, message: str) -> str:
+        final_answer, _ = await self._check_and_synthesize(context, message)
+        return final_answer
+
+    async def run_result(self, context: PatientContext, message: str) -> AgentResult:
+        final_answer, interactions = await self._check_and_synthesize(context, message)
+        return AgentResult(
+            role=AgentRole.DRUG_SAFETY, summary=final_answer, interactions=interactions
+        )
+
+    async def _check_and_synthesize(
+        self, context: PatientContext, message: str
+    ) -> tuple[str, list[DrugInteraction]]:
         self._session.add_message(Message(role="user", content=message))
 
         drug_names = _extract_drug_names(message, context)
@@ -86,4 +99,4 @@ class DrugSafetyAgent(BaseAgent):
 
         final_answer = f"{response.content}\n\nCitations:\n{citations}"
         self._session.add_message(Message(role="assistant", content=final_answer))
-        return final_answer
+        return final_answer, interactions
