@@ -7,6 +7,9 @@ from medagent.app import create_app
 from medagent.core.config import Settings
 from medagent.core.models import PatientContext
 
+_ADMIN_USERNAME = "admin"
+_ADMIN_PASSWORD = "admin-pass!"
+
 
 class _FakeEmbeddingModel:
     async def embed(self, texts: list[str]) -> list[list[float]]:
@@ -19,6 +22,8 @@ def _settings(pg_dsn: str) -> Settings:
         llm_provider="mock",
         postgres_dsn=pg_dsn,
         chroma_persist_dir=tempfile.mkdtemp(prefix="medagent-test-chroma-"),
+        admin_bootstrap_username=_ADMIN_USERNAME,
+        admin_bootstrap_password=_ADMIN_PASSWORD,
     )
 
 
@@ -28,14 +33,27 @@ def _make_client(pg_dsn: str) -> TestClient:
     return TestClient(app)
 
 
-def _register_and_login(client: TestClient, username: str = "dr.alpha") -> str:
-    client.post("/auth/register", json={"username": username, "password": "s3cret!"})
-    response = client.post("/auth/token", data={"username": username, "password": "s3cret!"})
+def _login(client: TestClient, username: str, password: str) -> str:
+    response = client.post("/auth/token", data={"username": username, "password": password})
     return response.json()["access_token"]
 
 
+def _admin_token(client: TestClient) -> str:
+    return _login(client, _ADMIN_USERNAME, _ADMIN_PASSWORD)
+
+
+def _admin_headers(client: TestClient) -> dict[str, str]:
+    return {"Authorization": f"Bearer {_admin_token(client)}"}
+
+
 def _auth_headers(client: TestClient, username: str = "dr.alpha") -> dict[str, str]:
-    token = _register_and_login(client, username)
+    """Log in as the bootstrapped admin, create a doctor account, log in as them."""
+    client.post(
+        "/admin/users",
+        json={"username": username, "password": "s3cret!"},
+        headers=_admin_headers(client),
+    )
+    token = _login(client, username, "s3cret!")
     return {"Authorization": f"Bearer {token}"}
 
 
@@ -53,30 +71,67 @@ def test_metrics_endpoint(pg_dsn: str) -> None:
     assert b"medagent_http_requests_total" in response.content
 
 
-def test_register_and_login_returns_token(pg_dsn: str) -> None:
+def test_admin_is_bootstrapped_on_startup(pg_dsn: str) -> None:
     with _make_client(pg_dsn) as client:
-        register_resp = client.post(
-            "/auth/register", json={"username": "dr.beta", "password": "s3cret!"}
+        response = client.post(
+            "/auth/token", data={"username": _ADMIN_USERNAME, "password": _ADMIN_PASSWORD}
         )
-        assert register_resp.status_code == 200
-        assert register_resp.json()["username"] == "dr.beta"
+    assert response.status_code == 200
+    assert response.json()["token_type"] == "bearer"
+
+
+def test_admin_endpoint_requires_admin_role(pg_dsn: str) -> None:
+    with _make_client(pg_dsn) as client:
+        doctor_headers = _auth_headers(client, username="dr.notadmin")
+        response = client.post(
+            "/admin/users",
+            json={"username": "dr.other", "password": "s3cret!"},
+            headers=doctor_headers,
+        )
+    assert response.status_code == 403
+
+
+def test_admin_endpoint_rejects_unauthenticated(pg_dsn: str) -> None:
+    with _make_client(pg_dsn) as client:
+        response = client.post("/admin/users", json={"username": "dr.new", "password": "s3cret!"})
+    assert response.status_code == 401
+
+
+def test_admin_creates_user_and_they_can_log_in(pg_dsn: str) -> None:
+    with _make_client(pg_dsn) as client:
+        create_resp = client.post(
+            "/admin/users",
+            json={"username": "dr.beta", "password": "s3cret!"},
+            headers=_admin_headers(client),
+        )
+        assert create_resp.status_code == 200
+        assert create_resp.json()["username"] == "dr.beta"
+        assert create_resp.json()["role"] == "doctor"
 
         login_resp = client.post("/auth/token", data={"username": "dr.beta", "password": "s3cret!"})
-        assert login_resp.status_code == 200
-        assert login_resp.json()["token_type"] == "bearer"
+    assert login_resp.status_code == 200
 
 
 def test_login_with_wrong_password_returns_401(pg_dsn: str) -> None:
     with _make_client(pg_dsn) as client:
-        client.post("/auth/register", json={"username": "dr.gamma", "password": "s3cret!"})
+        client.post(
+            "/admin/users",
+            json={"username": "dr.gamma", "password": "s3cret!"},
+            headers=_admin_headers(client),
+        )
         response = client.post("/auth/token", data={"username": "dr.gamma", "password": "wrong"})
     assert response.status_code == 401
 
 
-def test_duplicate_registration_returns_409(pg_dsn: str) -> None:
+def test_duplicate_username_returns_409(pg_dsn: str) -> None:
     with _make_client(pg_dsn) as client:
-        client.post("/auth/register", json={"username": "dr.delta", "password": "s3cret!"})
-        response = client.post("/auth/register", json={"username": "dr.delta", "password": "other"})
+        headers = _admin_headers(client)
+        client.post(
+            "/admin/users", json={"username": "dr.delta", "password": "s3cret!"}, headers=headers
+        )
+        response = client.post(
+            "/admin/users", json={"username": "dr.delta", "password": "other"}, headers=headers
+        )
     assert response.status_code == 409
 
 
@@ -171,7 +226,7 @@ def test_websocket_without_token_is_rejected(pg_dsn: str) -> None:
 def test_websocket_chat_requires_approval_before_saving(pg_dsn: str) -> None:
     patient = PatientContext(id="P-TEST-803", name="Patient Gamma", age=70, sex="M")
     with _make_client(pg_dsn) as client:
-        token = _register_and_login(client)
+        token = _admin_token(client)
         fake_followup = AsyncMock(return_value=("Follow-up report", patient))
         with patch("medagent.app.run_followup", fake_followup):
             with client.websocket_connect(f"/ws/P-TEST-803?token={token}") as websocket:
@@ -191,7 +246,7 @@ def test_websocket_chat_requires_approval_before_saving(pg_dsn: str) -> None:
 def test_websocket_chat_reject_does_not_save(pg_dsn: str) -> None:
     patient = PatientContext(id="P-TEST-804", name="Patient Delta", age=65, sex="F")
     with _make_client(pg_dsn) as client:
-        token = _register_and_login(client)
+        token = _admin_token(client)
         fake_followup = AsyncMock(return_value=("Draft report", patient))
         with patch("medagent.app.run_followup", fake_followup):
             with client.websocket_connect(f"/ws/P-TEST-804?token={token}") as websocket:
@@ -210,7 +265,7 @@ def test_websocket_chat_reject_does_not_save(pg_dsn: str) -> None:
 def test_websocket_chat_edited_text_is_saved_instead(pg_dsn: str) -> None:
     patient = PatientContext(id="P-TEST-805", name="Patient Epsilon", age=45, sex="F")
     with _make_client(pg_dsn) as client:
-        token = _register_and_login(client)
+        token = _admin_token(client)
         fake_followup = AsyncMock(return_value=("Draft report", patient))
         with patch("medagent.app.run_followup", fake_followup):
             with client.websocket_connect(f"/ws/P-TEST-805?token={token}") as websocket:

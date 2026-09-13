@@ -14,7 +14,7 @@ from medagent.agents.drug_safety_agent import DrugSafetyAgent
 from medagent.agents.evidence_agent import EvidenceAgent
 from medagent.agents.report_agent import ReportAgent
 from medagent.agents.triage_agent import TriageAgent
-from medagent.auth.dependencies import get_current_user, get_current_user_ws
+from medagent.auth.dependencies import get_current_user, get_current_user_ws, require_admin
 from medagent.auth.security import create_access_token, hash_password, verify_password
 from medagent.auth.store import UserStore
 from medagent.core.config import Settings, get_settings
@@ -48,9 +48,10 @@ class DrugCheckRequest(BaseModel):
     new_drug: str
 
 
-class RegisterRequest(BaseModel):
+class CreateUserRequest(BaseModel):
     username: str
     password: str
+    role: str = "doctor"
 
 
 class Token(BaseModel):
@@ -81,6 +82,24 @@ class AppState:
         # Schema is owned by Alembic ("alembic upgrade head"), run before
         # startup in any real deployment; this just opens the connection pool.
         await self.persistent_store.init_schema()
+        await self._bootstrap_admin()
+
+    async def _bootstrap_admin(self) -> None:
+        """Seed exactly one admin account when the users table is empty.
+
+        There is no public registration endpoint -- this is the only way an
+        admin account can ever come into existence, so every other account
+        must be created by an admin via POST /admin/users.
+        """
+        username = self.settings.admin_bootstrap_username
+        password = self.settings.admin_bootstrap_password
+        if not username or not password:
+            return
+        if await self.user_store.count_users() > 0:
+            return
+
+        await self.user_store.create_user(username, hash_password(password), role="admin")
+        logger.info("admin_bootstrapped", username=username)
 
     async def close(self) -> None:
         await self.persistent_store.close()
@@ -116,11 +135,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def metrics() -> Response:
         return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
-    @app.post("/auth/register", response_model=User)
-    async def register(body: RegisterRequest) -> User:
+    @app.post("/admin/users", response_model=User)
+    async def create_user(body: CreateUserRequest, _admin: User = Depends(require_admin)) -> User:
+        # No public registration endpoint: every account (after the one admin
+        # seeded from ADMIN_BOOTSTRAP_USERNAME/PASSWORD at startup) is created
+        # by an existing admin, so patient data is never open to self-signup.
         state: AppState = app.state.medagent
         try:
-            return await state.user_store.create_user(body.username, hash_password(body.password))
+            return await state.user_store.create_user(
+                body.username, hash_password(body.password), body.role
+            )
         except AuthError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 

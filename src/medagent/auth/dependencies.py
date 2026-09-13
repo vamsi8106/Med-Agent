@@ -31,6 +31,12 @@ async def get_current_user(request: Request, token: str = Depends(oauth2_scheme)
     return await _resolve_user(request.app.state.medagent, token)
 
 
+async def require_admin(user: User = Depends(get_current_user)) -> User:
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin privileges required")
+    return user
+
+
 async def get_current_user_ws(websocket: WebSocket) -> User | None:
     token = websocket.query_params.get("token")
     if token is None:

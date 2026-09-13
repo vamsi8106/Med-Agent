@@ -44,3 +44,7 @@ class UserStore:
             id=row["id"], username=row["username"], role=row["role"], created_at=row["created_at"]
         )
         return user, row["hashed_password"]
+
+    async def count_users(self) -> int:
+        async with self._store.connect() as conn:
+            return await conn.fetchval("SELECT COUNT(*) FROM users")

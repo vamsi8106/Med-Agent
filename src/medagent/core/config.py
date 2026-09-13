@@ -33,6 +33,12 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     jwt_expire_minutes: int = 60
 
+    # Seeds exactly one admin account at startup if the users table is empty.
+    # There is no public registration endpoint -- every other account must be
+    # created by an admin via POST /admin/users.
+    admin_bootstrap_username: str | None = None
+    admin_bootstrap_password: str | None = None
+
 
 _settings: Settings | None = None
 

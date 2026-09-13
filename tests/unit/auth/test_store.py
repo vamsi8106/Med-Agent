@@ -35,3 +35,19 @@ async def test_duplicate_username_raises_auth_error(pg_dsn: str) -> None:
 
     with pytest.raises(AuthError):
         await store.create_user("dr.alpha", hash_password("other"))
+
+
+async def test_count_users(pg_dsn: str) -> None:
+    store = _make_store(pg_dsn)
+    assert await store.count_users() == 0
+
+    await store.create_user("dr.alpha", hash_password("s3cret!"))
+    await store.create_user("dr.beta", hash_password("s3cret!"))
+
+    assert await store.count_users() == 2
+
+
+async def test_create_user_with_admin_role(pg_dsn: str) -> None:
+    store = _make_store(pg_dsn)
+    user = await store.create_user("admin", hash_password("s3cret!"), role="admin")
+    assert user.role == "admin"
