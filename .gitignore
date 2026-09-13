@@ -10,3 +10,4 @@ build/
 *.db
 .chroma/
 guidelines_pdf/
+vendor/

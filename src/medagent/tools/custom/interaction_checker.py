@@ -1,5 +1,6 @@
 """Pairwise drug interaction checks via the medical-mcp and research MCP servers."""
 
+import re
 from datetime import UTC, datetime
 from itertools import combinations
 from typing import Any
@@ -19,12 +20,27 @@ _SEVERITY_KEYWORDS: dict[InteractionSeverity, tuple[str, ...]] = {
     InteractionSeverity.MINOR: ("minor",),
 }
 
+# med-research-mcp-suite's real response format (confirmed against a live
+# call) reports "## RISK PROFILE\n<High|Medium|Low>: ..." rather than the
+# major/moderate/minor wording above.
+_RISK_PROFILE_PATTERN = re.compile(r"risk profile\s*\n?\s*(high|medium|low)", re.IGNORECASE)
+_RISK_PROFILE_TO_SEVERITY = {
+    "high": InteractionSeverity.MAJOR,
+    "medium": InteractionSeverity.MODERATE,
+    "low": InteractionSeverity.MINOR,
+}
+
 
 def _parse_severity(text: str) -> InteractionSeverity:
     lowered = text.lower()
     for severity, keywords in _SEVERITY_KEYWORDS.items():
         if any(keyword in lowered for keyword in keywords):
             return severity
+
+    risk_match = _RISK_PROFILE_PATTERN.search(text)
+    if risk_match:
+        return _RISK_PROFILE_TO_SEVERITY[risk_match.group(1).lower()]
+
     return InteractionSeverity.NONE
 
 
@@ -52,7 +68,9 @@ class InteractionCheckerTool(BaseTool):
         interactions: list[DrugInteraction] = []
         async with self._research_client as client:
             for drug_a, drug_b in combinations(medications, 2):
-                content = await client.comprehensive_analysis(f"{drug_a.name} + {drug_b.name}")
+                content = await client.comprehensive_analysis(
+                    drug_a.name, f"{drug_b.name} interaction"
+                )
                 text = _extract_text(content)
                 interactions.append(
                     DrugInteraction(

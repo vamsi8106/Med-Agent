@@ -35,6 +35,16 @@ async def test_interaction_checker_flags_major_severity() -> None:
     assert interactions[0].drug_b == "Glimepiride"
 
 
+async def test_interaction_checker_parses_risk_profile_format() -> None:
+    # med-research-mcp-suite's real response format, confirmed live.
+    fake_client = _FakeResearchClient("## RISK PROFILE\nMedium: No factors identified")
+    checker = InteractionCheckerTool(research_client=fake_client)  # type: ignore[arg-type]
+
+    result = await checker.run([Medication(name="Metformin"), Medication(name="Glimepiride")])
+
+    assert result.data[0].severity == InteractionSeverity.MODERATE
+
+
 async def test_interaction_checker_no_pairs_for_single_drug() -> None:
     fake_client = _FakeResearchClient("n/a")
     checker = InteractionCheckerTool(research_client=fake_client)  # type: ignore[arg-type]

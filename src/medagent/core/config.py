@@ -15,7 +15,10 @@ class Settings(BaseSettings):
     medical_mcp_command: str = "npx"
     medical_mcp_args: list[str] = ["-y", "medical-mcp"]
     healthcare_mcp_command: str = "node"
-    healthcare_mcp_args: list[str] = ["./vendor/healthcare-mcp/build/index.js"]
+    # Real entry point is server/index.js, not build/index.js -- confirmed
+    # against the actual healthcare-mcp-public project (no build step; it
+    # ships plain JS with a working shebang).
+    healthcare_mcp_args: list[str] = ["./vendor/healthcare-mcp/server/index.js"]
     research_mcp_command: str = "node"
     research_mcp_args: list[str] = ["./vendor/med-research-mcp-suite/dist/index.js"]
     mcp_timeout_seconds: float = 30.0

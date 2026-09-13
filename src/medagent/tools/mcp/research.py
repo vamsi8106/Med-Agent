@@ -17,8 +17,17 @@ class ResearchMCPClient(MCPStdioClient):
             rate_limit_capacity=settings.mcp_rate_limit_capacity,
         )
 
-    async def comprehensive_analysis(self, drug_name: str) -> Any:
-        return await self.call_tool("comprehensive-analysis", {"drug_name": drug_name})
+    async def comprehensive_analysis(self, drug_name: str, condition: str) -> Any:
+        # Real tool name/schema confirmed against the actual project (AGENTS.md's
+        # "comprehensive-analysis" / single drug_name never matched this server):
+        # it takes a drug + a condition, not a drug pair. For interaction checks,
+        # the second drug's name is passed as `condition` -- the server's
+        # underlying literature/trials search surfaces interaction-relevant
+        # results for that combination even though it isn't a dedicated
+        # drug-drug interaction endpoint.
+        return await self.call_tool(
+            "research_comprehensive_analysis", {"drugName": drug_name, "condition": condition}
+        )
 
     async def drug_safety_profile(self, drug_name: str) -> Any:
-        return await self.call_tool("drug-safety-profile", {"drug_name": drug_name})
+        return await self.call_tool("research_drug_safety_profile", {"drugName": drug_name})

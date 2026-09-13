@@ -38,5 +38,20 @@ async def test_research_client_drug_safety_profile() -> None:
 
     result = await client.drug_safety_profile("metformin")
 
-    client.call_tool.assert_awaited_once_with("drug-safety-profile", {"drug_name": "metformin"})
+    client.call_tool.assert_awaited_once_with(
+        "research_drug_safety_profile", {"drugName": "metformin"}
+    )
     assert result == "profile"
+
+
+async def test_research_client_comprehensive_analysis() -> None:
+    client = ResearchMCPClient(settings=_settings())
+    client.call_tool = AsyncMock(return_value="analysis")
+
+    result = await client.comprehensive_analysis("Metformin", "Glimepiride interaction")
+
+    client.call_tool.assert_awaited_once_with(
+        "research_comprehensive_analysis",
+        {"drugName": "Metformin", "condition": "Glimepiride interaction"},
+    )
+    assert result == "analysis"
