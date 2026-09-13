@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 
 from medagent.app import create_app
 from medagent.core.config import Settings
+from medagent.core.models import PatientContext
 
 
 class _FakeEmbeddingModel:
@@ -27,6 +28,17 @@ def _make_client(tmp_path: Path) -> TestClient:
     return TestClient(app)
 
 
+def _register_and_login(client: TestClient, username: str = "dr.alpha") -> str:
+    client.post("/auth/register", json={"username": username, "password": "s3cret!"})
+    response = client.post("/auth/token", data={"username": username, "password": "s3cret!"})
+    return response.json()["access_token"]
+
+
+def _auth_headers(client: TestClient, username: str = "dr.alpha") -> dict[str, str]:
+    token = _register_and_login(client, username)
+    return {"Authorization": f"Bearer {token}"}
+
+
 def test_health_endpoint(tmp_path: Path) -> None:
     with _make_client(tmp_path) as client:
         response = client.get("/health")
@@ -41,13 +53,47 @@ def test_metrics_endpoint(tmp_path: Path) -> None:
     assert b"medagent_http_requests_total" in response.content
 
 
-def test_create_and_get_patient(tmp_path: Path) -> None:
+def test_register_and_login_returns_token(tmp_path: Path) -> None:
     with _make_client(tmp_path) as client:
+        register_resp = client.post(
+            "/auth/register", json={"username": "dr.beta", "password": "s3cret!"}
+        )
+        assert register_resp.status_code == 200
+        assert register_resp.json()["username"] == "dr.beta"
+
+        login_resp = client.post("/auth/token", data={"username": "dr.beta", "password": "s3cret!"})
+        assert login_resp.status_code == 200
+        assert login_resp.json()["token_type"] == "bearer"
+
+
+def test_login_with_wrong_password_returns_401(tmp_path: Path) -> None:
+    with _make_client(tmp_path) as client:
+        client.post("/auth/register", json={"username": "dr.gamma", "password": "s3cret!"})
+        response = client.post("/auth/token", data={"username": "dr.gamma", "password": "wrong"})
+    assert response.status_code == 401
+
+
+def test_duplicate_registration_returns_409(tmp_path: Path) -> None:
+    with _make_client(tmp_path) as client:
+        client.post("/auth/register", json={"username": "dr.delta", "password": "s3cret!"})
+        response = client.post("/auth/register", json={"username": "dr.delta", "password": "other"})
+    assert response.status_code == 409
+
+
+def test_patient_endpoints_require_auth(tmp_path: Path) -> None:
+    with _make_client(tmp_path) as client:
+        response = client.get("/patients/P-TEST-800")
+    assert response.status_code == 401
+
+
+def test_create_and_get_patient_with_auth(tmp_path: Path) -> None:
+    with _make_client(tmp_path) as client:
+        headers = _auth_headers(client)
         payload = {"id": "P-TEST-800", "name": "Patient Alpha", "age": 55, "sex": "F"}
-        create_resp = client.post("/patients", json=payload)
+        create_resp = client.post("/patients", json=payload, headers=headers)
         assert create_resp.status_code == 200
 
-        get_resp = client.get("/patients/P-TEST-800")
+        get_resp = client.get("/patients/P-TEST-800", headers=headers)
 
     assert get_resp.status_code == 200
     assert get_resp.json()["name"] == "Patient Alpha"
@@ -55,17 +101,23 @@ def test_create_and_get_patient(tmp_path: Path) -> None:
 
 def test_get_missing_patient_returns_404(tmp_path: Path) -> None:
     with _make_client(tmp_path) as client:
-        response = client.get("/patients/P-MISSING")
+        headers = _auth_headers(client)
+        response = client.get("/patients/P-MISSING", headers=headers)
     assert response.status_code == 404
 
 
 def test_assess_endpoint_returns_report(tmp_path: Path) -> None:
     with _make_client(tmp_path) as client:
+        headers = _auth_headers(client)
         client.post(
-            "/patients", json={"id": "P-TEST-801", "name": "Patient Beta", "age": 60, "sex": "M"}
+            "/patients",
+            json={"id": "P-TEST-801", "name": "Patient Beta", "age": 60, "sex": "M"},
+            headers=headers,
         )
         with patch("medagent.app.run_patient_assessment", AsyncMock(return_value="# Report")):
-            response = client.post("/patients/P-TEST-801/assess", json={"message": "hi"})
+            response = client.post(
+                "/patients/P-TEST-801/assess", json={"message": "hi"}, headers=headers
+            )
 
     assert response.status_code == 200
     assert response.json() == {"report": "# Report"}
@@ -73,23 +125,36 @@ def test_assess_endpoint_returns_report(tmp_path: Path) -> None:
 
 def test_drug_check_endpoint(tmp_path: Path) -> None:
     with _make_client(tmp_path) as client:
+        headers = _auth_headers(client)
         with patch("medagent.app.run_drug_check", AsyncMock(return_value="No major concerns.")):
             response = client.post(
-                "/drug-check", json={"patient_id": "P-TEST-802", "new_drug": "Glimepiride"}
+                "/drug-check",
+                json={"patient_id": "P-TEST-802", "new_drug": "Glimepiride"},
+                headers=headers,
             )
 
     assert response.status_code == 200
     assert response.json() == {"answer": "No major concerns."}
 
 
-def test_websocket_chat_requires_approval_before_saving(tmp_path: Path) -> None:
-    from medagent.core.models import PatientContext
+def test_websocket_without_token_is_rejected(tmp_path: Path) -> None:
+    with _make_client(tmp_path) as client:
+        try:
+            with client.websocket_connect("/ws/P-TEST-999"):
+                pass
+        except Exception:
+            pass
+        else:
+            raise AssertionError("expected the connection to be rejected")
 
+
+def test_websocket_chat_requires_approval_before_saving(tmp_path: Path) -> None:
     patient = PatientContext(id="P-TEST-803", name="Patient Gamma", age=70, sex="M")
     with _make_client(tmp_path) as client:
+        token = _register_and_login(client)
         fake_followup = AsyncMock(return_value=("Follow-up report", patient))
         with patch("medagent.app.run_followup", fake_followup):
-            with client.websocket_connect("/ws/P-TEST-803") as websocket:
+            with client.websocket_connect(f"/ws/P-TEST-803?token={token}") as websocket:
                 websocket.send_text("any updates?")
                 pending = websocket.receive_json()
                 assert pending == {"type": "pending_approval", "report": "Follow-up report"}
@@ -98,18 +163,18 @@ def test_websocket_chat_requires_approval_before_saving(tmp_path: Path) -> None:
                 saved = websocket.receive_json()
                 assert saved == {"type": "saved", "report": "Follow-up report"}
 
-        get_resp = client.get("/patients/P-TEST-803")
+        headers = {"Authorization": f"Bearer {token}"}
+        get_resp = client.get("/patients/P-TEST-803", headers=headers)
     assert get_resp.status_code == 200
 
 
 def test_websocket_chat_reject_does_not_save(tmp_path: Path) -> None:
-    from medagent.core.models import PatientContext
-
     patient = PatientContext(id="P-TEST-804", name="Patient Delta", age=65, sex="F")
     with _make_client(tmp_path) as client:
+        token = _register_and_login(client)
         fake_followup = AsyncMock(return_value=("Draft report", patient))
         with patch("medagent.app.run_followup", fake_followup):
-            with client.websocket_connect("/ws/P-TEST-804") as websocket:
+            with client.websocket_connect(f"/ws/P-TEST-804?token={token}") as websocket:
                 websocket.send_text("any updates?")
                 websocket.receive_json()
 
@@ -117,18 +182,18 @@ def test_websocket_chat_reject_does_not_save(tmp_path: Path) -> None:
                 decision = websocket.receive_json()
                 assert decision == {"type": "rejected"}
 
-        get_resp = client.get("/patients/P-TEST-804")
+        headers = {"Authorization": f"Bearer {token}"}
+        get_resp = client.get("/patients/P-TEST-804", headers=headers)
     assert get_resp.status_code == 404
 
 
 def test_websocket_chat_edited_text_is_saved_instead(tmp_path: Path) -> None:
-    from medagent.core.models import PatientContext
-
     patient = PatientContext(id="P-TEST-805", name="Patient Epsilon", age=45, sex="F")
     with _make_client(tmp_path) as client:
+        token = _register_and_login(client)
         fake_followup = AsyncMock(return_value=("Draft report", patient))
         with patch("medagent.app.run_followup", fake_followup):
-            with client.websocket_connect("/ws/P-TEST-805") as websocket:
+            with client.websocket_connect(f"/ws/P-TEST-805?token={token}") as websocket:
                 websocket.send_text("any updates?")
                 websocket.receive_json()
 

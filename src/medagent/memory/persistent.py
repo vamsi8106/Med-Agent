@@ -66,6 +66,14 @@ CREATE TABLE IF NOT EXISTS interactions_log (
     source TEXT,
     checked_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS users (
+    id TEXT PRIMARY KEY,
+    username TEXT NOT NULL UNIQUE,
+    hashed_password TEXT NOT NULL,
+    role TEXT NOT NULL DEFAULT 'doctor',
+    created_at TEXT NOT NULL
+);
 """
 
 

@@ -20,7 +20,9 @@ dependencies = [
     "prometheus-client>=0.26.0",
     "pydantic>=2.13.5",
     "pydantic-settings>=2.15.0",
+    "pyjwt>=2.14.0",
     "pypdf>=6.18.1",
+    "python-multipart>=0.0.32",
     "sentence-transformers>=6.0.1",
     "structlog>=26.1.0",
     "uvicorn[standard]>=0.52.4",
@@ -47,3 +49,6 @@ target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
+
+[tool.ruff.lint.per-file-ignores]
+"src/medagent/app.py" = ["B008"]

@@ -3,8 +3,9 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, Response
+from fastapi.security import OAuth2PasswordRequestForm
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from pydantic import BaseModel
 
@@ -12,9 +13,12 @@ from medagent.agents.drug_safety_agent import DrugSafetyAgent
 from medagent.agents.evidence_agent import EvidenceAgent
 from medagent.agents.report_agent import ReportAgent
 from medagent.agents.triage_agent import TriageAgent
+from medagent.auth.dependencies import get_current_user, get_current_user_ws
+from medagent.auth.security import create_access_token, hash_password, verify_password
+from medagent.auth.store import UserStore
 from medagent.core.config import Settings, get_settings
-from medagent.core.exceptions import MedAgentError
-from medagent.core.models import PatientContext
+from medagent.core.exceptions import AuthError, MedAgentError
+from medagent.core.models import PatientContext, User
 from medagent.infra.logging import configure_logging, get_logger
 from medagent.infra.middleware import ObservabilityMiddleware
 from medagent.infra.tracing import configure_tracing
@@ -42,11 +46,22 @@ class DrugCheckRequest(BaseModel):
     new_drug: str
 
 
+class RegisterRequest(BaseModel):
+    username: str
+    password: str
+
+
+class Token(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+
+
 class AppState:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
         self.persistent_store = PersistentStore(settings.database_path)
         self.patient_store = PatientStore(self.persistent_store)
+        self.user_store = UserStore(self.persistent_store)
 
         llm = ProviderRegistry.get_provider(settings.llm_provider, settings)
         embeddings = EmbeddingModel()
@@ -91,14 +106,40 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def metrics() -> Response:
         return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
+    @app.post("/auth/register", response_model=User)
+    async def register(body: RegisterRequest) -> User:
+        state: AppState = app.state.medagent
+        try:
+            return await state.user_store.create_user(body.username, hash_password(body.password))
+        except AuthError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post("/auth/token", response_model=Token)
+    async def login(form: OAuth2PasswordRequestForm = Depends()) -> Token:
+        state: AppState = app.state.medagent
+        record = await state.user_store.get_by_username(form.username)
+        if record is None or not verify_password(form.password, record[1]):
+            raise HTTPException(status_code=401, detail="Incorrect username or password")
+        token = create_access_token(
+            form.username,
+            state.settings.jwt_secret_key,
+            state.settings.jwt_algorithm,
+            state.settings.jwt_expire_minutes,
+        )
+        return Token(access_token=token)
+
     @app.post("/patients", response_model=PatientContext)
-    async def create_patient(context: PatientContext) -> PatientContext:
+    async def create_patient(
+        context: PatientContext, _user: User = Depends(get_current_user)
+    ) -> PatientContext:
         state: AppState = app.state.medagent
         await state.patient_store.save_patient(context)
         return context
 
     @app.get("/patients/{patient_id}", response_model=PatientContext)
-    async def get_patient(patient_id: str) -> PatientContext:
+    async def get_patient(
+        patient_id: str, _user: User = Depends(get_current_user)
+    ) -> PatientContext:
         state: AppState = app.state.medagent
         patient = await state.patient_store.get_patient(patient_id)
         if patient is None:
@@ -106,7 +147,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return patient
 
     @app.post("/patients/{patient_id}/assess")
-    async def assess_patient(patient_id: str, body: AssessRequest) -> dict[str, str]:
+    async def assess_patient(
+        patient_id: str, body: AssessRequest, _user: User = Depends(get_current_user)
+    ) -> dict[str, str]:
         # REST has no interactive approval channel, so it auto-saves. The
         # human-in-the-loop checkpoint lives in the WebSocket chat below.
         state: AppState = app.state.medagent
@@ -120,7 +163,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {"report": report}
 
     @app.post("/patients/{patient_id}/followup")
-    async def followup_visit(patient_id: str, body: AssessRequest) -> dict[str, str]:
+    async def followup_visit(
+        patient_id: str, body: AssessRequest, _user: User = Depends(get_current_user)
+    ) -> dict[str, str]:
         state: AppState = app.state.medagent
         report, patient = await run_followup(
             state.triage,
@@ -135,7 +180,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {"report": report}
 
     @app.post("/drug-check")
-    async def drug_check(body: DrugCheckRequest) -> dict[str, str]:
+    async def drug_check(
+        body: DrugCheckRequest, _user: User = Depends(get_current_user)
+    ) -> dict[str, str]:
         state: AppState = app.state.medagent
         answer = await run_drug_check(
             state.drug_safety, state.patient_store, body.patient_id, body.new_drug
@@ -153,6 +200,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         and saved in its place.
         """
         state: AppState = app.state.medagent
+        user = await get_current_user_ws(websocket)
+        if user is None:
+            await websocket.close(code=1008, reason="Not authenticated")
+            return
+
         await websocket.accept()
         try:
             while True:

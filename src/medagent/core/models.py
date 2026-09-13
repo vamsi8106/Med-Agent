@@ -98,3 +98,10 @@ class AgentResult(BaseModel):
     summary: str
     evidence: list[ClinicalEvidence] = Field(default_factory=list)
     interactions: list[DrugInteraction] = Field(default_factory=list)
+
+
+class User(BaseModel):
+    id: str
+    username: str
+    role: str = "doctor"
+    created_at: datetime | None = None

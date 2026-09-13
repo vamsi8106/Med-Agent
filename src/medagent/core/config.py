@@ -26,6 +26,10 @@ class Settings(BaseSettings):
     langchain_api_key: str | None = None
     langchain_project: str = "medagent"
 
+    jwt_secret_key: str = "dev-insecure-secret-change-me-in-prod-please"
+    jwt_algorithm: str = "HS256"
+    jwt_expire_minutes: int = 60
+
 
 _settings: Settings | None = None
 

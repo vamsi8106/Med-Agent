@@ -19,3 +19,7 @@ class MemoryError(MedAgentError):
 
 class MCPError(MedAgentError):
     """Raised when an MCP server call fails."""
+
+
+class AuthError(MedAgentError):
+    """Raised when authentication or authorization fails."""
