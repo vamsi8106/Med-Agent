@@ -4,7 +4,6 @@ from medagent.core.interfaces import BaseAgent, BaseLLMProvider
 from medagent.core.models import AgentResult, ClinicalEvidence, Message, PatientContext
 from medagent.core.types import AgentRole
 from medagent.infra.logging import get_logger
-from medagent.memory.session import SessionMemory
 from medagent.tools.mcp.healthcare import HealthcareMCPClient
 
 logger = get_logger(__name__)
@@ -23,15 +22,9 @@ def _resolve_condition(context: PatientContext, message: str) -> str:
 
 
 class TrialFinderAgent(BaseAgent):
-    def __init__(
-        self,
-        llm: BaseLLMProvider,
-        healthcare_client: HealthcareMCPClient,
-        session: SessionMemory | None = None,
-    ) -> None:
+    def __init__(self, llm: BaseLLMProvider, healthcare_client: HealthcareMCPClient) -> None:
         self._llm = llm
         self._healthcare_client = healthcare_client
-        self._session = session or SessionMemory()
 
     async def run(self, context: PatientContext, message: str) -> str:
         result = await self.find_trials(context, message)
@@ -40,8 +33,6 @@ class TrialFinderAgent(BaseAgent):
     async def find_trials(
         self, context: PatientContext, message: str, phase: str | None = None
     ) -> AgentResult:
-        self._session.add_message(Message(role="user", content=message))
-
         condition = _resolve_condition(context, message)
         async with self._healthcare_client as client:
             content = await client.clinical_trials_search(condition, phase=phase)
@@ -69,5 +60,4 @@ class TrialFinderAgent(BaseAgent):
         )
 
         summary = f"{response.content}\n\nCitations:\n- {condition} (source: ClinicalTrials.gov)"
-        self._session.add_message(Message(role="assistant", content=summary))
         return AgentResult(role=AgentRole.TRIAL_FINDER, summary=summary, evidence=evidence)
