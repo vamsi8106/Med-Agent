@@ -1,4 +1,4 @@
-.PHONY: install test unit-tests lint-check lint-fix format-fix format-check pre-commit ci-check serve db-upgrade db-downgrade db-revision
+.PHONY: install test unit-tests lint-check lint-fix format-fix format-check pre-commit ci-check serve db-upgrade db-downgrade db-revision ingest-guideline
 
 install:
 	uv sync
@@ -37,3 +37,6 @@ db-downgrade:
 
 db-revision:
 	uv run alembic revision -m "$(name)"
+
+ingest-guideline:
+	uv run python -m medagent.cli ingest-guideline --file "$(file)" --source "$(source)"
