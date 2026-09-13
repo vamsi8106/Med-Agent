@@ -59,7 +59,7 @@ class Token(BaseModel):
 class AppState:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
-        self.persistent_store = PersistentStore(settings.database_path)
+        self.persistent_store = PersistentStore(settings.postgres_dsn)
         self.patient_store = PatientStore(self.persistent_store)
         self.user_store = UserStore(self.persistent_store)
 
@@ -75,7 +75,12 @@ class AppState:
         self.report = ReportAgent()
 
     async def init(self) -> None:
+        # Schema is owned by Alembic ("alembic upgrade head"), run before
+        # startup in any real deployment; this just opens the connection pool.
         await self.persistent_store.init_schema()
+
+    async def close(self) -> None:
+        await self.persistent_store.close()
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -90,6 +95,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.medagent = state
         logger.info("medagent_startup_complete")
         yield
+        await state.close()
+        logger.info("medagent_shutdown_complete")
 
     app = FastAPI(title="MedAgent", lifespan=lifespan)
     app.add_middleware(ObservabilityMiddleware)

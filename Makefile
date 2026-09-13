@@ -1,4 +1,4 @@
-.PHONY: install test unit-tests lint-check lint-fix format-fix pre-commit serve
+.PHONY: install test unit-tests lint-check lint-fix format-fix pre-commit serve db-upgrade db-downgrade db-revision
 
 install:
 	uv sync
@@ -22,3 +22,12 @@ pre-commit: format-fix lint-fix lint-check unit-tests
 
 serve:
 	uv run uvicorn medagent.app:app --reload
+
+db-upgrade:
+	uv run alembic upgrade head
+
+db-downgrade:
+	uv run alembic downgrade -1
+
+db-revision:
+	uv run alembic revision -m "$(name)"

@@ -1,4 +1,4 @@
-from pathlib import Path
+import tempfile
 from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
@@ -13,18 +13,18 @@ class _FakeEmbeddingModel:
         return [[0.0, 0.0] for _ in texts]
 
 
-def _settings(tmp_path: Path) -> Settings:
+def _settings(pg_dsn: str) -> Settings:
     return Settings(
         _env_file=None,
         llm_provider="mock",
-        database_path=str(tmp_path / "test.db"),
-        chroma_persist_dir=str(tmp_path / "chroma"),
+        postgres_dsn=pg_dsn,
+        chroma_persist_dir=tempfile.mkdtemp(prefix="medagent-test-chroma-"),
     )
 
 
-def _make_client(tmp_path: Path) -> TestClient:
+def _make_client(pg_dsn: str) -> TestClient:
     with patch("medagent.app.EmbeddingModel", _FakeEmbeddingModel):
-        app = create_app(_settings(tmp_path))
+        app = create_app(_settings(pg_dsn))
     return TestClient(app)
 
 
@@ -39,22 +39,22 @@ def _auth_headers(client: TestClient, username: str = "dr.alpha") -> dict[str, s
     return {"Authorization": f"Bearer {token}"}
 
 
-def test_health_endpoint(tmp_path: Path) -> None:
-    with _make_client(tmp_path) as client:
+def test_health_endpoint(pg_dsn: str) -> None:
+    with _make_client(pg_dsn) as client:
         response = client.get("/health")
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
 
 
-def test_metrics_endpoint(tmp_path: Path) -> None:
-    with _make_client(tmp_path) as client:
+def test_metrics_endpoint(pg_dsn: str) -> None:
+    with _make_client(pg_dsn) as client:
         response = client.get("/metrics")
     assert response.status_code == 200
     assert b"medagent_http_requests_total" in response.content
 
 
-def test_register_and_login_returns_token(tmp_path: Path) -> None:
-    with _make_client(tmp_path) as client:
+def test_register_and_login_returns_token(pg_dsn: str) -> None:
+    with _make_client(pg_dsn) as client:
         register_resp = client.post(
             "/auth/register", json={"username": "dr.beta", "password": "s3cret!"}
         )
@@ -66,28 +66,28 @@ def test_register_and_login_returns_token(tmp_path: Path) -> None:
         assert login_resp.json()["token_type"] == "bearer"
 
 
-def test_login_with_wrong_password_returns_401(tmp_path: Path) -> None:
-    with _make_client(tmp_path) as client:
+def test_login_with_wrong_password_returns_401(pg_dsn: str) -> None:
+    with _make_client(pg_dsn) as client:
         client.post("/auth/register", json={"username": "dr.gamma", "password": "s3cret!"})
         response = client.post("/auth/token", data={"username": "dr.gamma", "password": "wrong"})
     assert response.status_code == 401
 
 
-def test_duplicate_registration_returns_409(tmp_path: Path) -> None:
-    with _make_client(tmp_path) as client:
+def test_duplicate_registration_returns_409(pg_dsn: str) -> None:
+    with _make_client(pg_dsn) as client:
         client.post("/auth/register", json={"username": "dr.delta", "password": "s3cret!"})
         response = client.post("/auth/register", json={"username": "dr.delta", "password": "other"})
     assert response.status_code == 409
 
 
-def test_patient_endpoints_require_auth(tmp_path: Path) -> None:
-    with _make_client(tmp_path) as client:
+def test_patient_endpoints_require_auth(pg_dsn: str) -> None:
+    with _make_client(pg_dsn) as client:
         response = client.get("/patients/P-TEST-800")
     assert response.status_code == 401
 
 
-def test_create_and_get_patient_with_auth(tmp_path: Path) -> None:
-    with _make_client(tmp_path) as client:
+def test_create_and_get_patient_with_auth(pg_dsn: str) -> None:
+    with _make_client(pg_dsn) as client:
         headers = _auth_headers(client)
         payload = {"id": "P-TEST-800", "name": "Patient Alpha", "age": 55, "sex": "F"}
         create_resp = client.post("/patients", json=payload, headers=headers)
@@ -99,15 +99,15 @@ def test_create_and_get_patient_with_auth(tmp_path: Path) -> None:
     assert get_resp.json()["name"] == "Patient Alpha"
 
 
-def test_get_missing_patient_returns_404(tmp_path: Path) -> None:
-    with _make_client(tmp_path) as client:
+def test_get_missing_patient_returns_404(pg_dsn: str) -> None:
+    with _make_client(pg_dsn) as client:
         headers = _auth_headers(client)
         response = client.get("/patients/P-MISSING", headers=headers)
     assert response.status_code == 404
 
 
-def test_assess_endpoint_returns_report(tmp_path: Path) -> None:
-    with _make_client(tmp_path) as client:
+def test_assess_endpoint_returns_report(pg_dsn: str) -> None:
+    with _make_client(pg_dsn) as client:
         headers = _auth_headers(client)
         client.post(
             "/patients",
@@ -123,8 +123,8 @@ def test_assess_endpoint_returns_report(tmp_path: Path) -> None:
     assert response.json() == {"report": "# Report"}
 
 
-def test_drug_check_endpoint(tmp_path: Path) -> None:
-    with _make_client(tmp_path) as client:
+def test_drug_check_endpoint(pg_dsn: str) -> None:
+    with _make_client(pg_dsn) as client:
         headers = _auth_headers(client)
         with patch("medagent.app.run_drug_check", AsyncMock(return_value="No major concerns.")):
             response = client.post(
@@ -137,8 +137,8 @@ def test_drug_check_endpoint(tmp_path: Path) -> None:
     assert response.json() == {"answer": "No major concerns."}
 
 
-def test_websocket_without_token_is_rejected(tmp_path: Path) -> None:
-    with _make_client(tmp_path) as client:
+def test_websocket_without_token_is_rejected(pg_dsn: str) -> None:
+    with _make_client(pg_dsn) as client:
         try:
             with client.websocket_connect("/ws/P-TEST-999"):
                 pass
@@ -148,9 +148,9 @@ def test_websocket_without_token_is_rejected(tmp_path: Path) -> None:
             raise AssertionError("expected the connection to be rejected")
 
 
-def test_websocket_chat_requires_approval_before_saving(tmp_path: Path) -> None:
+def test_websocket_chat_requires_approval_before_saving(pg_dsn: str) -> None:
     patient = PatientContext(id="P-TEST-803", name="Patient Gamma", age=70, sex="M")
-    with _make_client(tmp_path) as client:
+    with _make_client(pg_dsn) as client:
         token = _register_and_login(client)
         fake_followup = AsyncMock(return_value=("Follow-up report", patient))
         with patch("medagent.app.run_followup", fake_followup):
@@ -168,9 +168,9 @@ def test_websocket_chat_requires_approval_before_saving(tmp_path: Path) -> None:
     assert get_resp.status_code == 200
 
 
-def test_websocket_chat_reject_does_not_save(tmp_path: Path) -> None:
+def test_websocket_chat_reject_does_not_save(pg_dsn: str) -> None:
     patient = PatientContext(id="P-TEST-804", name="Patient Delta", age=65, sex="F")
-    with _make_client(tmp_path) as client:
+    with _make_client(pg_dsn) as client:
         token = _register_and_login(client)
         fake_followup = AsyncMock(return_value=("Draft report", patient))
         with patch("medagent.app.run_followup", fake_followup):
@@ -187,9 +187,9 @@ def test_websocket_chat_reject_does_not_save(tmp_path: Path) -> None:
     assert get_resp.status_code == 404
 
 
-def test_websocket_chat_edited_text_is_saved_instead(tmp_path: Path) -> None:
+def test_websocket_chat_edited_text_is_saved_instead(pg_dsn: str) -> None:
     patient = PatientContext(id="P-TEST-805", name="Patient Epsilon", age=45, sex="F")
-    with _make_client(tmp_path) as client:
+    with _make_client(pg_dsn) as client:
         token = _register_and_login(client)
         fake_followup = AsyncMock(return_value=("Draft report", patient))
         with patch("medagent.app.run_followup", fake_followup):

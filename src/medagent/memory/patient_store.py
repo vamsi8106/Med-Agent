@@ -1,4 +1,4 @@
-"""SQLite-backed CRUD for patient records: patients, medications, lab_results."""
+"""Postgres-backed CRUD for patient records: patients, medications, lab_results."""
 
 import json
 import uuid
@@ -15,19 +15,17 @@ class PatientStore(BaseMemory):
         self._store = store
 
     async def get_patient(self, patient_id: str) -> PatientContext | None:
-        async with self._store.connect() as db:
-            patient_row = await (
-                await db.execute("SELECT * FROM patients WHERE id = ?", (patient_id,))
-            ).fetchone()
+        async with self._store.connect() as conn:
+            patient_row = await conn.fetchrow("SELECT * FROM patients WHERE id = $1", patient_id)
             if patient_row is None:
                 return None
 
-            med_rows = await (
-                await db.execute("SELECT * FROM medications WHERE patient_id = ?", (patient_id,))
-            ).fetchall()
-            lab_rows = await (
-                await db.execute("SELECT * FROM lab_results WHERE patient_id = ?", (patient_id,))
-            ).fetchall()
+            med_rows = await conn.fetch(
+                "SELECT * FROM medications WHERE patient_id = $1", patient_id
+            )
+            lab_rows = await conn.fetch(
+                "SELECT * FROM lab_results WHERE patient_id = $1", patient_id
+            )
 
         return PatientContext(
             id=patient_row["id"],
@@ -60,7 +58,7 @@ class PatientStore(BaseMemory):
                     unit=row["unit"],
                     reference_low=row["reference_low"],
                     reference_high=row["reference_high"],
-                    is_abnormal=bool(row["is_abnormal"]),
+                    is_abnormal=row["is_abnormal"],
                     collected_at=row["collected_at"],
                 )
                 for row in lab_rows
@@ -73,90 +71,82 @@ class PatientStore(BaseMemory):
         if not context.id:
             raise MedAgentMemoryError("PatientContext.id is required to save a patient record")
 
-        now = datetime.now(UTC).isoformat()
-        async with self._store.connect() as db:
-            existing = await (
-                await db.execute("SELECT id FROM patients WHERE id = ?", (context.id,))
-            ).fetchone()
-            created_at = (context.created_at or now) if existing is None else None
+        now = datetime.now(UTC)
+        async with self._store.connect() as conn, conn.transaction():
+            existing = await conn.fetchrow(
+                "SELECT id, created_at FROM patients WHERE id = $1", context.id
+            )
+            created_at = (
+                existing["created_at"] if existing is not None else (context.created_at or now)
+            )
 
             if existing is None:
-                await db.execute(
+                await conn.execute(
                     """INSERT INTO patients
                     (id, name, age, sex, weight_kg, height_cm, conditions, allergies,
                      created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (
-                        context.id,
-                        context.name,
-                        context.age,
-                        context.sex,
-                        context.weight_kg,
-                        context.height_cm,
-                        json.dumps(context.conditions),
-                        json.dumps(context.allergies),
-                        str(created_at),
-                        now,
-                    ),
+                    VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb, $9, $10)""",
+                    context.id,
+                    context.name,
+                    context.age,
+                    context.sex,
+                    context.weight_kg,
+                    context.height_cm,
+                    json.dumps(context.conditions),
+                    json.dumps(context.allergies),
+                    created_at,
+                    now,
                 )
             else:
-                await db.execute(
-                    """UPDATE patients SET name = ?, age = ?, sex = ?, weight_kg = ?,
-                    height_cm = ?, conditions = ?, allergies = ?, updated_at = ?
-                    WHERE id = ?""",
-                    (
-                        context.name,
-                        context.age,
-                        context.sex,
-                        context.weight_kg,
-                        context.height_cm,
-                        json.dumps(context.conditions),
-                        json.dumps(context.allergies),
-                        now,
-                        context.id,
-                    ),
+                await conn.execute(
+                    """UPDATE patients SET name = $1, age = $2, sex = $3, weight_kg = $4,
+                    height_cm = $5, conditions = $6::jsonb, allergies = $7::jsonb, updated_at = $8
+                    WHERE id = $9""",
+                    context.name,
+                    context.age,
+                    context.sex,
+                    context.weight_kg,
+                    context.height_cm,
+                    json.dumps(context.conditions),
+                    json.dumps(context.allergies),
+                    now,
+                    context.id,
                 )
 
-            await db.execute("DELETE FROM medications WHERE patient_id = ?", (context.id,))
+            await conn.execute("DELETE FROM medications WHERE patient_id = $1", context.id)
             for med in context.medications:
-                await db.execute(
+                await conn.execute(
                     """INSERT INTO medications
                     (id, patient_id, name, brand_name, dose, frequency, route,
                      start_date, end_date, status, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (
-                        med.id or str(uuid.uuid4()),
-                        context.id,
-                        med.name,
-                        med.brand_name,
-                        med.dose,
-                        med.frequency,
-                        med.route,
-                        med.start_date.isoformat() if med.start_date else None,
-                        med.end_date.isoformat() if med.end_date else None,
-                        med.status,
-                        now,
-                    ),
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)""",
+                    med.id or str(uuid.uuid4()),
+                    context.id,
+                    med.name,
+                    med.brand_name,
+                    med.dose,
+                    med.frequency,
+                    med.route,
+                    med.start_date,
+                    med.end_date,
+                    med.status,
+                    now,
                 )
 
-            await db.execute("DELETE FROM lab_results WHERE patient_id = ?", (context.id,))
+            await conn.execute("DELETE FROM lab_results WHERE patient_id = $1", context.id)
             for lab in context.lab_results:
-                await db.execute(
+                await conn.execute(
                     """INSERT INTO lab_results
                     (id, patient_id, test_name, value, unit, reference_low,
                      reference_high, is_abnormal, collected_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (
-                        lab.id or str(uuid.uuid4()),
-                        context.id,
-                        lab.test_name,
-                        lab.value,
-                        lab.unit,
-                        lab.reference_low,
-                        lab.reference_high,
-                        int(lab.is_abnormal),
-                        lab.collected_at.isoformat(),
-                    ),
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)""",
+                    lab.id or str(uuid.uuid4()),
+                    context.id,
+                    lab.test_name,
+                    lab.value,
+                    lab.unit,
+                    lab.reference_low,
+                    lab.reference_high,
+                    lab.is_abnormal,
+                    lab.collected_at,
                 )
-
-            await db.commit()

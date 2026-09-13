@@ -19,7 +19,7 @@ class Settings(BaseSettings):
     research_mcp_command: str = "node"
     research_mcp_args: list[str] = ["./vendor/med-research-mcp-suite/dist/index.js"]
 
-    database_path: str = "medagent.db"
+    postgres_dsn: str = "postgresql://medagent:medagent@localhost:5432/medagent"
     chroma_persist_dir: str = ".chroma"
 
     langchain_tracing_v2: bool = False

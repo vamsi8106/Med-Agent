@@ -1,5 +1,3 @@
-from pathlib import Path
-
 import pytest
 
 from medagent.auth.security import hash_password
@@ -8,14 +6,12 @@ from medagent.core.exceptions import AuthError
 from medagent.memory.persistent import PersistentStore
 
 
-async def _make_store(tmp_path: Path) -> UserStore:
-    persistent = PersistentStore(str(tmp_path / "test.db"))
-    await persistent.init_schema()
-    return UserStore(persistent)
+def _make_store(pg_dsn: str) -> UserStore:
+    return UserStore(PersistentStore(pg_dsn))
 
 
-async def test_create_and_get_user_round_trips(tmp_path: Path) -> None:
-    store = await _make_store(tmp_path)
+async def test_create_and_get_user_round_trips(pg_dsn: str) -> None:
+    store = _make_store(pg_dsn)
     user = await store.create_user("dr.alpha", hash_password("s3cret!"))
 
     assert user.username == "dr.alpha"
@@ -28,13 +24,13 @@ async def test_create_and_get_user_round_trips(tmp_path: Path) -> None:
     assert hashed != "s3cret!"
 
 
-async def test_get_missing_user_returns_none(tmp_path: Path) -> None:
-    store = await _make_store(tmp_path)
+async def test_get_missing_user_returns_none(pg_dsn: str) -> None:
+    store = _make_store(pg_dsn)
     assert await store.get_by_username("nobody") is None
 
 
-async def test_duplicate_username_raises_auth_error(tmp_path: Path) -> None:
-    store = await _make_store(tmp_path)
+async def test_duplicate_username_raises_auth_error(pg_dsn: str) -> None:
+    store = _make_store(pg_dsn)
     await store.create_user("dr.alpha", hash_password("s3cret!"))
 
     with pytest.raises(AuthError):

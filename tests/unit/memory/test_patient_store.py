@@ -1,24 +1,21 @@
 from datetime import UTC, datetime
-from pathlib import Path
 
 from medagent.core.models import LabResult, Medication, PatientContext
 from medagent.memory.patient_store import PatientStore
 from medagent.memory.persistent import PersistentStore
 
 
-async def _make_store(tmp_path: Path) -> PatientStore:
-    persistent = PersistentStore(str(tmp_path / "test.db"))
-    await persistent.init_schema()
-    return PatientStore(persistent)
+def _make_store(pg_dsn: str) -> PatientStore:
+    return PatientStore(PersistentStore(pg_dsn))
 
 
-async def test_get_missing_patient_returns_none(tmp_path: Path) -> None:
-    store = await _make_store(tmp_path)
+async def test_get_missing_patient_returns_none(pg_dsn: str) -> None:
+    store = _make_store(pg_dsn)
     assert await store.get_patient("P-TEST-999") is None
 
 
-async def test_save_then_get_round_trips_full_record(tmp_path: Path) -> None:
-    store = await _make_store(tmp_path)
+async def test_save_then_get_round_trips_full_record(pg_dsn: str) -> None:
+    store = _make_store(pg_dsn)
     context = PatientContext(
         id="P-TEST-001",
         name="Patient Alpha",
@@ -50,8 +47,8 @@ async def test_save_then_get_round_trips_full_record(tmp_path: Path) -> None:
     assert loaded.lab_results[0].test_name == "HbA1c"
 
 
-async def test_save_twice_updates_existing_record(tmp_path: Path) -> None:
-    store = await _make_store(tmp_path)
+async def test_save_twice_updates_existing_record(pg_dsn: str) -> None:
+    store = _make_store(pg_dsn)
     context = PatientContext(id="P-TEST-002", name="Patient Beta", age=40, sex="M")
     await store.save_patient(context)
 
