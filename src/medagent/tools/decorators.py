@@ -2,7 +2,7 @@
 
 import inspect
 from collections.abc import Awaitable, Callable
-from typing import Any, get_type_hints
+from typing import Any, get_args, get_origin, get_type_hints
 
 from medagent.tools.base import BaseTool, ToolResult
 
@@ -17,6 +17,13 @@ _TYPE_TO_JSON_SCHEMA: dict[type, dict[str, Any]] = {
 
 
 def _schema_for_type(annotation: Any) -> dict[str, Any]:
+    origin = get_origin(annotation)
+    if origin in (list, tuple, set):
+        args = get_args(annotation)
+        item_schema = _schema_for_type(args[0]) if args else {}
+        return {"type": "array", "items": item_schema}
+    if origin is dict:
+        return {"type": "object"}
     return _TYPE_TO_JSON_SCHEMA.get(annotation, {"type": "string"})
 
 
