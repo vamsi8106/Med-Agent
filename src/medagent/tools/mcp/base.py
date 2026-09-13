@@ -7,6 +7,7 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
 from medagent.core.exceptions import MCPError
+from medagent.infra.circuit_breaker import CircuitBreaker
 from medagent.infra.logging import get_logger
 from medagent.infra.retry import retry
 
@@ -14,12 +15,25 @@ logger = get_logger(__name__)
 
 
 class MCPStdioClient:
-    """Manages a stdio-transport MCP server subprocess and its client session."""
+    """Manages a stdio-transport MCP server subprocess and its client session.
 
-    def __init__(self, command: str, args: list[str]) -> None:
+    Calls go through a CircuitBreaker: once a server fails repeatedly, further
+    calls fail fast with MCPError instead of hanging/retrying against a
+    server that's down, until the breaker's recovery timeout elapses.
+    """
+
+    def __init__(
+        self,
+        command: str,
+        args: list[str],
+        circuit_breaker: CircuitBreaker | None = None,
+    ) -> None:
         self._server_params = StdioServerParameters(command=command, args=args)
         self._exit_stack: AsyncExitStack | None = None
         self._session: ClientSession | None = None
+        self._breaker = circuit_breaker or CircuitBreaker(
+            failure_threshold=5, recovery_timeout=30.0
+        )
 
     async def __aenter__(self) -> "MCPStdioClient":
         self._exit_stack = AsyncExitStack()
@@ -34,8 +48,11 @@ class MCPStdioClient:
         self._session = None
         self._exit_stack = None
 
-    @retry(max_attempts=3, exceptions=(Exception,))
     async def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
+        return await self._breaker.call(self._call_tool_with_retry, name, arguments)
+
+    @retry(max_attempts=3, exceptions=(Exception,))
+    async def _call_tool_with_retry(self, name: str, arguments: dict[str, Any]) -> Any:
         if self._session is None:
             raise MCPError("MCP session is not open; use 'async with' before calling tools")
         try:
