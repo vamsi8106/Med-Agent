@@ -10,9 +10,12 @@ from mcp.client.stdio import stdio_client
 from medagent.core.exceptions import MCPError
 from medagent.infra.circuit_breaker import CircuitBreaker
 from medagent.infra.logging import get_logger
+from medagent.infra.rate_limiter import TokenBucket
 from medagent.infra.retry import retry
+from medagent.infra.tracing import get_tracer
 
 logger = get_logger(__name__)
+tracer = get_tracer(__name__)
 
 
 class MCPStdioClient:
@@ -23,6 +26,8 @@ class MCPStdioClient:
     server that's down, until the breaker's recovery timeout elapses. Both
     connection setup (spawning the subprocess) and each tool call are bounded
     by timeout_seconds so a hung server/process can't stall a request forever.
+    A per-instance TokenBucket throttles outbound calls, since the free
+    medical APIs behind these servers have low rate ceilings.
     """
 
     def __init__(
@@ -31,6 +36,8 @@ class MCPStdioClient:
         args: list[str],
         circuit_breaker: CircuitBreaker | None = None,
         timeout_seconds: float = 30.0,
+        rate_limit_per_second: float = 5.0,
+        rate_limit_capacity: int = 10,
     ) -> None:
         self._server_params = StdioServerParameters(command=command, args=args)
         self._exit_stack: AsyncExitStack | None = None
@@ -39,6 +46,7 @@ class MCPStdioClient:
         self._breaker = circuit_breaker or CircuitBreaker(
             failure_threshold=5, recovery_timeout=30.0
         )
+        self._bucket = TokenBucket(rate_limit_per_second, rate_limit_capacity)
 
     async def __aenter__(self) -> "MCPStdioClient":
         self._exit_stack = AsyncExitStack()
@@ -64,12 +72,17 @@ class MCPStdioClient:
         self._exit_stack = None
 
     async def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
-        return await self._breaker.call(self._call_tool_with_retry, name, arguments)
+        with tracer.start_as_current_span(f"mcp.call_tool.{name}") as span:
+            span.set_attribute("mcp.command", self._server_params.command)
+            span.set_attribute("mcp.tool_name", name)
+            return await self._breaker.call(self._call_tool_with_retry, name, arguments)
 
     @retry(max_attempts=3, exceptions=(Exception,))
     async def _call_tool_with_retry(self, name: str, arguments: dict[str, Any]) -> Any:
         if self._session is None:
             raise MCPError("MCP session is not open; use 'async with' before calling tools")
+
+        await self._bucket.acquire()
         try:
             result = await asyncio.wait_for(
                 self._session.call_tool(name, arguments), timeout=self._timeout_seconds

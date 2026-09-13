@@ -13,6 +13,8 @@ class ResearchMCPClient(MCPStdioClient):
             command=settings.research_mcp_command,
             args=settings.research_mcp_args,
             timeout_seconds=settings.mcp_timeout_seconds,
+            rate_limit_per_second=settings.mcp_rate_limit_per_second,
+            rate_limit_capacity=settings.mcp_rate_limit_capacity,
         )
 
     async def comprehensive_analysis(self, drug_name: str) -> Any:

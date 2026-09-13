@@ -27,4 +27,7 @@ def test_registry_schemas() -> None:
     registry = ToolRegistry()
     registry.register(ping)
     schemas = registry.schemas()
-    assert schemas[0]["name"] == "ping"
+    assert schemas[0] == {
+        "type": "function",
+        "function": {"name": "ping", "description": "Ping.", "parameters": ping.parameters},
+    }

@@ -13,6 +13,8 @@ class HealthcareMCPClient(MCPStdioClient):
             command=settings.healthcare_mcp_command,
             args=settings.healthcare_mcp_args,
             timeout_seconds=settings.mcp_timeout_seconds,
+            rate_limit_per_second=settings.mcp_rate_limit_per_second,
+            rate_limit_capacity=settings.mcp_rate_limit_capacity,
         )
 
     async def search_clinical_guidelines(self, query: str) -> Any:

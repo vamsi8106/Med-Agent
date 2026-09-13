@@ -19,6 +19,10 @@ class Settings(BaseSettings):
     research_mcp_command: str = "node"
     research_mcp_args: list[str] = ["./vendor/med-research-mcp-suite/dist/index.js"]
     mcp_timeout_seconds: float = 30.0
+    # Free medical APIs behind these MCP servers have low rate ceilings --
+    # this throttles outbound calls per server before they ever hit retry.
+    mcp_rate_limit_per_second: float = 5.0
+    mcp_rate_limit_capacity: int = 10
 
     llm_timeout_seconds: float = 30.0
 

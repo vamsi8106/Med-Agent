@@ -21,11 +21,16 @@ class ToolRegistry:
         return list(self._tools.values())
 
     def schemas(self) -> list[dict[str, object]]:
+        """OpenAI/Groq function-calling tool schema -- the shape every
+        BaseLLMProvider.complete(tools=...) implementation actually expects."""
         return [
             {
-                "name": t.name,
-                "description": t.description,
-                "parameters": getattr(t, "parameters", {}),
+                "type": "function",
+                "function": {
+                    "name": t.name,
+                    "description": t.description,
+                    "parameters": getattr(t, "parameters", {}),
+                },
             }
             for t in self._tools.values()
         ]
