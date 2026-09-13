@@ -37,9 +37,10 @@ async def test_followup_recalls_and_runs_assessment() -> None:
         guideline_retriever=guideline_retriever,
     )
 
-    result = await run_followup(
+    report, patient = await run_followup(
         TriageAgent(), AsyncMock(), evidence, ReportAgent(), memory, "P-TEST-600", "follow-up visit"
     )
 
-    assert "Patient Alpha" in result
-    memory.save_patient.assert_awaited_once()
+    assert "Patient Alpha" in report
+    assert patient.id == "P-TEST-600"
+    memory.save_patient.assert_not_awaited()

@@ -1,7 +1,11 @@
 """New-patient workflow: triage -> parallel(drug_safety, evidence) -> report.
 
-Depends only on core/ and agents/ per the dependency rules; persistence is
-injected as core.interfaces.BaseMemory rather than importing memory/ directly.
+Depends only on core/ and agents/ per the dependency rules. Does NOT persist
+the patient record itself: generation and persistence are deliberately
+separated so a human-in-the-loop checkpoint can sit between them (see
+app.py's WebSocket chat handler, which holds the report for doctor
+approval/edit/rejection before saving). Callers that want unconditional
+auto-save (e.g. the plain REST endpoints) save explicitly after this returns.
 """
 
 import asyncio
@@ -10,7 +14,6 @@ from medagent.agents.drug_safety_agent import DrugSafetyAgent
 from medagent.agents.evidence_agent import EvidenceAgent
 from medagent.agents.report_agent import ReportAgent
 from medagent.agents.triage_agent import TriageAgent
-from medagent.core.interfaces import BaseMemory
 from medagent.core.models import AgentResult, PatientContext
 from medagent.core.types import AgentRole
 from medagent.infra.logging import get_logger
@@ -23,7 +26,6 @@ async def run_patient_assessment(
     drug_safety: DrugSafetyAgent,
     evidence: EvidenceAgent,
     report: ReportAgent,
-    memory: BaseMemory,
     context: PatientContext,
     message: str,
 ) -> str:
@@ -37,6 +39,4 @@ async def run_patient_assessment(
 
     results: list[AgentResult] = list(await asyncio.gather(*tasks)) if tasks else []
 
-    report_markdown = await report.generate(context, results)
-    await memory.save_patient(context)
-    return report_markdown
+    return await report.generate(context, results)

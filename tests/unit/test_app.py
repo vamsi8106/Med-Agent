@@ -82,11 +82,59 @@ def test_drug_check_endpoint(tmp_path: Path) -> None:
     assert response.json() == {"answer": "No major concerns."}
 
 
-def test_websocket_chat_returns_report(tmp_path: Path) -> None:
+def test_websocket_chat_requires_approval_before_saving(tmp_path: Path) -> None:
+    from medagent.core.models import PatientContext
+
+    patient = PatientContext(id="P-TEST-803", name="Patient Gamma", age=70, sex="M")
     with _make_client(tmp_path) as client:
-        with patch("medagent.app.run_followup", AsyncMock(return_value="Follow-up report")):
+        fake_followup = AsyncMock(return_value=("Follow-up report", patient))
+        with patch("medagent.app.run_followup", fake_followup):
             with client.websocket_connect("/ws/P-TEST-803") as websocket:
                 websocket.send_text("any updates?")
-                message = websocket.receive_text()
+                pending = websocket.receive_json()
+                assert pending == {"type": "pending_approval", "report": "Follow-up report"}
 
-    assert message == "Follow-up report"
+                websocket.send_text("approve")
+                saved = websocket.receive_json()
+                assert saved == {"type": "saved", "report": "Follow-up report"}
+
+        get_resp = client.get("/patients/P-TEST-803")
+    assert get_resp.status_code == 200
+
+
+def test_websocket_chat_reject_does_not_save(tmp_path: Path) -> None:
+    from medagent.core.models import PatientContext
+
+    patient = PatientContext(id="P-TEST-804", name="Patient Delta", age=65, sex="F")
+    with _make_client(tmp_path) as client:
+        fake_followup = AsyncMock(return_value=("Draft report", patient))
+        with patch("medagent.app.run_followup", fake_followup):
+            with client.websocket_connect("/ws/P-TEST-804") as websocket:
+                websocket.send_text("any updates?")
+                websocket.receive_json()
+
+                websocket.send_text("reject")
+                decision = websocket.receive_json()
+                assert decision == {"type": "rejected"}
+
+        get_resp = client.get("/patients/P-TEST-804")
+    assert get_resp.status_code == 404
+
+
+def test_websocket_chat_edited_text_is_saved_instead(tmp_path: Path) -> None:
+    from medagent.core.models import PatientContext
+
+    patient = PatientContext(id="P-TEST-805", name="Patient Epsilon", age=45, sex="F")
+    with _make_client(tmp_path) as client:
+        fake_followup = AsyncMock(return_value=("Draft report", patient))
+        with patch("medagent.app.run_followup", fake_followup):
+            with client.websocket_connect("/ws/P-TEST-805") as websocket:
+                websocket.send_text("any updates?")
+                websocket.receive_json()
+
+                websocket.send_text("Edited: monitor renal function closely.")
+                saved = websocket.receive_json()
+                assert saved == {
+                    "type": "saved",
+                    "report": "Edited: monitor renal function closely.",
+                }

@@ -73,7 +73,6 @@ async def test_gate_complex_patient_multi_agent_structured_report() -> None:
         guideline_retriever=guideline_retriever,
     )
     report = ReportAgent()
-    memory = AsyncMock()
 
     patient = _complex_patient()
     result = await run_patient_assessment(
@@ -81,7 +80,6 @@ async def test_gate_complex_patient_multi_agent_structured_report() -> None:
         drug_safety,
         evidence,
         report,
-        memory,
         patient,
         "Check interactions for current medications and any relevant treatment evidence",
     )
@@ -91,7 +89,6 @@ async def test_gate_complex_patient_multi_agent_structured_report() -> None:
     assert "## Evidence" in result
     assert "Metformin + Glimepiride" in result
     assert "ADA Guideline" in result
-    memory.save_patient.assert_awaited_once_with(patient)
 
 
 async def test_workflow_skips_drug_safety_when_single_medication() -> None:
@@ -108,13 +105,12 @@ async def test_workflow_skips_drug_safety_when_single_medication() -> None:
         guideline_retriever=guideline_retriever,
     )
     report = ReportAgent()
-    memory = AsyncMock()
 
     patient = PatientContext(id="P-TEST-501", name="Patient Beta", age=40, sex="M")
     patient.medications = [Medication(name="Lisinopril")]
 
     result = await run_patient_assessment(
-        triage, drug_safety, evidence, report, memory, patient, "any guidance?"
+        triage, drug_safety, evidence, report, patient, "any guidance?"
     )
 
     assert "## Drug Safety" not in result

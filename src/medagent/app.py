@@ -107,25 +107,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.post("/patients/{patient_id}/assess")
     async def assess_patient(patient_id: str, body: AssessRequest) -> dict[str, str]:
+        # REST has no interactive approval channel, so it auto-saves. The
+        # human-in-the-loop checkpoint lives in the WebSocket chat below.
         state: AppState = app.state.medagent
         patient = await state.patient_store.get_patient(patient_id)
         if patient is None:
             raise HTTPException(status_code=404, detail=f"Unknown patient: {patient_id}")
         report = await run_patient_assessment(
-            state.triage,
-            state.drug_safety,
-            state.evidence,
-            state.report,
-            state.patient_store,
-            patient,
-            body.message,
+            state.triage, state.drug_safety, state.evidence, state.report, patient, body.message
         )
+        await state.patient_store.save_patient(patient)
         return {"report": report}
 
     @app.post("/patients/{patient_id}/followup")
     async def followup_visit(patient_id: str, body: AssessRequest) -> dict[str, str]:
         state: AppState = app.state.medagent
-        report = await run_followup(
+        report, patient = await run_followup(
             state.triage,
             state.drug_safety,
             state.evidence,
@@ -134,6 +131,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             patient_id,
             body.message,
         )
+        await state.patient_store.save_patient(patient)
         return {"report": report}
 
     @app.post("/drug-check")
@@ -146,13 +144,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.websocket("/ws/{patient_id}")
     async def chat(websocket: WebSocket, patient_id: str) -> None:
+        """Interactive chat with a human-in-the-loop approval gate.
+
+        Each doctor message drafts a report but does NOT save it. The server
+        sends {"type": "pending_approval", "report": ...} and waits for a
+        decision: "approve" saves it verbatim, "reject" discards it, and any
+        other text is treated as the doctor's edited version of the report
+        and saved in its place.
+        """
         state: AppState = app.state.medagent
         await websocket.accept()
         try:
             while True:
                 message = await websocket.receive_text()
                 try:
-                    report = await run_followup(
+                    report, patient = await run_followup(
                         state.triage,
                         state.drug_safety,
                         state.evidence,
@@ -161,9 +167,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         patient_id,
                         message,
                     )
-                    await websocket.send_text(report)
                 except MedAgentError as exc:
-                    await websocket.send_text(f"error: {exc}")
+                    await websocket.send_json({"type": "error", "detail": str(exc)})
+                    continue
+
+                await websocket.send_json({"type": "pending_approval", "report": report})
+                decision = (await websocket.receive_text()).strip()
+
+                if decision.lower() == "approve":
+                    await state.patient_store.save_patient(patient)
+                    await websocket.send_json({"type": "saved", "report": report})
+                elif decision.lower() == "reject":
+                    await websocket.send_json({"type": "rejected"})
+                else:
+                    await state.patient_store.save_patient(patient)
+                    await websocket.send_json({"type": "saved", "report": decision})
         except WebSocketDisconnect:
             logger.info("websocket_disconnected", patient_id=patient_id)
 
