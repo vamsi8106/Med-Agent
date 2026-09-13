@@ -82,3 +82,12 @@ class ClinicalEvidence(BaseModel):
     grade: EvidenceGrade | None = None
     source: str | None = None
     url: str | None = None
+
+
+class LabFlag(BaseModel):
+    test_name: str
+    value: float
+    unit: str
+    flag: str
+    reference_range: str | None = None
+    explanation: str | None = None
