@@ -22,6 +22,10 @@ class Settings(BaseSettings):
     database_path: str = "medagent.db"
     chroma_persist_dir: str = ".chroma"
 
+    langchain_tracing_v2: bool = False
+    langchain_api_key: str | None = None
+    langchain_project: str = "medagent"
+
 
 _settings: Settings | None = None
 

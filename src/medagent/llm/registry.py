@@ -19,6 +19,12 @@ class ProviderRegistry:
 
             if not settings.groq_api_key:
                 raise ProviderError("GROQ_API_KEY is not configured")
-            return GroqProvider(api_key=settings.groq_api_key, model=settings.groq_model)
+            return GroqProvider(
+                api_key=settings.groq_api_key,
+                model=settings.groq_model,
+                tracing_enabled=settings.langchain_tracing_v2,
+                langsmith_api_key=settings.langchain_api_key,
+                langsmith_project=settings.langchain_project,
+            )
 
         raise ProviderError(f"Unknown LLM provider: {name}")
