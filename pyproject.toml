@@ -10,14 +10,19 @@ requires-python = ">=3.12"
 dependencies = [
     "aiosqlite>=0.22.1",
     "chromadb>=1.5.9",
+    "fastapi>=0.141.1",
     "groq>=1.7.0",
     "httpx>=0.28.1",
     "mcp>=2.2.0",
+    "opentelemetry-exporter-otlp>=1.44.0",
+    "opentelemetry-sdk>=1.44.0",
+    "prometheus-client>=0.26.0",
     "pydantic>=2.13.5",
     "pydantic-settings>=2.15.0",
     "pypdf>=6.18.1",
     "sentence-transformers>=6.0.1",
     "structlog>=26.1.0",
+    "uvicorn[standard]>=0.52.4",
 ]
 
 [build-system]

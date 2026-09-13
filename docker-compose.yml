@@ -1,0 +1,22 @@
+services:
+  medagent:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      LLM_PROVIDER: ${LLM_PROVIDER:-groq}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      GROQ_MODEL: ${GROQ_MODEL:-llama-3.3-70b-versatile}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      DATABASE_PATH: /data/medagent.db
+      CHROMA_PERSIST_DIR: /data/chroma
+    volumes:
+      - medagent-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  medagent-data:
