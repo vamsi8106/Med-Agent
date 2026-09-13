@@ -14,6 +14,7 @@ from medagent.agents.drug_safety_agent import DrugSafetyAgent
 from medagent.agents.evidence_agent import EvidenceAgent
 from medagent.agents.report_agent import ReportAgent
 from medagent.agents.triage_agent import TriageAgent
+from medagent.agents.trial_finder_agent import TrialFinderAgent
 from medagent.auth.dependencies import get_current_user, get_current_user_ws, require_admin
 from medagent.auth.security import create_access_token, hash_password, verify_password
 from medagent.auth.store import UserStore
@@ -31,6 +32,7 @@ from medagent.rag.embeddings import EmbeddingModel
 from medagent.rag.retriever import GuidelineRetrieverTool
 from medagent.rag.vector_store import VectorStore
 from medagent.tools.custom.interaction_checker import InteractionCheckerTool
+from medagent.tools.mcp.healthcare import HealthcareMCPClient
 from medagent.tools.mcp.medical import MedicalMCPClient
 from medagent.workflows.drug_check import run_drug_check
 from medagent.workflows.followup import run_followup
@@ -76,6 +78,7 @@ class AppState:
         self.evidence = EvidenceAgent(
             llm, MedicalMCPClient(settings), GuidelineRetrieverTool(embeddings, vector_store)
         )
+        self.trial_finder = TrialFinderAgent(llm, HealthcareMCPClient(settings))
         self.report = ReportAgent()
 
     async def init(self) -> None:
@@ -201,7 +204,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if patient is None:
             raise HTTPException(status_code=404, detail=f"Unknown patient: {patient_id}")
         report = await run_patient_assessment(
-            state.triage, state.drug_safety, state.evidence, state.report, patient, body.message
+            state.triage,
+            state.drug_safety,
+            state.evidence,
+            state.trial_finder,
+            state.report,
+            patient,
+            body.message,
         )
         await state.patient_store.save_patient(patient)
         await state.audit_log.record(user, patient_id, "assessment_run", {"message": body.message})
@@ -216,6 +225,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             state.triage,
             state.drug_safety,
             state.evidence,
+            state.trial_finder,
             state.report,
             state.patient_store,
             patient_id,
@@ -263,6 +273,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         state.triage,
                         state.drug_safety,
                         state.evidence,
+                        state.trial_finder,
                         state.report,
                         state.patient_store,
                         patient_id,

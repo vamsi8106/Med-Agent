@@ -6,12 +6,13 @@ from medagent.agents.evidence_agent import EvidenceAgent
 from medagent.agents.report_agent import ReportAgent
 from medagent.agents.triage_agent import TriageAgent
 from medagent.core.models import (
+    AgentResult,
     ClinicalEvidence,
     DrugInteraction,
     Medication,
     PatientContext,
 )
-from medagent.core.types import InteractionSeverity
+from medagent.core.types import AgentRole, InteractionSeverity
 from medagent.llm.mock_provider import MockLLMProvider
 from medagent.tools.base import ToolResult
 from medagent.workflows.patient_assessment import run_patient_assessment
@@ -72,6 +73,7 @@ async def test_gate_complex_patient_multi_agent_structured_report() -> None:
         medical_client=_FakeMedicalClient("PubMed article summary."),  # type: ignore[arg-type]
         guideline_retriever=guideline_retriever,
     )
+    trial_finder = AsyncMock()
     report = ReportAgent()
 
     patient = _complex_patient()
@@ -79,10 +81,12 @@ async def test_gate_complex_patient_multi_agent_structured_report() -> None:
         triage,
         drug_safety,
         evidence,
+        trial_finder,
         report,
         patient,
         "Check interactions for current medications and any relevant treatment evidence",
     )
+    trial_finder.find_trials.assert_not_awaited()
 
     assert "Patient Alpha" in result
     assert "## Drug Safety" in result
@@ -104,14 +108,53 @@ async def test_workflow_skips_drug_safety_when_single_medication() -> None:
         medical_client=_FakeMedicalClient("n/a"),  # type: ignore[arg-type]
         guideline_retriever=guideline_retriever,
     )
+    trial_finder = AsyncMock()
     report = ReportAgent()
 
     patient = PatientContext(id="P-TEST-501", name="Patient Beta", age=40, sex="M")
     patient.medications = [Medication(name="Lisinopril")]
 
     result = await run_patient_assessment(
-        triage, drug_safety, evidence, report, patient, "any guidance?"
+        triage, drug_safety, evidence, trial_finder, report, patient, "any guidance?"
     )
 
     assert "## Drug Safety" not in result
     assert "Patient Beta" in result
+
+
+async def test_workflow_runs_trial_finder_when_message_mentions_trials() -> None:
+    triage = TriageAgent()
+    drug_safety = DrugSafetyAgent(
+        llm=MockLLMProvider(),
+        interaction_checker=_FakeInteractionChecker([]),  # type: ignore[arg-type]
+    )
+    guideline_retriever = AsyncMock()
+    guideline_retriever.run.return_value = []
+    evidence = EvidenceAgent(
+        llm=MockLLMProvider(fixed_response="n/a"),
+        medical_client=_FakeMedicalClient("n/a"),  # type: ignore[arg-type]
+        guideline_retriever=guideline_retriever,
+    )
+    trial_finder = AsyncMock()
+    trial_finder.find_trials.return_value = AgentResult(
+        role=AgentRole.TRIAL_FINDER,
+        summary="Found one relevant trial.",
+        evidence=[
+            ClinicalEvidence(
+                title="Clinical trials for type 2 diabetes",
+                summary="NCT12345",
+                source="ClinicalTrials.gov",
+            )
+        ],
+    )
+    report = ReportAgent()
+
+    patient = PatientContext(id="P-TEST-502", name="Patient Gamma", age=50, sex="F")
+
+    result = await run_patient_assessment(
+        triage, drug_safety, evidence, trial_finder, report, patient, "any clinical trials?"
+    )
+
+    trial_finder.find_trials.assert_awaited_once()
+    assert "## Trial Finder" in result
+    assert "Clinical trials for type 2 diabetes" in result

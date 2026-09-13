@@ -1,4 +1,4 @@
-"""New-patient workflow: triage -> parallel(drug_safety, evidence) -> report.
+"""New-patient workflow: triage -> parallel(drug_safety, evidence, trial_finder) -> report.
 
 Depends only on core/ and agents/ per the dependency rules. Does NOT persist
 the patient record itself: generation and persistence are deliberately
@@ -14,6 +14,7 @@ from medagent.agents.drug_safety_agent import DrugSafetyAgent
 from medagent.agents.evidence_agent import EvidenceAgent
 from medagent.agents.report_agent import ReportAgent
 from medagent.agents.triage_agent import TriageAgent
+from medagent.agents.trial_finder_agent import TrialFinderAgent
 from medagent.core.models import AgentResult, PatientContext
 from medagent.core.types import AgentRole
 from medagent.infra.logging import get_logger
@@ -25,6 +26,7 @@ async def run_patient_assessment(
     triage: TriageAgent,
     drug_safety: DrugSafetyAgent,
     evidence: EvidenceAgent,
+    trial_finder: TrialFinderAgent,
     report: ReportAgent,
     context: PatientContext,
     message: str,
@@ -36,6 +38,8 @@ async def run_patient_assessment(
         tasks.append(drug_safety.run_result(context, message))
     if AgentRole.EVIDENCE in roles:
         tasks.append(evidence.gather_evidence(context, message))
+    if AgentRole.TRIAL_FINDER in roles:
+        tasks.append(trial_finder.find_trials(context, message))
 
     results: list[AgentResult] = list(await asyncio.gather(*tasks)) if tasks else []
 

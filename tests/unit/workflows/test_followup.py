@@ -17,7 +17,14 @@ async def test_followup_raises_for_unknown_patient() -> None:
 
     with pytest.raises(MedAgentError):
         await run_followup(
-            TriageAgent(), AsyncMock(), AsyncMock(), ReportAgent(), memory, "P-UNKNOWN", "hi"
+            TriageAgent(),
+            AsyncMock(),
+            AsyncMock(),
+            AsyncMock(),
+            ReportAgent(),
+            memory,
+            "P-UNKNOWN",
+            "hi",
         )
 
 
@@ -38,7 +45,14 @@ async def test_followup_recalls_and_runs_assessment() -> None:
     )
 
     report, patient = await run_followup(
-        TriageAgent(), AsyncMock(), evidence, ReportAgent(), memory, "P-TEST-600", "follow-up visit"
+        TriageAgent(),
+        AsyncMock(),
+        evidence,
+        AsyncMock(),
+        ReportAgent(),
+        memory,
+        "P-TEST-600",
+        "follow-up visit",
     )
 
     assert "Patient Alpha" in report
