@@ -16,7 +16,11 @@ from collections.abc import Iterator
 import asyncpg
 import pytest
 
-from medagent.memory.schema import CREATE_STATEMENTS, TABLES_IN_DEPENDENCY_ORDER
+from medagent.memory.schema import (
+    AUDIT_LOG_CREATE_STATEMENTS,
+    CREATE_STATEMENTS,
+    TABLES_IN_DEPENDENCY_ORDER,
+)
 
 _CANDIDATE_DOCKER_HOSTS = [os.environ.get("DOCKER_HOST"), None, "unix:///var/run/docker.sock"]
 
@@ -48,7 +52,7 @@ async def _wait_until_ready_and_apply_schema(dsn: str) -> None:
         raise RuntimeError(f"Postgres test container never became ready: {last_error}")
 
     try:
-        for statement in CREATE_STATEMENTS:
+        for statement in [*CREATE_STATEMENTS, *AUDIT_LOG_CREATE_STATEMENTS]:
             await conn.execute(statement)
     finally:
         await conn.close()

@@ -106,6 +106,26 @@ def test_get_missing_patient_returns_404(pg_dsn: str) -> None:
     assert response.status_code == 404
 
 
+def test_audit_log_records_create_and_view(pg_dsn: str) -> None:
+    with _make_client(pg_dsn) as client:
+        headers = _auth_headers(client, username="dr.audit")
+        client.post(
+            "/patients",
+            json={"id": "P-TEST-806", "name": "Patient Zeta", "age": 33, "sex": "F"},
+            headers=headers,
+        )
+        client.get("/patients/P-TEST-806", headers=headers)
+
+        response = client.get("/patients/P-TEST-806/audit-log", headers=headers)
+
+    assert response.status_code == 200
+    actions = [entry["action"] for entry in response.json()]
+    # newest first; the audit_log_viewed entry for this very request is included too
+    assert "patient_viewed" in actions
+    assert "patient_created" in actions
+    assert all(entry["username"] == "dr.audit" for entry in response.json())
+
+
 def test_assess_endpoint_returns_report(pg_dsn: str) -> None:
     with _make_client(pg_dsn) as client:
         headers = _auth_headers(client)

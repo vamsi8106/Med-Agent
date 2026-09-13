@@ -95,7 +95,37 @@ DROP_STATEMENTS: list[str] = [
     "DROP TABLE IF EXISTS patients",
 ]
 
+# Migration 0002: audit trail of who accessed/modified which patient record.
+# A separate statement group (not folded into CREATE_STATEMENTS above) since
+# it belongs to its own, later migration -- production schema changes are
+# additive migrations, never edits to an already-applied one.
+#
+# patient_id/user_id are deliberately NOT foreign keys: a "report_drafted"
+# event can be recorded before a brand-new patient's row is saved, and an
+# audit trail must remain readable even after a patient or user record is
+# later deleted.
+AUDIT_LOG_CREATE_STATEMENTS: list[str] = [
+    """
+    CREATE TABLE IF NOT EXISTS audit_log (
+        id TEXT PRIMARY KEY,
+        patient_id TEXT,
+        user_id TEXT,
+        username TEXT,
+        action TEXT NOT NULL,
+        details JSONB NOT NULL DEFAULT '{}'::jsonb,
+        created_at TIMESTAMPTZ NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS ix_audit_log_patient_id ON audit_log(patient_id)",
+    "CREATE INDEX IF NOT EXISTS ix_audit_log_created_at ON audit_log(created_at)",
+]
+
+AUDIT_LOG_DROP_STATEMENTS: list[str] = [
+    "DROP TABLE IF EXISTS audit_log",
+]
+
 TABLES_IN_DEPENDENCY_ORDER: list[str] = [
+    "audit_log",
     "interactions_log",
     "visits",
     "lab_results",

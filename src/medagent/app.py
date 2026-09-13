@@ -2,6 +2,7 @@
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, Response
@@ -23,6 +24,7 @@ from medagent.infra.logging import configure_logging, get_logger
 from medagent.infra.middleware import ObservabilityMiddleware
 from medagent.infra.tracing import configure_tracing
 from medagent.llm.registry import ProviderRegistry
+from medagent.memory.audit_log import AuditLogStore
 from medagent.memory.patient_store import PatientStore
 from medagent.memory.persistent import PersistentStore
 from medagent.rag.embeddings import EmbeddingModel
@@ -62,6 +64,7 @@ class AppState:
         self.persistent_store = PersistentStore(settings.postgres_dsn)
         self.patient_store = PatientStore(self.persistent_store)
         self.user_store = UserStore(self.persistent_store)
+        self.audit_log = AuditLogStore(self.persistent_store)
 
         llm = ProviderRegistry.get_provider(settings.llm_provider, settings)
         embeddings = EmbeddingModel()
@@ -137,25 +140,35 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.post("/patients", response_model=PatientContext)
     async def create_patient(
-        context: PatientContext, _user: User = Depends(get_current_user)
+        context: PatientContext, user: User = Depends(get_current_user)
     ) -> PatientContext:
         state: AppState = app.state.medagent
         await state.patient_store.save_patient(context)
+        await state.audit_log.record(user, context.id, "patient_created")
         return context
 
     @app.get("/patients/{patient_id}", response_model=PatientContext)
     async def get_patient(
-        patient_id: str, _user: User = Depends(get_current_user)
+        patient_id: str, user: User = Depends(get_current_user)
     ) -> PatientContext:
         state: AppState = app.state.medagent
         patient = await state.patient_store.get_patient(patient_id)
         if patient is None:
             raise HTTPException(status_code=404, detail=f"Unknown patient: {patient_id}")
+        await state.audit_log.record(user, patient_id, "patient_viewed")
         return patient
+
+    @app.get("/patients/{patient_id}/audit-log")
+    async def get_patient_audit_log(
+        patient_id: str, user: User = Depends(get_current_user)
+    ) -> list[dict[str, Any]]:
+        state: AppState = app.state.medagent
+        await state.audit_log.record(user, patient_id, "audit_log_viewed")
+        return await state.audit_log.for_patient(patient_id)
 
     @app.post("/patients/{patient_id}/assess")
     async def assess_patient(
-        patient_id: str, body: AssessRequest, _user: User = Depends(get_current_user)
+        patient_id: str, body: AssessRequest, user: User = Depends(get_current_user)
     ) -> dict[str, str]:
         # REST has no interactive approval channel, so it auto-saves. The
         # human-in-the-loop checkpoint lives in the WebSocket chat below.
@@ -167,11 +180,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             state.triage, state.drug_safety, state.evidence, state.report, patient, body.message
         )
         await state.patient_store.save_patient(patient)
+        await state.audit_log.record(user, patient_id, "assessment_run", {"message": body.message})
         return {"report": report}
 
     @app.post("/patients/{patient_id}/followup")
     async def followup_visit(
-        patient_id: str, body: AssessRequest, _user: User = Depends(get_current_user)
+        patient_id: str, body: AssessRequest, user: User = Depends(get_current_user)
     ) -> dict[str, str]:
         state: AppState = app.state.medagent
         report, patient = await run_followup(
@@ -184,15 +198,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             body.message,
         )
         await state.patient_store.save_patient(patient)
+        await state.audit_log.record(user, patient_id, "followup_run", {"message": body.message})
         return {"report": report}
 
     @app.post("/drug-check")
     async def drug_check(
-        body: DrugCheckRequest, _user: User = Depends(get_current_user)
+        body: DrugCheckRequest, user: User = Depends(get_current_user)
     ) -> dict[str, str]:
         state: AppState = app.state.medagent
         answer = await run_drug_check(
             state.drug_safety, state.patient_store, body.patient_id, body.new_drug
+        )
+        await state.audit_log.record(
+            user, body.patient_id, "drug_check_run", {"new_drug": body.new_drug}
         )
         return {"answer": answer}
 
@@ -230,16 +248,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     await websocket.send_json({"type": "error", "detail": str(exc)})
                     continue
 
+                await state.audit_log.record(
+                    user, patient_id, "report_drafted", {"message": message}
+                )
                 await websocket.send_json({"type": "pending_approval", "report": report})
                 decision = (await websocket.receive_text()).strip()
 
                 if decision.lower() == "approve":
                     await state.patient_store.save_patient(patient)
+                    await state.audit_log.record(user, patient_id, "report_approved")
                     await websocket.send_json({"type": "saved", "report": report})
                 elif decision.lower() == "reject":
+                    await state.audit_log.record(user, patient_id, "report_rejected")
                     await websocket.send_json({"type": "rejected"})
                 else:
                     await state.patient_store.save_patient(patient)
+                    await state.audit_log.record(
+                        user, patient_id, "report_edited", {"edited_report": decision}
+                    )
                     await websocket.send_json({"type": "saved", "report": decision})
         except WebSocketDisconnect:
             logger.info("websocket_disconnected", patient_id=patient_id)
