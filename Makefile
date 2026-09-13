@@ -1,4 +1,4 @@
-.PHONY: install test unit-tests lint-check lint-fix format-fix pre-commit serve db-upgrade db-downgrade db-revision
+.PHONY: install test unit-tests lint-check lint-fix format-fix format-check pre-commit ci-check serve db-upgrade db-downgrade db-revision
 
 install:
 	uv sync
@@ -18,7 +18,13 @@ lint-fix:
 format-fix:
 	uv run ruff format .
 
+format-check:
+	uv run ruff format --check .
+
 pre-commit: format-fix lint-fix lint-check unit-tests
+
+# CI must fail on drift, not silently fix it -- no --fix, no format rewriting.
+ci-check: format-check lint-check unit-tests
 
 serve:
 	uv run uvicorn medagent.app:app --reload
