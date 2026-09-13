@@ -1,3 +1,4 @@
+import asyncio
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -90,3 +91,36 @@ async def test_circuit_breaker_opens_and_short_circuits_further_calls() -> None:
             with pytest.raises(MCPError, match="Circuit breaker is open"):
                 await client.call_tool("search-drugs", {"query": "metformin"})
             assert fake_session.call_tool.await_count == calls_before
+
+
+async def test_call_tool_timeout_raises_mcp_error() -> None:
+    fake_session = _FakeSession()
+
+    async def _hangs_forever(*_args: object, **_kwargs: object) -> None:
+        await asyncio.sleep(10)
+
+    fake_session.call_tool = _hangs_forever
+
+    @asynccontextmanager
+    async def _fake_client_session(_read: object, _write: object):
+        yield fake_session
+
+    with (
+        patch("medagent.tools.mcp.base.stdio_client", _fake_stdio_client),
+        patch("medagent.tools.mcp.base.ClientSession", _fake_client_session),
+    ):
+        async with MCPStdioClient("echo", [], timeout_seconds=0.05) as client:
+            with pytest.raises(MCPError, match="timed out"):
+                await client.call_tool("search-drugs", {"query": "metformin"})
+
+
+async def test_connection_setup_timeout_raises_mcp_error() -> None:
+    @asynccontextmanager
+    async def _hanging_stdio_client(_params: object):
+        await asyncio.sleep(10)
+        yield ("read", "write")
+
+    with patch("medagent.tools.mcp.base.stdio_client", _hanging_stdio_client):
+        with pytest.raises(MCPError, match="timed out"):
+            async with MCPStdioClient("echo", [], timeout_seconds=0.05):
+                pass

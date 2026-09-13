@@ -33,6 +33,8 @@ services:
       JWT_SECRET_KEY: ${JWT_SECRET_KEY:-dev-insecure-secret-change-me-in-prod-please}
       JWT_ALGORITHM: ${JWT_ALGORITHM:-HS256}
       JWT_EXPIRE_MINUTES: ${JWT_EXPIRE_MINUTES:-60}
+      LLM_TIMEOUT_SECONDS: ${LLM_TIMEOUT_SECONDS:-30}
+      MCP_TIMEOUT_SECONDS: ${MCP_TIMEOUT_SECONDS:-30}
     volumes:
       - medagent-data:/data
     depends_on:

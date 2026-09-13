@@ -9,7 +9,11 @@ from medagent.tools.mcp.base import MCPStdioClient
 class HealthcareMCPClient(MCPStdioClient):
     def __init__(self, settings: Settings | None = None) -> None:
         settings = settings or get_settings()
-        super().__init__(command=settings.healthcare_mcp_command, args=settings.healthcare_mcp_args)
+        super().__init__(
+            command=settings.healthcare_mcp_command,
+            args=settings.healthcare_mcp_args,
+            timeout_seconds=settings.mcp_timeout_seconds,
+        )
 
     async def search_clinical_guidelines(self, query: str) -> Any:
         return await self.call_tool("search-clinical-guidelines", {"query": query})

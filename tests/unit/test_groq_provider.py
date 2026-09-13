@@ -1,6 +1,11 @@
+import asyncio
 import os
 from unittest.mock import MagicMock, patch
 
+import pytest
+
+from medagent.core.exceptions import ProviderError
+from medagent.core.models import Message
 from medagent.llm.groq_provider import GroqProvider
 
 
@@ -27,3 +32,17 @@ def test_tracing_enabled_sets_langsmith_env_vars() -> None:
     finally:
         for key in ("LANGCHAIN_TRACING_V2", "LANGCHAIN_API_KEY", "LANGCHAIN_PROJECT"):
             os.environ.pop(key, None)
+
+
+async def test_complete_raises_provider_error_on_timeout() -> None:
+    async def _hangs_forever(**_kwargs: object) -> None:
+        await asyncio.sleep(10)
+
+    fake_client = MagicMock()
+    fake_client.chat.completions.create = _hangs_forever
+
+    with patch("medagent.llm.groq_provider.AsyncGroq", return_value=fake_client):
+        provider = GroqProvider(api_key="test-key", model="test-model", timeout_seconds=0.05)
+
+    with pytest.raises(ProviderError, match="timed out"):
+        await provider.complete([Message(role="user", content="hi")])

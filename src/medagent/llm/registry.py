@@ -25,6 +25,7 @@ class ProviderRegistry:
                 tracing_enabled=settings.langchain_tracing_v2,
                 langsmith_api_key=settings.langchain_api_key,
                 langsmith_project=settings.langchain_project,
+                timeout_seconds=settings.llm_timeout_seconds,
             )
 
         raise ProviderError(f"Unknown LLM provider: {name}")

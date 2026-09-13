@@ -18,6 +18,9 @@ class Settings(BaseSettings):
     healthcare_mcp_args: list[str] = ["./vendor/healthcare-mcp/build/index.js"]
     research_mcp_command: str = "node"
     research_mcp_args: list[str] = ["./vendor/med-research-mcp-suite/dist/index.js"]
+    mcp_timeout_seconds: float = 30.0
+
+    llm_timeout_seconds: float = 30.0
 
     postgres_dsn: str = "postgresql://medagent:medagent@localhost:5432/medagent"
     chroma_persist_dir: str = ".chroma"

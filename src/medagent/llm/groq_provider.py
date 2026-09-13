@@ -1,5 +1,6 @@
 """Groq LLM provider. No Groq imports allowed outside this file."""
 
+import asyncio
 import os
 from typing import Any
 
@@ -27,9 +28,11 @@ class GroqProvider(BaseLLMProvider):
         tracing_enabled: bool = False,
         langsmith_api_key: str | None = None,
         langsmith_project: str = "medagent",
+        timeout_seconds: float = 30.0,
     ) -> None:
         self._client = AsyncGroq(api_key=api_key)
         self._model = model
+        self._timeout_seconds = timeout_seconds
         if tracing_enabled:
             _enable_langsmith_tracing(langsmith_api_key, langsmith_project)
 
@@ -39,11 +42,18 @@ class GroqProvider(BaseLLMProvider):
         self, messages: list[Message], tools: list[dict[str, Any]] | None = None
     ) -> LLMResponse:
         try:
-            response = await self._client.chat.completions.create(
-                model=self._model,
-                messages=[{"role": m.role, "content": m.content} for m in messages],
-                tools=tools,
+            response = await asyncio.wait_for(
+                self._client.chat.completions.create(
+                    model=self._model,
+                    messages=[{"role": m.role, "content": m.content} for m in messages],
+                    tools=tools,
+                ),
+                timeout=self._timeout_seconds,
             )
+        except TimeoutError as exc:
+            raise ProviderError(
+                f"Groq completion timed out after {self._timeout_seconds}s"
+            ) from exc
         except Exception as exc:
             raise ProviderError(f"Groq completion failed: {exc}") from exc
 

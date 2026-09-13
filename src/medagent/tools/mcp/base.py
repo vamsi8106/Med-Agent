@@ -1,5 +1,6 @@
 """Shared stdio transport for MCP clients (medical, healthcare, med-research)."""
 
+import asyncio
 from contextlib import AsyncExitStack
 from typing import Any
 
@@ -19,7 +20,9 @@ class MCPStdioClient:
 
     Calls go through a CircuitBreaker: once a server fails repeatedly, further
     calls fail fast with MCPError instead of hanging/retrying against a
-    server that's down, until the breaker's recovery timeout elapses.
+    server that's down, until the breaker's recovery timeout elapses. Both
+    connection setup (spawning the subprocess) and each tool call are bounded
+    by timeout_seconds so a hung server/process can't stall a request forever.
     """
 
     def __init__(
@@ -27,19 +30,31 @@ class MCPStdioClient:
         command: str,
         args: list[str],
         circuit_breaker: CircuitBreaker | None = None,
+        timeout_seconds: float = 30.0,
     ) -> None:
         self._server_params = StdioServerParameters(command=command, args=args)
         self._exit_stack: AsyncExitStack | None = None
         self._session: ClientSession | None = None
+        self._timeout_seconds = timeout_seconds
         self._breaker = circuit_breaker or CircuitBreaker(
             failure_threshold=5, recovery_timeout=30.0
         )
 
     async def __aenter__(self) -> "MCPStdioClient":
         self._exit_stack = AsyncExitStack()
-        read, write = await self._exit_stack.enter_async_context(stdio_client(self._server_params))
-        self._session = await self._exit_stack.enter_async_context(ClientSession(read, write))
-        await self._session.initialize()
+        try:
+            read, write = await asyncio.wait_for(
+                self._exit_stack.enter_async_context(stdio_client(self._server_params)),
+                timeout=self._timeout_seconds,
+            )
+            self._session = await self._exit_stack.enter_async_context(ClientSession(read, write))
+            await asyncio.wait_for(self._session.initialize(), timeout=self._timeout_seconds)
+        except TimeoutError as exc:
+            await self._exit_stack.aclose()
+            raise MCPError(
+                f"MCP server startup timed out after {self._timeout_seconds}s "
+                f"(command={self._server_params.command})"
+            ) from exc
         return self
 
     async def __aexit__(self, *exc_info: object) -> None:
@@ -56,7 +71,13 @@ class MCPStdioClient:
         if self._session is None:
             raise MCPError("MCP session is not open; use 'async with' before calling tools")
         try:
-            result = await self._session.call_tool(name, arguments)
+            result = await asyncio.wait_for(
+                self._session.call_tool(name, arguments), timeout=self._timeout_seconds
+            )
+        except TimeoutError as exc:
+            raise MCPError(
+                f"MCP tool call '{name}' timed out after {self._timeout_seconds}s"
+            ) from exc
         except Exception as exc:
             raise MCPError(f"MCP tool call '{name}' failed: {exc}") from exc
 
