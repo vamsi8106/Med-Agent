@@ -26,6 +26,13 @@ _CANDIDATE_DOCKER_HOSTS = [os.environ.get("DOCKER_HOST"), None, "unix:///var/run
 
 
 def _find_working_docker_host() -> str | None:
+    """Returns the DOCKER_HOST to use, or None if no candidate works.
+
+    Note: a successful "use the default context" candidate (DOCKER_HOST
+    unset) is itself represented as None in _CANDIDATE_DOCKER_HOSTS, which
+    would be indistinguishable from "not found" if returned as-is -- return
+    "" instead so callers can still tell success from failure via `is None`.
+    """
     for host in _CANDIDATE_DOCKER_HOSTS:
         env = os.environ.copy()
         if host:
@@ -35,7 +42,7 @@ def _find_working_docker_host() -> str | None:
         except (FileNotFoundError, subprocess.TimeoutExpired):
             continue
         if result.returncode == 0:
-            return host
+            return host or ""
     return None
 
 

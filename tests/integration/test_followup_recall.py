@@ -1,13 +1,14 @@
 """Phase 4 gate: a follow-up visit recalls the patient and retrieves matching guidelines.
 
-Uses the real local sentence-transformers model and a real (tmp-dir) ChromaDB
-instance -- not mocked -- since this exercises the actual RAG pipeline end to
-end. Set HF_HUB_OFFLINE so it never reaches out to the network if the model is
-already cached locally.
+Uses the real local sentence-transformers model, a real (throwaway) Postgres
+container (via the shared `pg_dsn` fixture in tests/conftest.py -- skipped if
+Docker isn't available), and a real in-memory ChromaDB instance -- not
+mocked -- since this exercises the actual RAG pipeline end to end. Set
+HF_HUB_OFFLINE so it never reaches out to the network if the model is already
+cached locally.
 """
 
 import os
-from pathlib import Path
 from unittest.mock import patch
 
 import chromadb
@@ -23,8 +24,8 @@ from medagent.rag.retriever import GuidelineRetrieverTool  # noqa: E402
 from medagent.rag.vector_store import VectorStore  # noqa: E402
 
 
-async def test_followup_visit_recalls_patient_and_retrieves_guidelines(tmp_path: Path) -> None:
-    persistent = PersistentStore(str(tmp_path / "medagent.db"))
+async def test_followup_visit_recalls_patient_and_retrieves_guidelines(pg_dsn: str) -> None:
+    persistent = PersistentStore(pg_dsn)
     await persistent.init_schema()
     patient_store = PatientStore(persistent)
 

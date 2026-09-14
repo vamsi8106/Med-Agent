@@ -38,6 +38,11 @@ services:
     build:
       context: ./vendor/healthcare-mcp
       dockerfile: ../../docker/healthcare-mcp/Dockerfile
+    # Host port lets a bare `make serve` on the host (not the medagent
+    # container) reach this service too -- see .env.example's "bare local
+    # dev" section.
+    ports:
+      - "3001:3000"
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:3000/health"]
       interval: 10s
@@ -49,6 +54,8 @@ services:
     build:
       context: ./vendor/med-research-mcp-suite
       dockerfile: ../../docker/med-research-mcp-suite/Dockerfile
+    ports:
+      - "3002:3000"
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:3000/api/status"]
       interval: 10s
@@ -58,6 +65,8 @@ services:
 
   medical-mcp-bridge:
     build: ./docker/medical-mcp-bridge
+    ports:
+      - "8081:8080"
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
       interval: 10s
