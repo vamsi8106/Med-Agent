@@ -128,7 +128,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.exception_handler(MedAgentError)
     async def _medagent_error_handler(_request: Request, exc: MedAgentError) -> JSONResponse:
-        return JSONResponse(status_code=400, content={"detail": str(exc)})
+        return JSONResponse(status_code=exc.status_code, content={"detail": str(exc)})
 
     @app.get("/health")
     async def health() -> dict[str, str]:

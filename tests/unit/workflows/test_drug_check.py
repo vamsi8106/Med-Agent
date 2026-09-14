@@ -2,7 +2,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from medagent.core.exceptions import MedAgentError
+from medagent.core.exceptions import PatientNotFoundError
 from medagent.core.models import Medication, PatientContext
 from medagent.workflows.drug_check import run_drug_check
 
@@ -11,7 +11,7 @@ async def test_drug_check_raises_for_unknown_patient() -> None:
     memory = AsyncMock()
     memory.get_patient.return_value = None
 
-    with pytest.raises(MedAgentError):
+    with pytest.raises(PatientNotFoundError):
         await run_drug_check(AsyncMock(), memory, "P-UNKNOWN", "Ibuprofen")
 
 

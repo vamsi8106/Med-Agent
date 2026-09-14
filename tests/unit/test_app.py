@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 
 from medagent.app import create_app
 from medagent.core.config import Settings
+from medagent.core.exceptions import MCPError, PatientNotFoundError
 from medagent.core.models import PatientContext
 
 _ADMIN_USERNAME = "admin"
@@ -226,6 +227,37 @@ def test_drug_check_endpoint(pg_dsn: str) -> None:
 
     assert response.status_code == 200
     assert response.json() == {"answer": "No major concerns."}
+
+
+def test_mcp_error_maps_to_502(pg_dsn: str) -> None:
+    with _make_client(pg_dsn) as client:
+        headers = _auth_headers(client)
+        with patch("medagent.app.run_drug_check", AsyncMock(side_effect=MCPError("upstream down"))):
+            response = client.post(
+                "/drug-check",
+                json={"patient_id": "P-TEST-803", "new_drug": "Glimepiride"},
+                headers=headers,
+            )
+
+    assert response.status_code == 502
+    assert response.json() == {"detail": "upstream down"}
+
+
+def test_patient_not_found_error_maps_to_404(pg_dsn: str) -> None:
+    with _make_client(pg_dsn) as client:
+        headers = _auth_headers(client)
+        with patch(
+            "medagent.app.run_drug_check",
+            AsyncMock(side_effect=PatientNotFoundError("no such patient")),
+        ):
+            response = client.post(
+                "/drug-check",
+                json={"patient_id": "P-TEST-804", "new_drug": "Glimepiride"},
+                headers=headers,
+            )
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "no such patient"}
 
 
 def test_websocket_without_token_is_rejected(pg_dsn: str) -> None:

@@ -5,7 +5,7 @@ import pytest
 from medagent.agents.evidence_agent import EvidenceAgent
 from medagent.agents.report_agent import ReportAgent
 from medagent.agents.triage_agent import TriageAgent
-from medagent.core.exceptions import MedAgentError
+from medagent.core.exceptions import PatientNotFoundError
 from medagent.core.models import PatientContext
 from medagent.llm.mock_provider import MockLLMProvider
 from medagent.workflows.followup import run_followup
@@ -15,7 +15,7 @@ async def test_followup_raises_for_unknown_patient() -> None:
     memory = AsyncMock()
     memory.get_patient.return_value = None
 
-    with pytest.raises(MedAgentError):
+    with pytest.raises(PatientNotFoundError):
         await run_followup(
             TriageAgent(),
             AsyncMock(),

@@ -14,7 +14,7 @@ from medagent.agents.evidence_agent import EvidenceAgent
 from medagent.agents.report_agent import ReportAgent
 from medagent.agents.triage_agent import TriageAgent
 from medagent.agents.trial_finder_agent import TrialFinderAgent
-from medagent.core.exceptions import MedAgentError
+from medagent.core.exceptions import PatientNotFoundError
 from medagent.core.interfaces import BaseMemory
 from medagent.core.models import PatientContext
 from medagent.workflows.patient_assessment import run_patient_assessment
@@ -38,7 +38,7 @@ def _build_graph(
     async def load_patient(state: FollowupState) -> dict[str, object]:
         context = await memory.get_patient(state["patient_id"])
         if context is None:
-            raise MedAgentError(f"No existing patient record for id: {state['patient_id']}")
+            raise PatientNotFoundError(f"No existing patient record for id: {state['patient_id']}")
         return {"context": context}
 
     async def run_assessment(state: FollowupState) -> dict[str, object]:
