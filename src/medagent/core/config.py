@@ -12,15 +12,13 @@ class Settings(BaseSettings):
 
     log_level: str = "INFO"
 
-    medical_mcp_command: str = "npx"
-    medical_mcp_args: list[str] = ["-y", "medical-mcp"]
-    healthcare_mcp_command: str = "node"
-    # Real entry point is server/index.js, not build/index.js -- confirmed
-    # against the actual healthcare-mcp-public project (no build step; it
-    # ships plain JS with a working shebang).
-    healthcare_mcp_args: list[str] = ["./vendor/healthcare-mcp/server/index.js"]
-    research_mcp_command: str = "node"
-    research_mcp_args: list[str] = ["./vendor/med-research-mcp-suite/dist/index.js"]
+    # Each MCP server runs as its own container reachable over HTTP: medical-mcp
+    # (stdio-only) sits behind a stdio<->HTTP bridge sidecar; healthcare-mcp and
+    # med-research-mcp-suite expose their own REST APIs directly. Defaults match
+    # the service DNS names used in docker-compose.yml / k8s Service names.
+    medical_mcp_url: str = "http://medical-mcp-bridge:8080"
+    healthcare_mcp_url: str = "http://healthcare-mcp:3000"
+    research_mcp_url: str = "http://research-mcp:3000"
     mcp_timeout_seconds: float = 30.0
     # Free medical APIs behind these MCP servers have low rate ceilings --
     # this throttles outbound calls per server before they ever hit retry.
@@ -30,7 +28,10 @@ class Settings(BaseSettings):
     llm_timeout_seconds: float = 30.0
 
     postgres_dsn: str = "postgresql://medagent:medagent@localhost:5432/medagent"
-    chroma_persist_dir: str = ".chroma"
+    # ChromaDB runs as its own server container so a persist-dir volume can be
+    # shared safely across multiple app replicas instead of embedded per-pod.
+    chroma_host: str = "chromadb"
+    chroma_port: int = 8000
 
     langchain_tracing_v2: bool = False
     langchain_api_key: str | None = None

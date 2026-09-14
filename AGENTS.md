@@ -112,13 +112,20 @@ interactions_log (id, patient_id FK, drug_a, drug_b, severity, description, sour
 
 # MCP Server Config
 
+Each MCP server runs as its own container, reached over HTTP -- not spawned
+as an in-process stdio subprocess -- so they scale, fail, and deploy
+independently (see `docker-compose.yml`). `medical-mcp` is stdio-only (no
+native HTTP mode), so it runs behind a small stdio<->HTTP bridge sidecar
+(`docker/medical-mcp-bridge`); `healthcare-mcp` and `med-research-mcp-suite`
+expose their own plain REST APIs directly (not real MCP-over-HTTP).
+
 ```yaml
-medical-mcp:     { command: npx, args: ["-y", "medical-mcp"], transport: stdio }
-healthcare-mcp:  { command: node, args: ["./vendor/healthcare-mcp/build/index.js"], transport: stdio }
-med-research:    { command: node, args: ["./vendor/med-research-mcp-suite/dist/index.js"], transport: stdio }
+medical-mcp-bridge: { url: http://medical-mcp-bridge:8080, contract: "POST /call-tool {name, arguments} -> {content}" }
+healthcare-mcp:     { url: http://healthcare-mcp:3000, contract: "POST /mcp/call-tool {name, arguments}" }
+research-mcp:       { url: http://research-mcp:3000, contract: "REST: /api/analysis/*, /api/trials/*, /api/fda/*" }
 ```
 
-Tools available: `search-drugs`, `get-drug-details`, `search-drug-nomenclature`, `get-health-statistics`, `search-medical-literature`, `get-article-details`, `search-clinical-guidelines`, `fda_drug_lookup`, `clinical_trials_search`, `medical_terminology` (ICD-10), `medical_calculator`, `comprehensive-analysis`, `drug-safety-profile`.
+Tools available: `search-drugs`, `get-drug-details`, `search-drug-nomenclature`, `get-health-statistics`, `search-medical-literature`, `get-article-details`, `fda_drug_lookup`, `clinical_trials_search`, `lookup_icd_code` (ICD-10), `calculate_bmi`, `research_comprehensive_analysis`, `research_drug_safety_profile`.
 
 # Custom Tools
 

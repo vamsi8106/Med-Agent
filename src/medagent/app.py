@@ -71,7 +71,7 @@ class AppState:
 
         llm = ProviderRegistry.get_provider(settings.llm_provider, settings)
         embeddings = EmbeddingModel()
-        vector_store = VectorStore(settings.chroma_persist_dir)
+        vector_store = VectorStore(settings.chroma_host, settings.chroma_port)
 
         self.triage = TriageAgent()
         self.drug_safety = DrugSafetyAgent(llm, InteractionCheckerTool())

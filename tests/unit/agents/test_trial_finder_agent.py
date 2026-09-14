@@ -5,14 +5,9 @@ from medagent.core.models import PatientContext
 from medagent.llm.mock_provider import MockLLMProvider
 
 
-class _Block:
-    def __init__(self, text: str) -> None:
-        self.text = text
-
-
 class _FakeHealthcareClient:
     def __init__(self, text: str) -> None:
-        self.clinical_trials_search = AsyncMock(return_value=[_Block(text)])
+        self.clinical_trials_search = AsyncMock(return_value={"data": text})
 
     async def __aenter__(self) -> "_FakeHealthcareClient":
         return self
@@ -36,6 +31,6 @@ async def test_find_trials_uses_patient_condition() -> None:
 
     result = await agent.find_trials(_patient(), "any trials?")
 
-    healthcare_client.clinical_trials_search.assert_awaited_once_with("type 2 diabetes", phase=None)
+    healthcare_client.clinical_trials_search.assert_awaited_once_with("type 2 diabetes")
     assert result.role.value == "trial_finder"
     assert "ClinicalTrials.gov" in result.summary

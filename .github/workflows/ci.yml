@@ -37,5 +37,17 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Build image
+      - name: Build medagent image
         run: docker build -t medagent:ci .
+
+      - name: Set up vendor MCP servers
+        run: ./scripts/setup_vendor_mcp.sh
+
+      - name: Build healthcare-mcp image
+        run: docker build -t healthcare-mcp:ci -f docker/healthcare-mcp/Dockerfile ./vendor/healthcare-mcp
+
+      - name: Build research-mcp image
+        run: docker build -t research-mcp:ci -f docker/med-research-mcp-suite/Dockerfile ./vendor/med-research-mcp-suite
+
+      - name: Build medical-mcp-bridge image
+        run: docker build -t medical-mcp-bridge:ci ./docker/medical-mcp-bridge

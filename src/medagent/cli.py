@@ -42,7 +42,7 @@ async def ingest_guideline(file_path: Path, source_name: str) -> int:
     settings = get_settings()
     pipeline = IngestionPipeline(
         embeddings=EmbeddingModel(),
-        vector_store=VectorStore(persist_dir=settings.chroma_persist_dir),
+        vector_store=VectorStore(settings.chroma_host, settings.chroma_port),
     )
 
     if file_path.suffix.lower() == ".pdf":

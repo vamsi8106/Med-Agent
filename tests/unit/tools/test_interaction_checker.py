@@ -7,18 +7,15 @@ from medagent.tools.custom.interaction_checker import InteractionCheckerTool
 
 class _FakeResearchClient:
     def __init__(self, response_text: str) -> None:
-        self.comprehensive_analysis = AsyncMock(return_value=[_Block(response_text)])
+        self.comprehensive_analysis = AsyncMock(
+            return_value={"success": True, "data": response_text}
+        )
 
     async def __aenter__(self) -> "_FakeResearchClient":
         return self
 
     async def __aexit__(self, *exc_info: object) -> None:
         return None
-
-
-class _Block:
-    def __init__(self, text: str) -> None:
-        self.text = text
 
 
 async def test_interaction_checker_flags_major_severity() -> None:

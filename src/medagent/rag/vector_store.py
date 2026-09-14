@@ -7,8 +7,8 @@ import chromadb
 
 
 class VectorStore:
-    def __init__(self, persist_dir: str, collection_name: str = "guidelines") -> None:
-        self._client = chromadb.PersistentClient(path=persist_dir)
+    def __init__(self, host: str, port: int, collection_name: str = "guidelines") -> None:
+        self._client = chromadb.HttpClient(host=host, port=port)
         self._collection = self._client.get_or_create_collection(collection_name)
 
     async def add(

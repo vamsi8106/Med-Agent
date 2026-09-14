@@ -34,8 +34,12 @@ async def drug_safety_agent() -> DrugSafetyAgent:
     llm = ProviderRegistry.get_provider(settings.llm_provider, settings)
     research_client = ResearchMCPClient(settings)
     try:
-        async with research_client:
-            pass
+        async with research_client as client:
+            # __aenter__ only opens an httpx.AsyncClient (no network call by
+            # itself, unlike the old stdio transport's subprocess handshake),
+            # so a real request is needed here to actually detect a down
+            # server rather than silently skipping the connectivity check.
+            await client.drug_safety_profile("aspirin")
     except MCPError as exc:
         pytest.skip(f"MCP server unreachable, skipping live eval: {exc}")
 

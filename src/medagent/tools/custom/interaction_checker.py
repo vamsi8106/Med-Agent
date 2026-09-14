@@ -44,10 +44,17 @@ def _parse_severity(text: str) -> InteractionSeverity:
     return InteractionSeverity.NONE
 
 
-def _extract_text(mcp_content: Any) -> str:
-    if isinstance(mcp_content, list):
-        return " ".join(getattr(block, "text", str(block)) for block in mcp_content)
-    return str(mcp_content)
+def _extract_text(response: Any) -> str:
+    """Flattens the research-mcp REST JSON response body into severity-parseable text.
+
+    web-server.ts returns {"success": bool, "data": {...}, ...} rather than
+    MCP content blocks, so this just stringifies the whole payload -- the
+    severity/risk-profile wording _parse_severity looks for lives somewhere
+    inside `data` regardless of its exact nested shape.
+    """
+    if isinstance(response, dict):
+        return str(response.get("data", response))
+    return str(response)
 
 
 class InteractionCheckerTool(BaseTool):

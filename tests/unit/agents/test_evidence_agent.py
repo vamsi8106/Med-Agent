@@ -5,14 +5,9 @@ from medagent.core.models import ClinicalEvidence, PatientContext
 from medagent.llm.mock_provider import MockLLMProvider
 
 
-class _Block:
-    def __init__(self, text: str) -> None:
-        self.text = text
-
-
 class _FakeMedicalClient:
     def __init__(self, text: str) -> None:
-        self.search_medical_literature = AsyncMock(return_value=[_Block(text)])
+        self.search_medical_literature = AsyncMock(return_value=[{"text": text}])
 
     async def __aenter__(self) -> "_FakeMedicalClient":
         return self

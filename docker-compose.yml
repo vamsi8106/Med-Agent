@@ -15,6 +15,56 @@ services:
       timeout: 5s
       retries: 10
 
+  chromadb:
+    image: chromadb/chroma:0.5.20
+    ports:
+      - "8001:8000"
+    volumes:
+      - chroma-data:/data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v2/heartbeat')\" || exit 1",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  healthcare-mcp:
+    # vendor/ is a gitignored, freshly-cloned third-party source tree (see
+    # scripts/setup_vendor_mcp.sh) -- the Dockerfile itself lives in the
+    # tracked docker/ dir instead, pointed at that dir as the build context.
+    build:
+      context: ./vendor/healthcare-mcp
+      dockerfile: ../../docker/healthcare-mcp/Dockerfile
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+
+  research-mcp:
+    build:
+      context: ./vendor/med-research-mcp-suite
+      dockerfile: ../../docker/med-research-mcp-suite/Dockerfile
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/api/status"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+
+  medical-mcp-bridge:
+    build: ./docker/medical-mcp-bridge
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+
   medagent:
     build: .
     command: sh -c "alembic upgrade head && uvicorn medagent.app:app --host 0.0.0.0 --port 8000"
@@ -26,7 +76,11 @@ services:
       GROQ_MODEL: ${GROQ_MODEL:-llama-3.3-70b-versatile}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       POSTGRES_DSN: postgresql://medagent:${POSTGRES_PASSWORD:-medagent}@postgres:5432/medagent
-      CHROMA_PERSIST_DIR: /data/chroma
+      CHROMA_HOST: chromadb
+      CHROMA_PORT: 8000
+      MEDICAL_MCP_URL: http://medical-mcp-bridge:8080
+      HEALTHCARE_MCP_URL: http://healthcare-mcp:3000
+      RESEARCH_MCP_URL: http://research-mcp:3000
       LANGCHAIN_TRACING_V2: ${LANGCHAIN_TRACING_V2:-false}
       LANGCHAIN_API_KEY: ${LANGCHAIN_API_KEY:-}
       LANGCHAIN_PROJECT: ${LANGCHAIN_PROJECT:-medagent}
@@ -39,10 +93,16 @@ services:
       MCP_RATE_LIMIT_CAPACITY: ${MCP_RATE_LIMIT_CAPACITY:-10}
       ADMIN_BOOTSTRAP_USERNAME: ${ADMIN_BOOTSTRAP_USERNAME:-admin}
       ADMIN_BOOTSTRAP_PASSWORD: ${ADMIN_BOOTSTRAP_PASSWORD:-change-me-before-first-deploy}
-    volumes:
-      - medagent-data:/data
     depends_on:
       postgres:
+        condition: service_healthy
+      chromadb:
+        condition: service_healthy
+      healthcare-mcp:
+        condition: service_healthy
+      research-mcp:
+        condition: service_healthy
+      medical-mcp-bridge:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
@@ -78,6 +138,6 @@ services:
 
 volumes:
   postgres-data:
-  medagent-data:
+  chroma-data:
   prometheus-data:
   grafana-data:

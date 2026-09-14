@@ -14,7 +14,10 @@ logger = get_logger(__name__)
 
 def _extract_text(mcp_content: object) -> str:
     if isinstance(mcp_content, list):
-        return " ".join(getattr(block, "text", str(block)) for block in mcp_content)
+        return " ".join(
+            block.get("text", str(block)) if isinstance(block, dict) else str(block)
+            for block in mcp_content
+        )
     return str(mcp_content)
 
 

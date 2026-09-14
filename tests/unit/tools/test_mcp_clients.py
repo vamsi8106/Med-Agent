@@ -24,34 +24,35 @@ async def test_healthcare_client_clinical_trials_search() -> None:
     client = HealthcareMCPClient(settings=_settings())
     client.call_tool = AsyncMock(return_value="trials")
 
-    result = await client.clinical_trials_search("diabetes", phase="phase_2")
+    result = await client.clinical_trials_search("diabetes", status="recruiting")
 
     client.call_tool.assert_awaited_once_with(
-        "clinical_trials_search", {"condition": "diabetes", "phase": "phase_2"}
+        "clinical_trials_search", {"condition": "diabetes", "status": "recruiting"}
     )
     assert result == "trials"
 
 
 async def test_research_client_drug_safety_profile() -> None:
     client = ResearchMCPClient(settings=_settings())
-    client.call_tool = AsyncMock(return_value="profile")
+    client.request = AsyncMock(return_value={"success": True, "data": "profile"})
 
     result = await client.drug_safety_profile("metformin")
 
-    client.call_tool.assert_awaited_once_with(
-        "research_drug_safety_profile", {"drugName": "metformin"}
+    client.request.assert_awaited_once_with(
+        "POST", "/api/analysis/safety", json={"drugName": "metformin"}
     )
-    assert result == "profile"
+    assert result == {"success": True, "data": "profile"}
 
 
 async def test_research_client_comprehensive_analysis() -> None:
     client = ResearchMCPClient(settings=_settings())
-    client.call_tool = AsyncMock(return_value="analysis")
+    client.request = AsyncMock(return_value={"success": True, "data": "analysis"})
 
     result = await client.comprehensive_analysis("Metformin", "Glimepiride interaction")
 
-    client.call_tool.assert_awaited_once_with(
-        "research_comprehensive_analysis",
-        {"drugName": "Metformin", "condition": "Glimepiride interaction"},
+    client.request.assert_awaited_once_with(
+        "POST",
+        "/api/analysis/comprehensive",
+        json={"drugName": "Metformin", "condition": "Glimepiride interaction"},
     )
-    assert result == "analysis"
+    assert result == {"success": True, "data": "analysis"}

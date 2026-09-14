@@ -25,6 +25,14 @@ if [ ! -d vendor/med-research-mcp-suite ]; then
 fi
 (cd vendor/med-research-mcp-suite && npm install && npm run build)
 
+# vendor/ is gitignored (these are third-party clones, not our source), so a
+# tracked .dockerignore can't live inside them -- the Docker build context for
+# each is its vendor dir (see docker-compose.yml), and without this,
+# `COPY . .` in docker/*/Dockerfile would also copy the node_modules just
+# installed above (built for the host platform) into the container image.
+printf 'node_modules\nlogs\n.env\n' > vendor/healthcare-mcp/.dockerignore
+printf 'node_modules\ndist\nlogs\n.env\n' > vendor/med-research-mcp-suite/.dockerignore
+
 echo "Done. Verify with:"
 echo "  node vendor/healthcare-mcp/server/index.js < /dev/null"
 echo "  node vendor/med-research-mcp-suite/dist/index.js < /dev/null"

@@ -1,4 +1,5 @@
-import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
@@ -16,21 +17,36 @@ class _FakeEmbeddingModel:
         return [[0.0, 0.0] for _ in texts]
 
 
+class _FakeVectorStore:
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        pass
+
+    async def query(self, *args: object, **kwargs: object) -> list[dict[str, object]]:
+        return []
+
+
 def _settings(pg_dsn: str) -> Settings:
     return Settings(
         _env_file=None,
         llm_provider="mock",
         postgres_dsn=pg_dsn,
-        chroma_persist_dir=tempfile.mkdtemp(prefix="medagent-test-chroma-"),
         admin_bootstrap_username=_ADMIN_USERNAME,
         admin_bootstrap_password=_ADMIN_PASSWORD,
     )
 
 
-def _make_client(pg_dsn: str) -> TestClient:
-    with patch("medagent.app.EmbeddingModel", _FakeEmbeddingModel):
-        app = create_app(_settings(pg_dsn))
-    return TestClient(app)
+@contextmanager
+def _make_client(pg_dsn: str) -> Iterator[TestClient]:
+    # AppState (and therefore VectorStore/EmbeddingModel construction) only
+    # happens inside FastAPI's lifespan, which TestClient triggers on
+    # __enter__ -- so these patches must still be active at that point, not
+    # just while create_app() itself runs.
+    with (
+        patch("medagent.app.EmbeddingModel", _FakeEmbeddingModel),
+        patch("medagent.app.VectorStore", _FakeVectorStore),
+        TestClient(create_app(_settings(pg_dsn))) as client,
+    ):
+        yield client
 
 
 def _login(client: TestClient, username: str, password: str) -> str:

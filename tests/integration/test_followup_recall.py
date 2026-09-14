@@ -8,6 +8,9 @@ already cached locally.
 
 import os
 from pathlib import Path
+from unittest.mock import patch
+
+import chromadb
 
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 
@@ -36,7 +39,13 @@ async def test_followup_visit_recalls_patient_and_retrieves_guidelines(tmp_path:
     await patient_store.save_patient(context)
 
     embeddings = EmbeddingModel()
-    vector_store = VectorStore(persist_dir=str(tmp_path / "chroma"))
+    # VectorStore always constructs chromadb.HttpClient (production talks to the
+    # chromadb server container) -- redirect to an in-memory client here since
+    # this integration test has no running Chroma server.
+    with patch(
+        "medagent.rag.vector_store.chromadb.HttpClient", return_value=chromadb.EphemeralClient()
+    ):
+        vector_store = VectorStore(host="unused", port=0)
     pipeline = IngestionPipeline(embeddings=embeddings, vector_store=vector_store)
     await pipeline.ingest_text(
         "# Pharmacotherapy\nMetformin is recommended as first-line therapy for "

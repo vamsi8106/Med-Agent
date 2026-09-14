@@ -1,7 +1,9 @@
 FROM python:3.12-slim
 
+# All 3 MCP servers now run as their own containers, so this image no longer
+# needs Node.js -- just curl for the healthcheck.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl nodejs npm \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=ghcr.io/astral-sh/uv:0.9.7 /uv /uvx /usr/local/bin/

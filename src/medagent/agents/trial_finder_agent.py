@@ -9,10 +9,10 @@ from medagent.tools.mcp.healthcare import HealthcareMCPClient
 logger = get_logger(__name__)
 
 
-def _extract_text(mcp_content: object) -> str:
-    if isinstance(mcp_content, list):
-        return " ".join(getattr(block, "text", str(block)) for block in mcp_content)
-    return str(mcp_content)
+def _extract_text(response: object) -> str:
+    if isinstance(response, dict):
+        return str(response.get("data", response))
+    return str(response)
 
 
 def _resolve_condition(context: PatientContext, message: str) -> str:
@@ -30,12 +30,10 @@ class TrialFinderAgent(BaseAgent):
         result = await self.find_trials(context, message)
         return result.summary
 
-    async def find_trials(
-        self, context: PatientContext, message: str, phase: str | None = None
-    ) -> AgentResult:
+    async def find_trials(self, context: PatientContext, message: str) -> AgentResult:
         condition = _resolve_condition(context, message)
         async with self._healthcare_client as client:
-            content = await client.clinical_trials_search(condition, phase=phase)
+            content = await client.clinical_trials_search(condition)
         trials_text = _extract_text(content)
 
         evidence = [
