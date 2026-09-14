@@ -1,6 +1,6 @@
 # MedAgent
 
-Clinical decision-support agent for doctors: checks drug interactions, retrieves treatment evidence, finds clinical trials, and tracks patient history across visits — with each doctor scoped to only their own patients. Built on LangGraph, FastAPI, Postgres, and ChromaDB, with all medical data sourced from free MCP servers (FDA/WHO/RxNorm/PubMed, ICD-10/trials/calculators, cross-database analysis).
+Clinical decision-support agent for doctors: checks drug interactions (including against recorded allergies), retrieves treatment evidence tailored to the patient's conditions, finds clinical trials, and flags abnormal labs — with each doctor scoped to only their own patients. Built on LangGraph, FastAPI, Postgres, and ChromaDB, with all medical data sourced from free MCP servers (FDA/WHO/RxNorm/PubMed, ICD-10/trials/calculators, cross-database analysis).
 
 Two ways to run it locally:
 
@@ -123,7 +123,7 @@ ALICE_TOKEN=$(curl -s -X POST "$BASE/auth/token" \
 
 ### 3. Create a synthetic patient
 
-`doctor_id` is stamped server-side from the JWT — never something you pass in the body.
+`doctor_id` is stamped server-side from the JWT — never something you pass in the body. Conditions, allergies, and lab results all feed into the agents' reasoning, not just the medications (see [step 5b](#5b-confirm-allergy-conflict-detection)) — include them to see the full effect.
 
 ```bash
 curl -s -X POST "$BASE/patients" \
@@ -134,11 +134,19 @@ curl -s -X POST "$BASE/patients" \
     "age": 68,
     "sex": "F",
     "conditions": ["type 2 diabetes", "hypertension"],
-    "medications": [{"name": "Metformin"}, {"name": "Glimepiride"}]
+    "allergies": ["Sulfa"],
+    "medications": [{"name": "Metformin"}, {"name": "Glimepiride"}],
+    "lab_results": [{
+      "test_name": "HbA1c", "value": 9.8, "unit": "%",
+      "reference_low": 4.0, "reference_high": 5.7,
+      "collected_at": "2026-01-01T00:00:00Z"
+    }]
   }' | python3 -m json.tool
 ```
 
 ### 4. Run a full assessment (LangGraph: triage → drug-safety + evidence + trial-finder in parallel → report)
+
+Evidence lookup is tailored to the patient's recorded conditions/allergies (not just the message), and the report always includes deterministic **Known Allergies** / **Lab Flags** (abnormal-only) sections regardless of which agents ran, driven straight from the record.
 
 ```bash
 curl -s -X POST "$BASE/patients/P-TEST-001/assess" \
@@ -154,6 +162,17 @@ curl -s -X POST "$BASE/drug-check" \
   -H "Authorization: Bearer $ALICE_TOKEN" -H "Content-Type: application/json" \
   -d '{"patient_id": "P-TEST-001", "new_drug": "Ibuprofen"}' \
   | python3 -m json.tool
+```
+
+### 5b. Confirm allergy conflict detection
+
+Checking a drug that matches a recorded allergy (case-insensitive substring match) always appends a deterministic `⚠️ ALLERGY CONFLICT` line to the answer — never left solely to the LLM to notice, even though it usually does mention it too:
+
+```bash
+curl -s -X POST "$BASE/drug-check" \
+  -H "Authorization: Bearer $ALICE_TOKEN" -H "Content-Type: application/json" \
+  -d '{"patient_id": "P-TEST-001", "new_drug": "Sulfamethoxazole"}' \
+  | python3 -c "import sys,json; print(json.load(sys.stdin)['answer'])"
 ```
 
 ### 6. Follow-up visit (recalls the patient, re-runs relevant agents)
