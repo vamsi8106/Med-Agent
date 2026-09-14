@@ -1,4 +1,4 @@
-.PHONY: install test unit-tests lint-check lint-fix format-fix format-check pre-commit ci-check serve db-upgrade db-downgrade db-revision ingest-guideline
+.PHONY: install test unit-tests eval lint-check lint-fix format-fix format-check pre-commit ci-check serve db-upgrade db-downgrade db-revision ingest-guideline
 
 install:
 	uv sync
@@ -8,6 +8,9 @@ test:
 
 unit-tests:
 	uv run pytest tests/unit/
+
+eval:
+	uv run pytest tests/eval/ -v
 
 lint-check:
 	uv run ruff check .
