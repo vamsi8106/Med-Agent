@@ -31,8 +31,8 @@ Canonical names for every domain concept in MedAgent. Use these exact terms in c
 | **Tool** | A callable capability an agent can invoke. Implements `BaseTool`. Has a name, description, JSON schema for parameters, and an async `execute()` method. |
 | **Tool Registry** | Singleton that tracks all available tools. Supports auto-discovery and `get_tool(name)`. |
 | **@tool Decorator** | Decorator that converts a typed async function into a `BaseTool` with auto-generated JSON schema from type hints. |
-| **MCP Client** | A client that connects to an MCP (Model Context Protocol) server via stdio transport, calls its tools, and returns structured results. |
-| **MCP Server** | An external process (Node.js) that exposes tools over the Model Context Protocol. MedAgent integrates three: medical-mcp, healthcare-mcp, med-research-mcp-suite. |
+| **MCP Client** | A client that reaches an MCP-adjacent server over HTTP (each server runs as its own container), calls its tools, and returns structured results. Only medical-mcp speaks the real MCP protocol under the hood, via a stdio<->HTTP bridge sidecar; healthcare-mcp and med-research-mcp-suite expose plain REST APIs. |
+| **MCP Server** | A containerized Node.js process that exposes medical tools. MedAgent integrates three: medical-mcp, healthcare-mcp, med-research-mcp-suite -- see AGENTS.md's "MCP Server Config" for each one's real transport/contract. |
 
 ## Agent System
 
