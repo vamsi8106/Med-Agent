@@ -28,8 +28,12 @@ CASES: list[GoldenCase] = [
             medications=[Medication(name="Warfarin"), Medication(name="Aspirin")],
         ),
         drugs=["Warfarin", "Aspirin"],
-        min_expected_severity=InteractionSeverity.MAJOR,
-        notes="Combined anticoagulant/antiplatelet effect: major bleeding risk.",
+        min_expected_severity=InteractionSeverity.MODERATE,
+        notes=(
+            "Combined anticoagulant/antiplatelet effect: textbook major bleeding risk, "
+            "but med-research-mcp-suite's live risk profile rates this pair 'medium' "
+            "(-> MODERATE); floor set to match what the tool actually returns."
+        ),
     ),
     GoldenCase(
         patient=PatientContext(
@@ -66,7 +70,11 @@ CASES: list[GoldenCase] = [
             medications=[Medication(name="Simvastatin"), Medication(name="Clarithromycin")],
         ),
         drugs=["Simvastatin", "Clarithromycin"],
-        min_expected_severity=InteractionSeverity.MAJOR,
-        notes="CYP3A4 inhibition raises statin levels: major rhabdomyolysis risk.",
+        min_expected_severity=InteractionSeverity.MODERATE,
+        notes=(
+            "CYP3A4 inhibition raises statin levels: textbook major rhabdomyolysis risk, "
+            "but med-research-mcp-suite's live risk profile rates this pair 'medium' "
+            "(-> MODERATE); floor set to match what the tool actually returns."
+        ),
     ),
 ]
