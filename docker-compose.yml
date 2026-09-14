@@ -16,17 +16,20 @@ services:
       retries: 10
 
   chromadb:
-    image: chromadb/chroma:0.5.20
+    # Must track the chromadb Python client's major version (pyproject.toml
+    # pins chromadb>=1.5.9) -- confirmed against a real run that 0.5.20's
+    # older server API breaks the 1.5.x client ("KeyError('_type')" on
+    # collection creation).
+    image: chromadb/chroma:1.5.9
     ports:
       - "8001:8000"
     volumes:
       - chroma-data:/data
     healthcheck:
-      test:
-        [
-          "CMD-SHELL",
-          "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v2/heartbeat')\" || exit 1",
-        ]
+      # chromadb/chroma's image ships neither curl/wget nor python3 (confirmed
+      # against a real container) -- bash's /dev/tcp is the one thing every
+      # variant of this image has had so far.
+      test: ["CMD", "bash", "-c", "echo > /dev/tcp/localhost/8000"]
       interval: 10s
       timeout: 5s
       retries: 10

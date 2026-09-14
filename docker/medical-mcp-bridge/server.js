@@ -18,7 +18,14 @@ let clientPromise = null;
 async function getClient() {
   if (clientPromise === null) {
     clientPromise = (async () => {
-      const transport = new StdioClientTransport({ command: "npx", args: ["-y", "medical-mcp"] });
+      // `npx -y medical-mcp` fails here: the installed bin script's shebang
+      // isn't honored in this image (executed via sh instead of node,
+      // confirmed against a real container -- "import: not found"), so
+      // invoke its real entry point with node directly instead.
+      const transport = new StdioClientTransport({
+        command: "node",
+        args: ["/app/node_modules/medical-mcp/build/index.js"],
+      });
       const client = new Client({ name: "medical-mcp-bridge", version: "1.0.0" }, { capabilities: {} });
       await client.connect(transport);
       return client;
