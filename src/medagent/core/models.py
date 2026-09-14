@@ -36,6 +36,10 @@ class PatientContext(BaseModel):
     name: str
     age: int
     sex: str
+    # Owning doctor for per-doctor data isolation. Stamped server-side from
+    # the creating doctor's JWT (never client-supplied) and immutable after
+    # creation -- see PatientStore.save_patient.
+    doctor_id: str | None = None
     weight_kg: float | None = None
     height_cm: float | None = None
     conditions: list[str] = Field(default_factory=list)

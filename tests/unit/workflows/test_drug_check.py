@@ -34,3 +34,16 @@ async def test_drug_check_builds_message_from_current_meds() -> None:
     assert "Metformin" in args[1]
     assert "Glimepiride" in args[1]
     assert result == "No major concerns."
+
+
+async def test_drug_check_forwards_doctor_id_to_memory() -> None:
+    memory = AsyncMock()
+    memory.get_patient.return_value = PatientContext(
+        id="P-TEST-701", name="Patient Beta", age=40, sex="M", doctor_id="DR-TEST-001"
+    )
+    drug_safety = AsyncMock()
+    drug_safety.run.return_value = "No major concerns."
+
+    await run_drug_check(drug_safety, memory, "P-TEST-701", "Ibuprofen", doctor_id="DR-TEST-001")
+
+    memory.get_patient.assert_awaited_once_with("P-TEST-701", "DR-TEST-001")

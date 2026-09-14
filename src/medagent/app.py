@@ -41,6 +41,11 @@ from medagent.workflows.patient_assessment import run_patient_assessment
 logger = get_logger(__name__)
 
 
+def _doctor_scope(user: User) -> str | None:
+    """Per-doctor data isolation filter: None means unrestricted (admin)."""
+    return None if user.role == "admin" else user.id
+
+
 class AssessRequest(BaseModel):
     message: str
 
@@ -170,6 +175,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         context: PatientContext, user: User = Depends(get_current_user)
     ) -> PatientContext:
         state: AppState = app.state.medagent
+        # Server-stamped, never client-supplied: whatever doctor_id the
+        # request body carried is overwritten with the creating doctor's own
+        # identity, and it's immutable after this (see PatientStore.save_patient).
+        context.doctor_id = user.id
         await state.patient_store.save_patient(context)
         await state.audit_log.record(user, context.id, "patient_created")
         return context
@@ -179,7 +188,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         patient_id: str, user: User = Depends(get_current_user)
     ) -> PatientContext:
         state: AppState = app.state.medagent
-        patient = await state.patient_store.get_patient(patient_id)
+        patient = await state.patient_store.get_patient(patient_id, _doctor_scope(user))
         if patient is None:
             raise HTTPException(status_code=404, detail=f"Unknown patient: {patient_id}")
         await state.audit_log.record(user, patient_id, "patient_viewed")
@@ -190,6 +199,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         patient_id: str, user: User = Depends(get_current_user)
     ) -> list[dict[str, Any]]:
         state: AppState = app.state.medagent
+        # Audit log itself isn't doctor-filtered, so ownership must be
+        # checked explicitly here before returning any rows.
+        patient = await state.patient_store.get_patient(patient_id, _doctor_scope(user))
+        if patient is None:
+            raise HTTPException(status_code=404, detail=f"Unknown patient: {patient_id}")
         await state.audit_log.record(user, patient_id, "audit_log_viewed")
         return await state.audit_log.for_patient(patient_id)
 
@@ -200,7 +214,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # REST has no interactive approval channel, so it auto-saves. The
         # human-in-the-loop checkpoint lives in the WebSocket chat below.
         state: AppState = app.state.medagent
-        patient = await state.patient_store.get_patient(patient_id)
+        patient = await state.patient_store.get_patient(patient_id, _doctor_scope(user))
         if patient is None:
             raise HTTPException(status_code=404, detail=f"Unknown patient: {patient_id}")
         report = await run_patient_assessment(
@@ -230,6 +244,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             state.patient_store,
             patient_id,
             body.message,
+            doctor_id=_doctor_scope(user),
         )
         await state.patient_store.save_patient(patient)
         await state.audit_log.record(user, patient_id, "followup_run", {"message": body.message})
@@ -241,7 +256,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     ) -> dict[str, str]:
         state: AppState = app.state.medagent
         answer = await run_drug_check(
-            state.drug_safety, state.patient_store, body.patient_id, body.new_drug
+            state.drug_safety,
+            state.patient_store,
+            body.patient_id,
+            body.new_drug,
+            doctor_id=_doctor_scope(user),
         )
         await state.audit_log.record(
             user, body.patient_id, "drug_check_run", {"new_drug": body.new_drug}
@@ -278,6 +297,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         state.patient_store,
                         patient_id,
                         message,
+                        doctor_id=_doctor_scope(user),
                     )
                 except MedAgentError as exc:
                     await websocket.send_json({"type": "error", "detail": str(exc)})

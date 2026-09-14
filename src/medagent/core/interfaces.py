@@ -28,7 +28,9 @@ class BaseAgent(ABC):
 
 class BaseMemory(ABC):
     @abstractmethod
-    async def get_patient(self, patient_id: str) -> PatientContext | None: ...
+    async def get_patient(
+        self, patient_id: str, doctor_id: str | None = None
+    ) -> PatientContext | None: ...
 
     @abstractmethod
     async def save_patient(self, context: PatientContext) -> None: ...

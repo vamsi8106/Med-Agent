@@ -100,14 +100,19 @@ Never import upward. `core/` never imports from `llm/`. `tools/` never imports f
 
 **Phase 6 — Production:** `app.py` (FastAPI + WebSocket) + `infra/` (tracing, metrics, circuit_breaker, middleware) + Docker. Gate: `docker compose up` runs full system.
 
-# SQLite Schema
+# Postgres Schema
+
+`doctor_id` on every patient-data table below enforces per-doctor isolation
+(each doctor sees only their own patients; admins bypass it) -- stamped
+server-side from the creating doctor's JWT at patient creation, immutable
+afterward. See `src/medagent/memory/schema.py`'s `ADD_DOCTOR_ID_STATEMENTS`.
 
 ```sql
-patients    (id, name, age, sex, weight_kg, height_cm, conditions JSON, allergies JSON, created_at, updated_at)
-medications (id, patient_id FK, name, brand_name, dose, frequency, route, start_date, end_date, status, created_at)
-lab_results (id, patient_id FK, test_name, value, unit, reference_low, reference_high, is_abnormal, collected_at)
-visits      (id, patient_id FK, visit_date, chief_complaint, assessment, plan, agent_session_id, created_at)
-interactions_log (id, patient_id FK, drug_a, drug_b, severity, description, source, checked_at)
+patients    (id, name, age, sex, doctor_id, weight_kg, height_cm, conditions JSON, allergies JSON, created_at, updated_at)
+medications (id, patient_id FK, doctor_id, name, brand_name, dose, frequency, route, start_date, end_date, status, created_at)
+lab_results (id, patient_id FK, doctor_id, test_name, value, unit, reference_low, reference_high, is_abnormal, collected_at)
+visits      (id, patient_id FK, doctor_id, visit_date, chief_complaint, assessment, plan, agent_session_id, created_at)
+interactions_log (id, patient_id FK, doctor_id, drug_a, drug_b, severity, description, source, checked_at)
 ```
 
 # MCP Server Config

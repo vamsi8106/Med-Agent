@@ -12,6 +12,7 @@ from medagent.core.models import PatientContext
 
 class DrugCheckState(TypedDict):
     patient_id: str
+    doctor_id: str | None
     new_drug: str
     context: PatientContext | None
     message: str
@@ -20,7 +21,7 @@ class DrugCheckState(TypedDict):
 
 def _build_graph(drug_safety: DrugSafetyAgent, memory: BaseMemory) -> StateGraph:
     async def load_patient(state: DrugCheckState) -> dict[str, object]:
-        context = await memory.get_patient(state["patient_id"])
+        context = await memory.get_patient(state["patient_id"], state["doctor_id"])
         if context is None:
             raise PatientNotFoundError(f"No existing patient record for id: {state['patient_id']}")
         return {"context": context}
@@ -43,8 +44,14 @@ def _build_graph(drug_safety: DrugSafetyAgent, memory: BaseMemory) -> StateGraph
 
 
 async def run_drug_check(
-    drug_safety: DrugSafetyAgent, memory: BaseMemory, patient_id: str, new_drug: str
+    drug_safety: DrugSafetyAgent,
+    memory: BaseMemory,
+    patient_id: str,
+    new_drug: str,
+    doctor_id: str | None = None,
 ) -> str:
     graph = _build_graph(drug_safety, memory).compile()
-    result = await graph.ainvoke({"patient_id": patient_id, "new_drug": new_drug})
+    result = await graph.ainvoke(
+        {"patient_id": patient_id, "doctor_id": doctor_id, "new_drug": new_drug}
+    )
     return result["answer"]

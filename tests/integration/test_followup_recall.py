@@ -34,6 +34,7 @@ async def test_followup_visit_recalls_patient_and_retrieves_guidelines(pg_dsn: s
         name="Patient Alpha",
         age=62,
         sex="F",
+        doctor_id="DR-TEST-100",
         conditions=["type 2 diabetes"],
         medications=[Medication(name="Metformin", dose="500mg")],
     )

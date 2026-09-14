@@ -58,3 +58,34 @@ async def test_followup_recalls_and_runs_assessment() -> None:
     assert "Patient Alpha" in report
     assert patient.id == "P-TEST-600"
     memory.save_patient.assert_not_awaited()
+
+
+async def test_followup_forwards_doctor_id_to_memory() -> None:
+    memory = AsyncMock()
+    memory.get_patient.return_value = PatientContext(
+        id="P-TEST-601", name="Patient Beta", age=45, sex="M", doctor_id="DR-TEST-001"
+    )
+    guideline_retriever = AsyncMock()
+    guideline_retriever.run.return_value = []
+    medical_client = AsyncMock()
+    medical_client.__aenter__.return_value = medical_client
+    medical_client.search_medical_literature.return_value = "n/a"
+    evidence = EvidenceAgent(
+        llm=MockLLMProvider(fixed_response="n/a"),
+        medical_client=medical_client,
+        guideline_retriever=guideline_retriever,
+    )
+
+    await run_followup(
+        TriageAgent(),
+        AsyncMock(),
+        evidence,
+        AsyncMock(),
+        ReportAgent(),
+        memory,
+        "P-TEST-601",
+        "follow-up visit",
+        doctor_id="DR-TEST-001",
+    )
+
+    memory.get_patient.assert_awaited_once_with("P-TEST-601", "DR-TEST-001")

@@ -14,9 +14,20 @@ class PatientStore(BaseMemory):
     def __init__(self, store: PersistentStore) -> None:
         self._store = store
 
-    async def get_patient(self, patient_id: str) -> PatientContext | None:
+    async def get_patient(
+        self, patient_id: str, doctor_id: str | None = None
+    ) -> PatientContext | None:
         async with self._store.connect() as conn:
-            patient_row = await conn.fetchrow("SELECT * FROM patients WHERE id = $1", patient_id)
+            if doctor_id is not None:
+                patient_row = await conn.fetchrow(
+                    "SELECT * FROM patients WHERE id = $1 AND doctor_id = $2",
+                    patient_id,
+                    doctor_id,
+                )
+            else:
+                patient_row = await conn.fetchrow(
+                    "SELECT * FROM patients WHERE id = $1", patient_id
+                )
             if patient_row is None:
                 return None
 
@@ -32,6 +43,7 @@ class PatientStore(BaseMemory):
             name=patient_row["name"],
             age=patient_row["age"],
             sex=patient_row["sex"],
+            doctor_id=patient_row["doctor_id"],
             weight_kg=patient_row["weight_kg"],
             height_cm=patient_row["height_cm"],
             conditions=json.loads(patient_row["conditions"]),
@@ -70,6 +82,10 @@ class PatientStore(BaseMemory):
     async def save_patient(self, context: PatientContext) -> None:
         if not context.id:
             raise MedAgentMemoryError("PatientContext.id is required to save a patient record")
+        if not context.doctor_id:
+            raise MedAgentMemoryError(
+                "PatientContext.doctor_id is required to save a patient record"
+            )
 
         now = datetime.now(UTC)
         async with self._store.connect() as conn, conn.transaction():
@@ -81,15 +97,24 @@ class PatientStore(BaseMemory):
             )
 
             if existing is None:
+                # doctor_id is set here only -- the UPDATE branch below never
+                # touches it, so ownership is immutable after creation. Every
+                # caller that reaches this branch with an untrusted
+                # context.doctor_id is app.py's POST /patients, which
+                # server-stamps it from the JWT before calling save_patient;
+                # every other caller re-saves a context obtained via the
+                # already doctor-scoped get_patient, so it already carries
+                # the correct, previously-verified value.
                 await conn.execute(
                     """INSERT INTO patients
-                    (id, name, age, sex, weight_kg, height_cm, conditions, allergies,
-                     created_at, updated_at)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb, $9, $10)""",
+                    (id, name, age, sex, doctor_id, weight_kg, height_cm, conditions,
+                     allergies, created_at, updated_at)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10, $11)""",
                     context.id,
                     context.name,
                     context.age,
                     context.sex,
+                    context.doctor_id,
                     context.weight_kg,
                     context.height_cm,
                     json.dumps(context.conditions),
@@ -117,11 +142,12 @@ class PatientStore(BaseMemory):
             for med in context.medications:
                 await conn.execute(
                     """INSERT INTO medications
-                    (id, patient_id, name, brand_name, dose, frequency, route,
+                    (id, patient_id, doctor_id, name, brand_name, dose, frequency, route,
                      start_date, end_date, status, created_at)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)""",
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)""",
                     med.id or str(uuid.uuid4()),
                     context.id,
+                    context.doctor_id,
                     med.name,
                     med.brand_name,
                     med.dose,
@@ -137,11 +163,12 @@ class PatientStore(BaseMemory):
             for lab in context.lab_results:
                 await conn.execute(
                     """INSERT INTO lab_results
-                    (id, patient_id, test_name, value, unit, reference_low,
+                    (id, patient_id, doctor_id, test_name, value, unit, reference_low,
                      reference_high, is_abnormal, collected_at)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)""",
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)""",
                     lab.id or str(uuid.uuid4()),
                     context.id,
+                    context.doctor_id,
                     lab.test_name,
                     lab.value,
                     lab.unit,

@@ -17,6 +17,7 @@ import asyncpg
 import pytest
 
 from medagent.memory.schema import (
+    ADD_DOCTOR_ID_STATEMENTS,
     AUDIT_LOG_CREATE_STATEMENTS,
     CREATE_STATEMENTS,
     TABLES_IN_DEPENDENCY_ORDER,
@@ -59,7 +60,11 @@ async def _wait_until_ready_and_apply_schema(dsn: str) -> None:
         raise RuntimeError(f"Postgres test container never became ready: {last_error}")
 
     try:
-        for statement in [*CREATE_STATEMENTS, *AUDIT_LOG_CREATE_STATEMENTS]:
+        for statement in [
+            *CREATE_STATEMENTS,
+            *AUDIT_LOG_CREATE_STATEMENTS,
+            *ADD_DOCTOR_ID_STATEMENTS,
+        ]:
             await conn.execute(statement)
     finally:
         await conn.close()

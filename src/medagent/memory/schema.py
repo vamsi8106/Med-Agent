@@ -124,6 +124,36 @@ AUDIT_LOG_DROP_STATEMENTS: list[str] = [
     "DROP TABLE IF EXISTS audit_log",
 ]
 
+# Migration 0003: per-doctor data isolation. Nullable at the DB level (a
+# NOT NULL column would break `alembic upgrade head` against an already-
+# populated patients table with no backfill) -- required-ness is enforced at
+# the application layer instead, in PatientStore.save_patient.
+ADD_DOCTOR_ID_STATEMENTS: list[str] = [
+    "ALTER TABLE patients ADD COLUMN IF NOT EXISTS doctor_id TEXT",
+    "CREATE INDEX IF NOT EXISTS ix_patients_doctor_id ON patients(doctor_id)",
+    "ALTER TABLE medications ADD COLUMN IF NOT EXISTS doctor_id TEXT",
+    "CREATE INDEX IF NOT EXISTS ix_medications_doctor_id ON medications(doctor_id)",
+    "ALTER TABLE lab_results ADD COLUMN IF NOT EXISTS doctor_id TEXT",
+    "CREATE INDEX IF NOT EXISTS ix_lab_results_doctor_id ON lab_results(doctor_id)",
+    "ALTER TABLE visits ADD COLUMN IF NOT EXISTS doctor_id TEXT",
+    "CREATE INDEX IF NOT EXISTS ix_visits_doctor_id ON visits(doctor_id)",
+    "ALTER TABLE interactions_log ADD COLUMN IF NOT EXISTS doctor_id TEXT",
+    "CREATE INDEX IF NOT EXISTS ix_interactions_log_doctor_id ON interactions_log(doctor_id)",
+]
+
+REMOVE_DOCTOR_ID_STATEMENTS: list[str] = [
+    "DROP INDEX IF EXISTS ix_interactions_log_doctor_id",
+    "ALTER TABLE interactions_log DROP COLUMN IF EXISTS doctor_id",
+    "DROP INDEX IF EXISTS ix_visits_doctor_id",
+    "ALTER TABLE visits DROP COLUMN IF EXISTS doctor_id",
+    "DROP INDEX IF EXISTS ix_lab_results_doctor_id",
+    "ALTER TABLE lab_results DROP COLUMN IF EXISTS doctor_id",
+    "DROP INDEX IF EXISTS ix_medications_doctor_id",
+    "ALTER TABLE medications DROP COLUMN IF EXISTS doctor_id",
+    "DROP INDEX IF EXISTS ix_patients_doctor_id",
+    "ALTER TABLE patients DROP COLUMN IF EXISTS doctor_id",
+]
+
 TABLES_IN_DEPENDENCY_ORDER: list[str] = [
     "audit_log",
     "interactions_log",

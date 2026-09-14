@@ -178,6 +178,72 @@ def test_get_missing_patient_returns_404(pg_dsn: str) -> None:
     assert response.status_code == 404
 
 
+def test_get_patient_from_another_doctor_returns_404(pg_dsn: str) -> None:
+    with _make_client(pg_dsn) as client:
+        owner_headers = _auth_headers(client, username="dr.owner")
+        client.post(
+            "/patients",
+            json={"id": "P-TEST-807", "name": "Patient Eta", "age": 44, "sex": "F"},
+            headers=owner_headers,
+        )
+
+        other_headers = _auth_headers(client, username="dr.other")
+        response = client.get("/patients/P-TEST-807", headers=other_headers)
+
+    assert response.status_code == 404
+
+
+def test_admin_can_view_any_doctors_patient(pg_dsn: str) -> None:
+    with _make_client(pg_dsn) as client:
+        owner_headers = _auth_headers(client, username="dr.owner2")
+        client.post(
+            "/patients",
+            json={"id": "P-TEST-808", "name": "Patient Theta", "age": 51, "sex": "M"},
+            headers=owner_headers,
+        )
+
+        response = client.get("/patients/P-TEST-808", headers=_admin_headers(client))
+
+    assert response.status_code == 200
+    assert response.json()["name"] == "Patient Theta"
+
+
+def test_assess_endpoint_scoped_to_owning_doctor(pg_dsn: str) -> None:
+    with _make_client(pg_dsn) as client:
+        owner_headers = _auth_headers(client, username="dr.owner3")
+        client.post(
+            "/patients",
+            json={"id": "P-TEST-809", "name": "Patient Iota", "age": 39, "sex": "F"},
+            headers=owner_headers,
+        )
+
+        other_headers = _auth_headers(client, username="dr.other3")
+        response = client.post(
+            "/patients/P-TEST-809/assess", json={"message": "hi"}, headers=other_headers
+        )
+
+    assert response.status_code == 404
+
+
+def test_drug_check_endpoint_scoped_to_owning_doctor(pg_dsn: str) -> None:
+    with _make_client(pg_dsn) as client:
+        owner_headers = _auth_headers(client, username="dr.owner4")
+        client.post(
+            "/patients",
+            json={"id": "P-TEST-810", "name": "Patient Kappa", "age": 62, "sex": "M"},
+            headers=owner_headers,
+        )
+
+        other_headers = _auth_headers(client, username="dr.other4")
+        response = client.post(
+            "/drug-check",
+            json={"patient_id": "P-TEST-810", "new_drug": "Glimepiride"},
+            headers=other_headers,
+        )
+
+    assert response.status_code == 404
+
+
 def test_audit_log_records_create_and_view(pg_dsn: str) -> None:
     with _make_client(pg_dsn) as client:
         headers = _auth_headers(client, username="dr.audit")
@@ -272,7 +338,9 @@ def test_websocket_without_token_is_rejected(pg_dsn: str) -> None:
 
 
 def test_websocket_chat_requires_approval_before_saving(pg_dsn: str) -> None:
-    patient = PatientContext(id="P-TEST-803", name="Patient Gamma", age=70, sex="M")
+    patient = PatientContext(
+        id="P-TEST-803", name="Patient Gamma", age=70, sex="M", doctor_id="DR-TEST-001"
+    )
     with _make_client(pg_dsn) as client:
         token = _admin_token(client)
         fake_followup = AsyncMock(return_value=("Follow-up report", patient))
@@ -292,7 +360,9 @@ def test_websocket_chat_requires_approval_before_saving(pg_dsn: str) -> None:
 
 
 def test_websocket_chat_reject_does_not_save(pg_dsn: str) -> None:
-    patient = PatientContext(id="P-TEST-804", name="Patient Delta", age=65, sex="F")
+    patient = PatientContext(
+        id="P-TEST-804", name="Patient Delta", age=65, sex="F", doctor_id="DR-TEST-001"
+    )
     with _make_client(pg_dsn) as client:
         token = _admin_token(client)
         fake_followup = AsyncMock(return_value=("Draft report", patient))
@@ -311,7 +381,9 @@ def test_websocket_chat_reject_does_not_save(pg_dsn: str) -> None:
 
 
 def test_websocket_chat_edited_text_is_saved_instead(pg_dsn: str) -> None:
-    patient = PatientContext(id="P-TEST-805", name="Patient Epsilon", age=45, sex="F")
+    patient = PatientContext(
+        id="P-TEST-805", name="Patient Epsilon", age=45, sex="F", doctor_id="DR-TEST-001"
+    )
     with _make_client(pg_dsn) as client:
         token = _admin_token(client)
         fake_followup = AsyncMock(return_value=("Draft report", patient))

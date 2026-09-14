@@ -22,6 +22,7 @@ from medagent.workflows.patient_assessment import run_patient_assessment
 
 class FollowupState(TypedDict):
     patient_id: str
+    doctor_id: str | None
     message: str
     context: PatientContext | None
     report: str
@@ -36,7 +37,7 @@ def _build_graph(
     memory: BaseMemory,
 ) -> StateGraph:
     async def load_patient(state: FollowupState) -> dict[str, object]:
-        context = await memory.get_patient(state["patient_id"])
+        context = await memory.get_patient(state["patient_id"], state["doctor_id"])
         if context is None:
             raise PatientNotFoundError(f"No existing patient record for id: {state['patient_id']}")
         return {"context": context}
@@ -67,7 +68,10 @@ async def run_followup(
     memory: BaseMemory,
     patient_id: str,
     message: str,
+    doctor_id: str | None = None,
 ) -> tuple[str, PatientContext]:
     graph = _build_graph(triage, drug_safety, evidence, trial_finder, report, memory).compile()
-    result = await graph.ainvoke({"patient_id": patient_id, "message": message})
+    result = await graph.ainvoke(
+        {"patient_id": patient_id, "doctor_id": doctor_id, "message": message}
+    )
     return result["report"], result["context"]

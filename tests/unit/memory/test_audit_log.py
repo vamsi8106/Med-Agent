@@ -11,7 +11,9 @@ def _store(pg_dsn: str) -> AuditLogStore:
 async def _seed_patient(pg_dsn: str, patient_id: str) -> None:
     patient_store = PatientStore(PersistentStore(pg_dsn))
     await patient_store.save_patient(
-        PatientContext(id=patient_id, name="Patient Alpha", age=50, sex="F")
+        PatientContext(
+            id=patient_id, name="Patient Alpha", age=50, sex="F", doctor_id="DR-TEST-001"
+        )
     )
 
 
