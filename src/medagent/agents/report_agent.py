@@ -7,12 +7,17 @@ BaseAgent's single (context, message) -> str turn contract.
 
 from medagent.core.exceptions import ToolError
 from medagent.core.models import AgentResult, PatientContext
+from medagent.tools.custom.lab_interpreter import LabInterpreterTool
 from medagent.tools.custom.report_generator import ReportGeneratorTool
 
 
 class ReportAgent:
-    def __init__(self, report_generator: ReportGeneratorTool | None = None) -> None:
-        self._report_generator = report_generator or ReportGeneratorTool()
+    def __init__(
+        self,
+        report_generator: ReportGeneratorTool | None = None,
+        lab_interpreter: LabInterpreterTool | None = None,
+    ) -> None:
+        self._report_generator = report_generator or ReportGeneratorTool(lab_interpreter)
 
     async def generate(self, patient: PatientContext, results: list[AgentResult]) -> str:
         result = await self._report_generator.run(patient, results)

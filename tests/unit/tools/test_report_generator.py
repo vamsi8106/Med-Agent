@@ -4,6 +4,7 @@ from medagent.core.models import (
     AgentResult,
     ClinicalEvidence,
     DrugInteraction,
+    LabResult,
     PatientContext,
 )
 from medagent.core.types import AgentRole, InteractionSeverity
@@ -46,3 +47,51 @@ async def test_report_includes_all_sections_and_citations() -> None:
     assert "Metformin + Glimepiride" in report
     assert "## Evidence" in report
     assert "ADA Standards of Care" in report
+    assert "## Known Allergies" not in report
+    assert "## Lab Flags" not in report
+
+
+async def test_report_includes_allergies_section_when_present() -> None:
+    patient = PatientContext(
+        id="P-TEST-002", name="Patient Beta", age=45, sex="F", allergies=["Penicillin"]
+    )
+
+    tool = ReportGeneratorTool()
+    result = await tool.run(patient, [])
+
+    assert "## Known Allergies" in result.data
+    assert "Penicillin" in result.data
+
+
+async def test_report_lab_flags_section_shows_only_abnormal_results() -> None:
+    patient = PatientContext(
+        id="P-TEST-003",
+        name="Patient Gamma",
+        age=55,
+        sex="M",
+        lab_results=[
+            LabResult(
+                test_name="HbA1c",
+                value=9.5,
+                unit="%",
+                reference_low=4.0,
+                reference_high=5.7,
+                collected_at=datetime.now(UTC),
+            ),
+            LabResult(
+                test_name="Sodium",
+                value=140,
+                unit="mmol/L",
+                reference_low=135,
+                reference_high=145,
+                collected_at=datetime.now(UTC),
+            ),
+        ],
+    )
+
+    tool = ReportGeneratorTool()
+    result = await tool.run(patient, [])
+
+    assert "## Lab Flags" in result.data
+    assert "HbA1c" in result.data
+    assert "Sodium" not in result.data

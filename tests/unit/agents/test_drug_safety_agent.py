@@ -90,3 +90,30 @@ async def test_run_result_returns_agent_result_with_interactions() -> None:
 
     assert result.role.value == "drug_safety"
     assert result.interactions == interactions
+
+
+async def test_flags_allergy_conflict_with_checked_drug() -> None:
+    agent = DrugSafetyAgent(
+        llm=MockLLMProvider(fixed_response="Findings."),
+        interaction_checker=_FakeInteractionChecker([]),  # type: ignore[arg-type]
+    )
+    context = _patient()
+    context.allergies = ["Sulfa"]
+
+    result = await agent.run(context, "Check interactions for Sulfamethoxazole and Trimethoprim")
+
+    assert "ALLERGY CONFLICT" in result
+    assert "Sulfa" in result
+
+
+async def test_no_allergy_conflict_line_when_no_match() -> None:
+    agent = DrugSafetyAgent(
+        llm=MockLLMProvider(fixed_response="Findings."),
+        interaction_checker=_FakeInteractionChecker([]),  # type: ignore[arg-type]
+    )
+    context = _patient()
+    context.allergies = ["Penicillin"]
+
+    result = await agent.run(context, "Check interactions for Metformin and Glimepiride")
+
+    assert "ALLERGY CONFLICT" not in result

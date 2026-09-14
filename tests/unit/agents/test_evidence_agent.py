@@ -1,8 +1,21 @@
 from unittest.mock import AsyncMock
 
 from medagent.agents.evidence_agent import EvidenceAgent
-from medagent.core.models import ClinicalEvidence, PatientContext
+from medagent.core.interfaces import BaseLLMProvider
+from medagent.core.models import ClinicalEvidence, LLMResponse, Message, PatientContext
 from medagent.llm.mock_provider import MockLLMProvider
+
+
+class _RecordingLLMProvider(BaseLLMProvider):
+    def __init__(self, fixed_response: str = "mock response") -> None:
+        self._fixed_response = fixed_response
+        self.received_messages: list[Message] = []
+
+    async def complete(
+        self, messages: list[Message], tools: list[dict] | None = None
+    ) -> LLMResponse:
+        self.received_messages = messages
+        return LLMResponse(content=self._fixed_response, model="mock-model")
 
 
 class _FakeMedicalClient:
@@ -54,3 +67,48 @@ async def test_run_returns_summary_string() -> None:
 
     result = await agent.run(_patient(), "any evidence?")
     assert "Summary text" in result
+
+
+async def test_synthesis_prompt_includes_conditions_and_allergies() -> None:
+    guideline_retriever = AsyncMock()
+    guideline_retriever.run.return_value = []
+    medical_client = _FakeMedicalClient("n/a")
+    llm = _RecordingLLMProvider(fixed_response="n/a")
+
+    agent = EvidenceAgent(
+        llm=llm,
+        medical_client=medical_client,  # type: ignore[arg-type]
+        guideline_retriever=guideline_retriever,
+    )
+    patient = PatientContext(
+        id="P-TEST-002",
+        name="Patient Beta",
+        age=60,
+        sex="F",
+        conditions=["type 2 diabetes"],
+        allergies=["Penicillin"],
+    )
+
+    await agent.gather_evidence(patient, "first-line therapy?")
+
+    user_message = next(m for m in llm.received_messages if m.role == "user")
+    assert "type 2 diabetes" in user_message.content
+    assert "Penicillin" in user_message.content
+
+
+async def test_synthesis_prompt_omits_preamble_when_no_record_data() -> None:
+    guideline_retriever = AsyncMock()
+    guideline_retriever.run.return_value = []
+    medical_client = _FakeMedicalClient("n/a")
+    llm = _RecordingLLMProvider(fixed_response="n/a")
+
+    agent = EvidenceAgent(
+        llm=llm,
+        medical_client=medical_client,  # type: ignore[arg-type]
+        guideline_retriever=guideline_retriever,
+    )
+
+    await agent.gather_evidence(_patient(), "first-line therapy?")
+
+    user_message = next(m for m in llm.received_messages if m.role == "user")
+    assert "Patient context:" not in user_message.content

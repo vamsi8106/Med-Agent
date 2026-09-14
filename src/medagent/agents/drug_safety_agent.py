@@ -40,6 +40,20 @@ def _format_citations(interactions: list[DrugInteraction]) -> str:
     return "\n".join(lines)
 
 
+def _check_allergy_conflicts(context: PatientContext, drug_names: list[str]) -> list[str]:
+    """Case-insensitive substring match between recorded allergies and the
+    drugs being checked -- deterministic, not left to the LLM to notice."""
+    conflicts = []
+    for allergy in context.allergies:
+        for drug_name in drug_names:
+            if allergy.lower() in drug_name.lower() or drug_name.lower() in allergy.lower():
+                conflicts.append(
+                    f"⚠️ ALLERGY CONFLICT: patient has a recorded allergy to '{allergy}', "
+                    f"which may relate to '{drug_name}' in this check."
+                )
+    return conflicts
+
+
 class DrugSafetyAgent(BaseAgent):
     def __init__(self, llm: BaseLLMProvider, interaction_checker: InteractionCheckerTool) -> None:
         self._llm = llm
@@ -71,10 +85,19 @@ class DrugSafetyAgent(BaseAgent):
 
         interactions: list[DrugInteraction] = result.data
         citations = _format_citations(interactions)
+        allergy_conflicts = _check_allergy_conflicts(context, drug_names)
 
-        synthesis_prompt = (
-            "Summarize the following drug interaction findings for a doctor, "
-            "in plain clinical language:\n" + citations
+        synthesis_prompt = "\n".join(
+            [
+                "Summarize the following drug interaction findings for a doctor, "
+                "in plain clinical language:",
+                citations,
+                *(
+                    ["", "Known allergy conflicts to address:", *allergy_conflicts]
+                    if allergy_conflicts
+                    else []
+                ),
+            ]
         )
         response = await self._llm.complete(
             [
@@ -89,4 +112,8 @@ class DrugSafetyAgent(BaseAgent):
         )
 
         final_answer = f"{response.content}\n\nCitations:\n{citations}"
+        if allergy_conflicts:
+            # Appended after the LLM's own text too, so a conflict can never
+            # be silently dropped even if the LLM's synthesis omits it.
+            final_answer += "\n\n" + "\n".join(allergy_conflicts)
         return final_answer, interactions

@@ -21,6 +21,20 @@ def _extract_text(mcp_content: object) -> str:
     return str(mcp_content)
 
 
+def _patient_context_preamble(context: PatientContext) -> str | None:
+    if not context.conditions and not context.allergies:
+        return None
+    parts = []
+    if context.conditions:
+        parts.append(f"conditions={context.conditions}")
+    if context.allergies:
+        parts.append(f"known allergies={context.allergies}")
+    return (
+        f"Patient context: {'; '.join(parts)}. Tailor the evidence to this patient "
+        "and flag any relevant contraindications."
+    )
+
+
 class EvidenceAgent(BaseAgent):
     def __init__(
         self,
@@ -48,8 +62,14 @@ class EvidenceAgent(BaseAgent):
         evidence = [*guideline_hits, *literature_evidence]
 
         citations = "\n".join(f"- {e.title} (source: {e.source or 'unknown'})" for e in evidence)
-        synthesis_prompt = (
-            f"Summarize the clinical evidence for: {message}\n\nEvidence found:\n{citations}"
+        preamble = _patient_context_preamble(context)
+        synthesis_prompt = "\n".join(
+            [
+                *([preamble] if preamble else []),
+                f"Summarize the clinical evidence for: {message}",
+                "",
+                f"Evidence found:\n{citations}",
+            ]
         )
         response = await self._llm.complete(
             [
