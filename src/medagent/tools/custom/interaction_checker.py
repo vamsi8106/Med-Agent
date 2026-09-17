@@ -20,9 +20,11 @@ _SEVERITY_KEYWORDS: dict[InteractionSeverity, tuple[str, ...]] = {
     InteractionSeverity.MINOR: ("minor",),
 }
 
-# med-research-mcp-suite's real response format (confirmed against a live
-# call) reports "## RISK PROFILE\n<High|Medium|Low>: ..." rather than the
-# major/moderate/minor wording above.
+# med-research-mcp-suite's REST response nests a structured
+# data.riskProfile.level field ("High"/"Medium"/"Low") -- this is the
+# primary signal. The regex fallback below exists only for the older
+# MCP-content markdown format ("## RISK PROFILE\n<High|Medium|Low>: ..."),
+# kept in case any caller still surfaces that shape.
 _RISK_PROFILE_PATTERN = re.compile(r"risk profile\s*\n?\s*(high|medium|low)", re.IGNORECASE)
 _RISK_PROFILE_TO_SEVERITY = {
     "high": InteractionSeverity.MAJOR,
@@ -31,10 +33,28 @@ _RISK_PROFILE_TO_SEVERITY = {
 }
 
 
-def _parse_severity(text: str) -> InteractionSeverity:
-    lowered = text.lower()
+def _parse_severity(response: Any) -> InteractionSeverity:
+    """Reads severity from the real REST response shape first.
+
+    Bug fixed here: this used to stringify the whole response dict and
+    regex-search the result for "risk profile\\nmedium" -- but Python's
+    str(dict) renders as "'riskProfile': {'level': 'Medium'", which that
+    regex can never match (confirmed against a live call: every case with
+    real risk data silently fell through to NONE). Read the structured
+    field directly instead; the keyword/regex checks remain as fallbacks
+    for response shapes with no riskProfile dict at all.
+    """
+    data = response.get("data", response) if isinstance(response, dict) else response
+    if isinstance(data, dict):
+        risk_profile = data.get("riskProfile")
+        if isinstance(risk_profile, dict):
+            level = str(risk_profile.get("level", "")).lower()
+            if level in _RISK_PROFILE_TO_SEVERITY:
+                return _RISK_PROFILE_TO_SEVERITY[level]
+
+    text = str(data).lower()
     for severity, keywords in _SEVERITY_KEYWORDS.items():
-        if any(keyword in lowered for keyword in keywords):
+        if any(keyword in text for keyword in keywords):
             return severity
 
     risk_match = _RISK_PROFILE_PATTERN.search(text)
@@ -78,13 +98,12 @@ class InteractionCheckerTool(BaseTool):
                 content = await client.comprehensive_analysis(
                     drug_a.name, f"{drug_b.name} interaction"
                 )
-                text = _extract_text(content)
                 interactions.append(
                     DrugInteraction(
                         drug_a=drug_a.name,
                         drug_b=drug_b.name,
-                        severity=_parse_severity(text),
-                        description=text,
+                        severity=_parse_severity(content),
+                        description=_extract_text(content),
                         source="med-research-mcp-suite",
                         checked_at=datetime.now(UTC),
                     )
