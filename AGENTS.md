@@ -44,7 +44,7 @@ src/medagent/
 │   ├── decorators.py            # @tool: auto JSON schema from type hints
 │   ├── mcp/                     # MCP clients (medical.py, healthcare.py, research.py)
 │   └── custom/                  # interaction_checker, patient_context, lab_interpreter,
-│                                # report_generator, guideline_retriever, dosage_calculator
+│                                # report_generator, guideline_retriever
 ├── agents/                      # Phase 3 (base + drug_safety), Phase 5 (rest)
 │   ├── base.py                  # ReAct loop: perceive → think → act
 │   ├── triage_agent.py          # routes to specialists
@@ -96,7 +96,7 @@ Never import upward. `core/` never imports from `llm/`. `tools/` never imports f
 
 **Phase 4 — Memory & RAG:** `memory/` (patient_store, persistent with SQLite) + `rag/` (full pipeline) + `guideline_retriever` + `lab_interpreter`. Gate: follow-up visit recalls patient, retrieves matching guidelines.
 
-**Phase 5 — Multi-Agent:** remaining agents + `workflows/` + `report_generator` + `dosage_calculator`. Gate: complex patient → multi-agent → structured report.
+**Phase 5 — Multi-Agent:** remaining agents + `workflows/` + `report_generator`. Gate: complex patient → multi-agent → structured report.
 
 **Phase 6 — Production:** `app.py` (FastAPI + WebSocket) + `infra/` (tracing, metrics, circuit_breaker, middleware) + Docker. Gate: `docker compose up` runs full system.
 
@@ -141,7 +141,6 @@ Tools available: `search-drugs`, `get-drug-details`, `search-drug-nomenclature`,
 | `lab_interpreter` | flag abnormals by age/sex/condition | `list[LabResult], PatientContext` → `list[LabFlag]` |
 | `report_generator` | structure findings with citations | `AgentResult` → markdown report |
 | `guideline_retriever` | RAG over ingested guidelines | `query, top_k` → `list[ClinicalEvidence]` |
-| `dosage_calculator` | renal/hepatic dose adjustment | `Medication, PatientContext` → adjusted dose |
 
 # Rules
 
