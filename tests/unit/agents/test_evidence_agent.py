@@ -1,8 +1,9 @@
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock
 
 from medagent.agents.evidence_agent import EvidenceAgent
 from medagent.core.interfaces import BaseLLMProvider
-from medagent.core.models import ClinicalEvidence, LLMResponse, Message, PatientContext
+from medagent.core.models import ClinicalEvidence, LLMResponse, Message, PatientContext, Visit
 from medagent.llm.mock_provider import MockLLMProvider
 
 
@@ -112,3 +113,35 @@ async def test_synthesis_prompt_omits_preamble_when_no_record_data() -> None:
 
     user_message = next(m for m in llm.received_messages if m.role == "user")
     assert "Patient context:" not in user_message.content
+
+
+async def test_synthesis_prompt_includes_recent_visit_history() -> None:
+    guideline_retriever = AsyncMock()
+    guideline_retriever.run.return_value = []
+    medical_client = _FakeMedicalClient("n/a")
+    llm = _RecordingLLMProvider(fixed_response="n/a")
+
+    agent = EvidenceAgent(
+        llm=llm,
+        medical_client=medical_client,  # type: ignore[arg-type]
+        guideline_retriever=guideline_retriever,
+    )
+    patient = PatientContext(
+        id="P-TEST-003",
+        name="Patient Gamma",
+        age=50,
+        sex="M",
+        visits=[
+            Visit(
+                visit_date=datetime.now(UTC),
+                chief_complaint="fatigue",
+                assessment="Suspected anemia, ordered CBC.",
+            )
+        ],
+    )
+
+    await agent.gather_evidence(patient, "any evidence for iron supplementation?")
+
+    user_message = next(m for m in llm.received_messages if m.role == "user")
+    assert "fatigue" in user_message.content
+    assert "Suspected anemia" in user_message.content

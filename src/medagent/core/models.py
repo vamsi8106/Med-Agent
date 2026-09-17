@@ -31,6 +31,21 @@ class LabResult(BaseModel):
     collected_at: datetime
 
 
+class Visit(BaseModel):
+    """A past visit record: what the doctor asked and what was assessed.
+
+    Append-only -- visits are written once (on save) and never updated or
+    deleted, so agents reasoning over history see exactly what happened.
+    """
+
+    id: str | None = None
+    visit_date: datetime
+    chief_complaint: str | None = None
+    assessment: str | None = None
+    plan: str | None = None
+    created_at: datetime | None = None
+
+
 class PatientContext(BaseModel):
     id: str
     name: str
@@ -46,6 +61,7 @@ class PatientContext(BaseModel):
     allergies: list[str] = Field(default_factory=list)
     medications: list[Medication] = Field(default_factory=list)
     lab_results: list[LabResult] = Field(default_factory=list)
+    visits: list[Visit] = Field(default_factory=list)
     created_at: datetime | None = None
     updated_at: datetime | None = None
 

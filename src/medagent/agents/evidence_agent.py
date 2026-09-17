@@ -21,18 +21,35 @@ def _extract_text(mcp_content: object) -> str:
     return str(mcp_content)
 
 
+def _format_visit_history(context: PatientContext) -> str | None:
+    if not context.visits:
+        return None
+    # context.visits is newest-first (see PatientStore.get_patient); present
+    # oldest-first so the narrative reads chronologically.
+    lines = [
+        f"- {visit.visit_date.date()}: complaint={visit.chief_complaint!r}, "
+        f"assessment={visit.assessment!r}"
+        for visit in reversed(context.visits)
+    ]
+    return "Recent visit history (oldest first):\n" + "\n".join(lines)
+
+
 def _patient_context_preamble(context: PatientContext) -> str | None:
-    if not context.conditions and not context.allergies:
+    visit_history = _format_visit_history(context)
+    if not context.conditions and not context.allergies and not visit_history:
         return None
     parts = []
     if context.conditions:
         parts.append(f"conditions={context.conditions}")
     if context.allergies:
         parts.append(f"known allergies={context.allergies}")
-    return (
+    preamble = (
         f"Patient context: {'; '.join(parts)}. Tailor the evidence to this patient "
         "and flag any relevant contraindications."
+        if parts
+        else ""
     )
+    return "\n".join(part for part in [preamble, visit_history] if part)
 
 
 class EvidenceAgent(BaseAgent):

@@ -1,3 +1,4 @@
+import asyncio
 from collections.abc import Iterator
 from contextlib import contextmanager
 from unittest.mock import AsyncMock, patch
@@ -8,6 +9,8 @@ from medagent.app import create_app
 from medagent.core.config import Settings
 from medagent.core.exceptions import MCPError, PatientNotFoundError
 from medagent.core.models import PatientContext
+from medagent.memory.patient_store import PatientStore
+from medagent.memory.persistent import PersistentStore
 
 _ADMIN_USERNAME = "admin"
 _ADMIN_PASSWORD = "admin-pass!"
@@ -281,6 +284,27 @@ def test_assess_endpoint_returns_report(pg_dsn: str) -> None:
     assert response.json() == {"report": "# Report"}
 
 
+def test_assess_endpoint_creates_visit_record(pg_dsn: str) -> None:
+    with _make_client(pg_dsn) as client:
+        headers = _auth_headers(client, username="dr.visit1")
+        client.post(
+            "/patients",
+            json={"id": "P-TEST-820", "name": "Patient Omega", "age": 60, "sex": "M"},
+            headers=headers,
+        )
+        with patch("medagent.app.run_patient_assessment", AsyncMock(return_value="# Report")):
+            client.post(
+                "/patients/P-TEST-820/assess", json={"message": "headache"}, headers=headers
+            )
+
+    store = PatientStore(PersistentStore(pg_dsn))
+    loaded = asyncio.run(store.get_patient("P-TEST-820"))
+    assert loaded is not None
+    assert len(loaded.visits) == 1
+    assert loaded.visits[0].chief_complaint == "headache"
+    assert loaded.visits[0].assessment == "# Report"
+
+
 def test_drug_check_endpoint(pg_dsn: str) -> None:
     with _make_client(pg_dsn) as client:
         headers = _auth_headers(client)
@@ -357,6 +381,12 @@ def test_websocket_chat_requires_approval_before_saving(pg_dsn: str) -> None:
         headers = {"Authorization": f"Bearer {token}"}
         get_resp = client.get("/patients/P-TEST-803", headers=headers)
     assert get_resp.status_code == 200
+
+    store = PatientStore(PersistentStore(pg_dsn))
+    loaded = asyncio.run(store.get_patient("P-TEST-803"))
+    assert loaded is not None
+    assert len(loaded.visits) == 1
+    assert loaded.visits[0].chief_complaint == "any updates?"
 
 
 def test_websocket_chat_reject_does_not_save(pg_dsn: str) -> None:

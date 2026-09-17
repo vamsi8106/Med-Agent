@@ -113,3 +113,51 @@ async def test_save_twice_does_not_change_doctor_id(pg_dsn: str) -> None:
     loaded = await store.get_patient("P-TEST-006")
     assert loaded is not None
     assert loaded.doctor_id == "DR-TEST-001"
+
+
+async def test_save_visit_round_trips(pg_dsn: str) -> None:
+    store = _make_store(pg_dsn)
+    context = PatientContext(
+        id="P-TEST-007", name="Patient Eta", age=52, sex="F", doctor_id="DR-TEST-001"
+    )
+    await store.save_patient(context)
+
+    await store.save_visit("P-TEST-007", "DR-TEST-001", "headache", "Likely tension headache.")
+
+    loaded = await store.get_patient("P-TEST-007")
+    assert loaded is not None
+    assert len(loaded.visits) == 1
+    assert loaded.visits[0].chief_complaint == "headache"
+    assert loaded.visits[0].assessment == "Likely tension headache."
+
+
+async def test_visits_returned_newest_first(pg_dsn: str) -> None:
+    store = _make_store(pg_dsn)
+    context = PatientContext(
+        id="P-TEST-008", name="Patient Theta", age=48, sex="M", doctor_id="DR-TEST-001"
+    )
+    await store.save_patient(context)
+
+    await store.save_visit("P-TEST-008", "DR-TEST-001", "first visit", "assessment 1")
+    await store.save_visit("P-TEST-008", "DR-TEST-001", "second visit", "assessment 2")
+
+    loaded = await store.get_patient("P-TEST-008")
+    assert loaded is not None
+    assert loaded.visits[0].chief_complaint == "second visit"
+    assert loaded.visits[1].chief_complaint == "first visit"
+
+
+async def test_only_most_recent_visits_returned(pg_dsn: str) -> None:
+    store = _make_store(pg_dsn)
+    context = PatientContext(
+        id="P-TEST-009", name="Patient Iota", age=41, sex="F", doctor_id="DR-TEST-001"
+    )
+    await store.save_patient(context)
+
+    for i in range(7):
+        await store.save_visit("P-TEST-009", "DR-TEST-001", f"visit {i}", f"assessment {i}")
+
+    loaded = await store.get_patient("P-TEST-009")
+    assert loaded is not None
+    assert len(loaded.visits) == 5
+    assert loaded.visits[0].chief_complaint == "visit 6"

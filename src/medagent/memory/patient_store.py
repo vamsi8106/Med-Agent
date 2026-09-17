@@ -6,8 +6,10 @@ from datetime import UTC, datetime
 
 from medagent.core.exceptions import MemoryError as MedAgentMemoryError
 from medagent.core.interfaces import BaseMemory
-from medagent.core.models import LabResult, Medication, PatientContext
+from medagent.core.models import LabResult, Medication, PatientContext, Visit
 from medagent.memory.persistent import PersistentStore
+
+_RECENT_VISITS_LIMIT = 5
 
 
 class PatientStore(BaseMemory):
@@ -36,6 +38,12 @@ class PatientStore(BaseMemory):
             )
             lab_rows = await conn.fetch(
                 "SELECT * FROM lab_results WHERE patient_id = $1", patient_id
+            )
+            visit_rows = await conn.fetch(
+                """SELECT * FROM visits WHERE patient_id = $1
+                ORDER BY visit_date DESC, created_at DESC LIMIT $2""",
+                patient_id,
+                _RECENT_VISITS_LIMIT,
             )
 
         return PatientContext(
@@ -74,6 +82,17 @@ class PatientStore(BaseMemory):
                     collected_at=row["collected_at"],
                 )
                 for row in lab_rows
+            ],
+            visits=[
+                Visit(
+                    id=row["id"],
+                    visit_date=row["visit_date"],
+                    chief_complaint=row["chief_complaint"],
+                    assessment=row["assessment"],
+                    plan=row["plan"],
+                    created_at=row["created_at"],
+                )
+                for row in visit_rows
             ],
             created_at=patient_row["created_at"],
             updated_at=patient_row["updated_at"],
@@ -177,3 +196,22 @@ class PatientStore(BaseMemory):
                     lab.is_abnormal,
                     lab.collected_at,
                 )
+
+    async def save_visit(
+        self, patient_id: str, doctor_id: str, chief_complaint: str, assessment: str
+    ) -> None:
+        """Appends a visit record. Insert-only -- visits are never updated or
+        deleted, so history reflects exactly what was approved at the time."""
+        async with self._store.connect() as conn:
+            await conn.execute(
+                """INSERT INTO visits
+                (id, patient_id, doctor_id, visit_date, chief_complaint, assessment, created_at)
+                VALUES ($1, $2, $3, $4, $5, $6, $7)""",
+                str(uuid.uuid4()),
+                patient_id,
+                doctor_id,
+                datetime.now(UTC),
+                chief_complaint,
+                assessment,
+                datetime.now(UTC),
+            )

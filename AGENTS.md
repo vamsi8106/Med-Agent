@@ -25,7 +25,7 @@ Clinical decision support agent for doctors. Checks drug interactions, retrieves
 src/medagent/
 ├── core/                        # Phase 1 — shared kernel, zero external deps beyond pydantic
 │   ├── interfaces.py            # ABCs: BaseLLMProvider, BaseTool, BaseAgent, BaseMemory
-│   ├── models.py                # PatientContext, Medication, LabResult, DrugInteraction, Message, ToolCall, LLMResponse
+│   ├── models.py                # PatientContext, Medication, LabResult, Visit, DrugInteraction, Message, ToolCall, LLMResponse
 │   ├── exceptions.py            # MedAgentError → ProviderError, ToolError, MemoryError, MCPError
 │   ├── config.py                # Settings (pydantic-settings)
 │   └── types.py                 # Enums: EvidenceGrade, InteractionSeverity, CKDStage, TrialPhase, AgentRole

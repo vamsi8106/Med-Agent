@@ -227,6 +227,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             body.message,
         )
         await state.patient_store.save_patient(patient)
+        await state.patient_store.save_visit(patient_id, patient.doctor_id, body.message, report)
         await state.audit_log.record(user, patient_id, "assessment_run", {"message": body.message})
         return {"report": report}
 
@@ -247,6 +248,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             doctor_id=_doctor_scope(user),
         )
         await state.patient_store.save_patient(patient)
+        await state.patient_store.save_visit(patient_id, patient.doctor_id, body.message, report)
         await state.audit_log.record(user, patient_id, "followup_run", {"message": body.message})
         return {"report": report}
 
@@ -311,6 +313,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
                 if decision.lower() == "approve":
                     await state.patient_store.save_patient(patient)
+                    await state.patient_store.save_visit(
+                        patient_id, patient.doctor_id, message, report
+                    )
                     await state.audit_log.record(user, patient_id, "report_approved")
                     await websocket.send_json({"type": "saved", "report": report})
                 elif decision.lower() == "reject":
@@ -318,6 +323,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     await websocket.send_json({"type": "rejected"})
                 else:
                     await state.patient_store.save_patient(patient)
+                    await state.patient_store.save_visit(
+                        patient_id, patient.doctor_id, message, decision
+                    )
                     await state.audit_log.record(
                         user, patient_id, "report_edited", {"edited_report": decision}
                     )
