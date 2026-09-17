@@ -117,3 +117,30 @@ async def test_no_allergy_conflict_line_when_no_match() -> None:
     result = await agent.run(context, "Check interactions for Metformin and Glimepiride")
 
     assert "ALLERGY CONFLICT" not in result
+
+
+async def test_allergy_conflict_misses_cross_reactive_drug_class() -> None:
+    """Known limitation, tracked deliberately: _check_allergy_conflicts is a
+    case-insensitive substring match between the allergy string and the drug
+    name -- it has no concept of drug classes. A patient allergic to
+    Penicillin prescribed Amoxicillin (both beta-lactams; well-documented
+    cross-reactivity) gets no conflict flagged at all, silently, because
+    "penicillin" is not a substring of "amoxicillin" or vice versa.
+
+    This test exists to make that gap visible in test output rather than
+    have it discovered in production -- fixing it needs a real allergy/drug
+    class lookup (e.g. an MCP-backed drug-class table), not a string tweak.
+    """
+    agent = DrugSafetyAgent(
+        llm=MockLLMProvider(fixed_response="Findings."),
+        interaction_checker=_FakeInteractionChecker([]),  # type: ignore[arg-type]
+    )
+    context = _patient()
+    context.allergies = ["Penicillin"]
+
+    result = await agent.run(context, "Check interactions for Amoxicillin and Ibuprofen")
+
+    # This SHOULD flag a conflict (beta-lactam cross-reactivity) but doesn't --
+    # asserting the current (unsafe) behavior so a future fix has to update
+    # this test, forcing a deliberate decision rather than an accidental one.
+    assert "ALLERGY CONFLICT" not in result
