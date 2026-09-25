@@ -34,3 +34,17 @@ async def test_find_trials_uses_patient_condition() -> None:
     healthcare_client.clinical_trials_search.assert_awaited_once_with("type 2 diabetes")
     assert result.role.value == "trial_finder"
     assert "ClinicalTrials.gov" in result.summary
+
+
+async def test_flags_allergy_mentioned_in_llm_response() -> None:
+    healthcare_client = _FakeHealthcareClient("NCT99999: trial description.")
+    agent = TrialFinderAgent(
+        llm=MockLLMProvider(fixed_response="This trial also tests Penicillin-based regimens."),
+        healthcare_client=healthcare_client,  # type: ignore[arg-type]
+    )
+    context = _patient()
+    context.allergies = ["Penicillin"]
+
+    result = await agent.find_trials(context, "any trials?")
+
+    assert "ALLERGY CONFLICT" in result.summary

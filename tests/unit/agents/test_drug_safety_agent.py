@@ -119,6 +119,24 @@ async def test_no_allergy_conflict_line_when_no_match() -> None:
     assert "ALLERGY CONFLICT" not in result
 
 
+async def test_output_guardrail_flags_allergy_mentioned_only_in_llm_response() -> None:
+    """The input-side check only covers the drugs explicitly asked about --
+    this covers the LLM independently naming an allergy-conflicting drug in
+    its own free-text synthesis (e.g. suggesting an alternative), which the
+    input-side check has no way to see."""
+    agent = DrugSafetyAgent(
+        llm=MockLLMProvider(fixed_response="Consider switching to Penicillin as an alternative."),
+        interaction_checker=_FakeInteractionChecker([]),  # type: ignore[arg-type]
+    )
+    context = _patient()
+    context.allergies = ["Penicillin"]
+
+    result = await agent.run(context, "Check interactions for Metformin and Glimepiride")
+
+    assert "ALLERGY CONFLICT" in result
+    assert "Penicillin" in result
+
+
 async def test_allergy_conflict_misses_cross_reactive_drug_class() -> None:
     """Known limitation, tracked deliberately: _check_allergy_conflicts is a
     case-insensitive substring match between the allergy string and the drug
