@@ -46,6 +46,15 @@ def _doctor_scope(user: User) -> str | None:
     return None if user.role == "admin" else user.id
 
 
+def _require_doctor_id(patient: PatientContext) -> str:
+    """Every persisted patient has doctor_id stamped at creation (see
+    create_patient below) -- this should never actually be None in practice,
+    but save_visit must never silently write a NULL doctor_id since the
+    per-doctor isolation guarantee depends on every row having one."""
+    assert patient.doctor_id is not None, f"Patient {patient.id} is missing doctor_id"
+    return patient.doctor_id
+
+
 class AssessRequest(BaseModel):
     message: str
 
@@ -227,7 +236,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             body.message,
         )
         await state.patient_store.save_patient(patient)
-        await state.patient_store.save_visit(patient_id, patient.doctor_id, body.message, report)
+        await state.patient_store.save_visit(
+            patient_id, _require_doctor_id(patient), body.message, report
+        )
         await state.audit_log.record(user, patient_id, "assessment_run", {"message": body.message})
         return {"report": report}
 
@@ -248,7 +259,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             doctor_id=_doctor_scope(user),
         )
         await state.patient_store.save_patient(patient)
-        await state.patient_store.save_visit(patient_id, patient.doctor_id, body.message, report)
+        await state.patient_store.save_visit(
+            patient_id, _require_doctor_id(patient), body.message, report
+        )
         await state.audit_log.record(user, patient_id, "followup_run", {"message": body.message})
         return {"report": report}
 
@@ -314,7 +327,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 if decision.lower() == "approve":
                     await state.patient_store.save_patient(patient)
                     await state.patient_store.save_visit(
-                        patient_id, patient.doctor_id, message, report
+                        patient_id, _require_doctor_id(patient), message, report
                     )
                     await state.audit_log.record(user, patient_id, "report_approved")
                     await websocket.send_json({"type": "saved", "report": report})
@@ -324,7 +337,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 else:
                     await state.patient_store.save_patient(patient)
                     await state.patient_store.save_visit(
-                        patient_id, patient.doctor_id, message, decision
+                        patient_id, _require_doctor_id(patient), message, decision
                     )
                     await state.audit_log.record(
                         user, patient_id, "report_edited", {"edited_report": decision}

@@ -84,7 +84,9 @@ class InteractionCheckerTool(BaseTool):
     def __init__(self, research_client: ResearchMCPClient | None = None) -> None:
         self._research_client = research_client or ResearchMCPClient()
 
-    async def run(self, medications: list[Medication]) -> ToolResult:
+    # Narrowed from BaseTool.run(**kwargs: Any) to this tool's real, typed
+    # params -- an intentional, safe narrowing, not a real LSP mismatch.
+    async def run(self, medications: list[Medication]) -> ToolResult:  # type: ignore[override]
         try:
             interactions = await self._check_all_pairs(medications)
         except Exception as exc:  # noqa: BLE001 - boundary: convert to ToolResult

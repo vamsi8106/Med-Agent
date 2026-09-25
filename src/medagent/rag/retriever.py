@@ -21,7 +21,11 @@ class GuidelineRetrieverTool(BaseTool):
         self._embeddings = embeddings
         self._vector_store = vector_store
 
-    async def run(self, query: str, top_k: int = 5) -> list[ClinicalEvidence]:
+    # Narrowed from BaseTool.run(**kwargs: Any) to this tool's real, typed
+    # params -- an intentional, safe narrowing, not a real LSP mismatch.
+    async def run(  # type: ignore[override]
+        self, query: str, top_k: int = 5
+    ) -> list[ClinicalEvidence]:
         [query_embedding] = await self._embeddings.embed([query])
         matches = await self._vector_store.query(query_embedding, top_k=top_k)
 

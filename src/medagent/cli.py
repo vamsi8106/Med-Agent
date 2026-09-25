@@ -57,6 +57,9 @@ async def ingest_guideline(file_path: Path, source_name: str) -> int:
         source=source_name,
         chunk_count=chunk_count,
     )
+    # Deliberate stdout confirmation for the human running this CLI
+    # interactively -- structlog's JSON log line above is for log aggregation,
+    # not for reading in a terminal.
     print(f"Ingested {chunk_count} chunks from {file_path} (source={source_name})")
     return 0
 

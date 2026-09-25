@@ -36,17 +36,25 @@ class GroqProvider(BaseLLMProvider):
         if tracing_enabled:
             _enable_langsmith_tracing(langsmith_api_key, langsmith_project)
 
+    # langsmith's @traceable wraps this in a protocol type that mypy sees as
+    # an incompatible override of BaseLLMProvider.complete, even though it's
+    # behaviorally the same coroutine at runtime (exercised by the passing
+    # unit and eval suites).
     @traceable(run_type="llm", name="groq_chat_completion")
     @retry(max_attempts=3, exceptions=(Exception,))
-    async def complete(
+    async def complete(  # type: ignore[override]
         self, messages: list[Message], tools: list[dict[str, Any]] | None = None
     ) -> LLMResponse:
         try:
             response = await asyncio.wait_for(
                 self._client.chat.completions.create(
                     model=self._model,
-                    messages=[{"role": m.role, "content": m.content} for m in messages],
-                    tools=tools,
+                    # Groq's SDK wants a union of specific per-role TypedDicts;
+                    # our provider-agnostic Message model doesn't map 1:1, but
+                    # the plain {"role", "content"} dict shape is exactly what
+                    # the API expects at runtime.
+                    messages=[{"role": m.role, "content": m.content} for m in messages],  # type: ignore[misc]
+                    tools=tools,  # type: ignore[arg-type]
                 ),
                 timeout=self._timeout_seconds,
             )

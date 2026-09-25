@@ -23,4 +23,7 @@ class ReportAgent:
         result = await self._report_generator.run(patient, results)
         if not result.success:
             raise ToolError(f"Report generation failed: {result.error}")
+        # ToolResult.data is intentionally untyped (Any) across the generic
+        # tool contract; ReportGeneratorTool always puts a str there.
+        assert isinstance(result.data, str)
         return result.data

@@ -28,7 +28,7 @@ jobs:
       # tests/conftest.py starts its own throwaway Postgres via the Docker
       # CLI (same fixture used locally) -- ubuntu-latest runners ship Docker
       # already, so no separate `services:` container is needed here.
-      - name: Run format check, lint, and unit tests
+      - name: Run format check, lint, type check, and unit tests
         run: make ci-check
 
   docker-build:

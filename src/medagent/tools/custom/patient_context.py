@@ -20,7 +20,12 @@ class PatientContextTool(BaseTool):
     def __init__(self) -> None:
         self._store: dict[str, PatientContext] = {}
 
-    async def run(self, action: str, patient_id: str, **kwargs: object) -> ToolResult:
+    # Narrowed from BaseTool.run(**kwargs: Any) to this tool's real, typed
+    # params -- ToolRegistry still dispatches via **kwargs at the call site,
+    # so this is an intentional, safe narrowing rather than a real mismatch.
+    async def run(  # type: ignore[override]
+        self, action: str, patient_id: str, **kwargs: object
+    ) -> ToolResult:
         try:
             if action == "get":
                 data = self._get(patient_id)

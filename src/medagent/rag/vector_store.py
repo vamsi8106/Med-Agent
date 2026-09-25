@@ -18,24 +18,27 @@ class VectorStore:
         embeddings: list[list[float]],
         metadatas: list[dict[str, Any]],
     ) -> None:
+        # chromadb's stubs want numpy arrays / stricter mapping types than
+        # its actual runtime API, which accepts these plain lists/dicts fine
+        # (this is exactly what sentence-transformers produces).
         await asyncio.to_thread(
             self._collection.add,
             ids=ids,
             documents=documents,
-            embeddings=embeddings,
-            metadatas=metadatas,
+            embeddings=embeddings,  # type: ignore[arg-type]
+            metadatas=metadatas,  # type: ignore[arg-type]
         )
 
     async def query(self, query_embedding: list[float], top_k: int = 5) -> list[dict[str, Any]]:
         result = await asyncio.to_thread(
             self._collection.query,
-            query_embeddings=[query_embedding],
+            query_embeddings=[query_embedding],  # type: ignore[arg-type]
             n_results=top_k,
         )
 
-        documents = result.get("documents", [[]])[0]
-        metadatas = result.get("metadatas", [[]])[0]
-        distances = result.get("distances", [[]])[0]
+        documents = (result.get("documents") or [[]])[0]
+        metadatas = (result.get("metadatas") or [[]])[0]
+        distances = (result.get("distances") or [[]])[0]
 
         return [
             {"document": doc, "metadata": meta, "distance": dist}

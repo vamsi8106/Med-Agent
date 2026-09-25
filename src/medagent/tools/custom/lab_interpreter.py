@@ -22,7 +22,9 @@ class LabInterpreterTool(BaseTool):
     name = "lab_interpreter"
     description = "Flags lab results as high/low/normal against their reference ranges."
 
-    async def run(
+    # Narrowed from BaseTool.run(**kwargs: Any) to this tool's real, typed
+    # params -- an intentional, safe narrowing, not a real LSP mismatch.
+    async def run(  # type: ignore[override]
         self, lab_results: list[LabResult], context: PatientContext | None = None
     ) -> ToolResult:
         flags = [

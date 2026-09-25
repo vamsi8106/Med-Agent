@@ -86,6 +86,9 @@ class DrugSafetyAgent(BaseAgent):
         if not result.success:
             raise ToolError(f"Interaction check failed: {result.error}")
 
+        # ToolResult.data is intentionally untyped (Any); InteractionCheckerTool
+        # always puts a list[DrugInteraction] there.
+        assert isinstance(result.data, list)
         interactions: list[DrugInteraction] = result.data
         citations = _format_citations(interactions)
         allergy_conflicts = _check_allergy_conflicts(context, drug_names)

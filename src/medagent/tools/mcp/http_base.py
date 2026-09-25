@@ -8,7 +8,7 @@ before -- circuit breaker, retry with backoff, per-instance rate limiting,
 tracing -- just over httpx instead of a stdio ClientSession.
 """
 
-from typing import Any
+from typing import Any, Self
 
 import httpx
 
@@ -40,7 +40,9 @@ class HttpMCPClient:
         )
         self._bucket = TokenBucket(rate_limit_per_second, rate_limit_capacity)
 
-    async def __aenter__(self) -> "HttpMCPClient":
+    async def __aenter__(self) -> Self:
+        # Self, not HttpMCPClient -- callers using `async with SubclassClient()`
+        # need the subclass's own extra methods visible on the bound name.
         self._client = httpx.AsyncClient(base_url=self._base_url, timeout=self._timeout_seconds)
         return self
 

@@ -40,6 +40,7 @@ build-backend = "hatchling.build"
 
 [dependency-groups]
 dev = [
+    "mypy>=2.3.1",
     "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0",
     "ruff>=0.16.7",
@@ -59,3 +60,18 @@ select = ["E", "F", "I", "UP", "B"]
 [tool.ruff.lint.per-file-ignores]
 "src/medagent/app.py" = ["B008"]
 "src/medagent/auth/dependencies.py" = ["B008"]
+
+[tool.mypy]
+python_version = "3.12"
+files = ["src/medagent"]
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_unreachable = true
+no_implicit_optional = true
+# Third-party medical/ML/agent libs here (chromadb, sentence-transformers,
+# groq, mcp, langgraph) ship no stubs -- ignore missing imports globally
+# rather than maintaining a growing per-package allowlist.
+ignore_missing_imports = true

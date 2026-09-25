@@ -54,7 +54,11 @@ class ReportGeneratorTool(BaseTool):
     def __init__(self, lab_interpreter: LabInterpreterTool | None = None) -> None:
         self._lab_interpreter = lab_interpreter or LabInterpreterTool()
 
-    async def run(self, patient: PatientContext, results: list[AgentResult]) -> ToolResult:
+    # Narrowed from BaseTool.run(**kwargs: Any) to this tool's real, typed
+    # params -- an intentional, safe narrowing, not a real LSP mismatch.
+    async def run(  # type: ignore[override]
+        self, patient: PatientContext, results: list[AgentResult]
+    ) -> ToolResult:
         header = f"# Clinical Report: {patient.name} ({patient.id})"
         sections = [_format_section(result) for result in results]
 
@@ -66,6 +70,9 @@ class ReportGeneratorTool(BaseTool):
 
         if patient.lab_results:
             lab_flag_result = await self._lab_interpreter.run(patient.lab_results, patient)
+            # ToolResult.data is intentionally untyped (Any); LabInterpreterTool
+            # always puts a list[LabFlag] there.
+            assert isinstance(lab_flag_result.data, list)
             lab_flags_section = _format_lab_flags_section(lab_flag_result.data)
             if lab_flags_section:
                 sections.append(lab_flags_section)

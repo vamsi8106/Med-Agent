@@ -1,4 +1,4 @@
-.PHONY: install test unit-tests eval lint-check lint-fix format-fix format-check pre-commit ci-check serve docker-up-deps docker-up docker-down docker-logs db-upgrade db-downgrade db-revision ingest-guideline
+.PHONY: install test unit-tests eval lint-check lint-fix format-fix format-check type-check pre-commit ci-check serve docker-up-deps docker-up docker-down docker-logs db-upgrade db-downgrade db-revision ingest-guideline
 
 install:
 	uv sync
@@ -24,10 +24,13 @@ format-fix:
 format-check:
 	uv run ruff format --check .
 
-pre-commit: format-fix lint-fix lint-check unit-tests
+type-check:
+	uv run mypy
+
+pre-commit: format-fix lint-fix lint-check type-check unit-tests
 
 # CI must fail on drift, not silently fix it -- no --fix, no format rewriting.
-ci-check: format-check lint-check unit-tests
+ci-check: format-check lint-check type-check unit-tests
 
 serve:
 	uv run uvicorn medagent.app:app --reload

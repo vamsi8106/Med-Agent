@@ -11,10 +11,12 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/token")
 
 
 async def _resolve_user(app_state: object, token: str) -> User:
+    # app_state is really app.py's AppState, typed as `object` here to avoid
+    # auth/ importing upward from the top-level app.py glue module.
     try:
         username = decode_access_token(
             token,
-            app_state.settings.jwt_secret_key,
+            app_state.settings.jwt_secret_key,  # type: ignore[attr-defined]
             app_state.settings.jwt_algorithm,  # type: ignore[attr-defined]
         )
     except AuthError as exc:
