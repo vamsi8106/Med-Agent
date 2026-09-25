@@ -2,10 +2,12 @@
 
 import re
 
+from medagent.core.config import get_settings
 from medagent.core.exceptions import ToolError
 from medagent.core.interfaces import BaseAgent, BaseLLMProvider
 from medagent.core.models import AgentResult, DrugInteraction, Medication, Message, PatientContext
 from medagent.core.types import AgentRole
+from medagent.infra.context_budget import truncate_text
 from medagent.infra.logging import get_logger
 from medagent.tools.custom.interaction_checker import InteractionCheckerTool
 
@@ -104,6 +106,12 @@ class DrugSafetyAgent(BaseAgent):
                     else []
                 ),
             ]
+        )
+        # Final safety net: cap the fully-assembled prompt in case several
+        # individually-capped fields (one per interaction pair) still add
+        # up to too much for a patient on many medications.
+        synthesis_prompt = truncate_text(
+            synthesis_prompt, get_settings().agent_prompt_max_tokens, source="drug_safety_agent"
         )
         response = await self._llm.complete(
             [

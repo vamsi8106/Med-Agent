@@ -97,6 +97,34 @@ async def test_synthesis_prompt_includes_conditions_and_allergies() -> None:
     assert "Penicillin" in user_message.content
 
 
+async def test_synthesis_prompt_includes_actual_evidence_text_not_just_titles() -> None:
+    guideline_retriever = AsyncMock()
+    guideline_retriever.run.return_value = [
+        ClinicalEvidence(
+            title="ADA Guideline",
+            summary="Metformin remains first-line therapy per ADA 2024 standards.",
+            source="ada-2024",
+        )
+    ]
+    medical_client = _FakeMedicalClient("Metformin reduces HbA1c by 1-2% in RCTs.")
+    llm = _RecordingLLMProvider(fixed_response="n/a")
+
+    agent = EvidenceAgent(
+        llm=llm,
+        medical_client=medical_client,  # type: ignore[arg-type]
+        guideline_retriever=guideline_retriever,
+    )
+
+    await agent.gather_evidence(_patient(), "first-line therapy for type 2 diabetes")
+
+    user_message = next(m for m in llm.received_messages if m.role == "user")
+    # Previously the prompt only carried titles/sources ("- ADA Guideline
+    # (source: ada-2024)") with no retrieved text at all -- the LLM had
+    # nothing to ground a summary in.
+    assert "Metformin remains first-line therapy per ADA 2024 standards." in user_message.content
+    assert "Metformin reduces HbA1c by 1-2% in RCTs." in user_message.content
+
+
 async def test_synthesis_prompt_omits_preamble_when_no_record_data() -> None:
     guideline_retriever = AsyncMock()
     guideline_retriever.run.return_value = []

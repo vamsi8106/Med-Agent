@@ -1,8 +1,10 @@
 """Trial Finder Agent: searches ClinicalTrials.gov via MCP, filtered by condition."""
 
+from medagent.core.config import get_settings
 from medagent.core.interfaces import BaseAgent, BaseLLMProvider
 from medagent.core.models import AgentResult, ClinicalEvidence, Message, PatientContext
 from medagent.core.types import AgentRole
+from medagent.infra.context_budget import truncate_text
 from medagent.infra.logging import get_logger
 from medagent.tools.mcp.healthcare import HealthcareMCPClient
 
@@ -34,7 +36,11 @@ class TrialFinderAgent(BaseAgent):
         condition = _resolve_condition(context, message)
         async with self._healthcare_client as client:
             content = await client.clinical_trials_search(condition)
-        trials_text = _extract_text(content)
+        trials_text = truncate_text(
+            _extract_text(content),
+            get_settings().agent_context_field_max_tokens,
+            source="trial_finder_agent",
+        )
 
         evidence = [
             ClinicalEvidence(

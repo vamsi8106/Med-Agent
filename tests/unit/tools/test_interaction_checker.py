@@ -65,6 +65,30 @@ async def test_interaction_checker_parses_structured_risk_profile() -> None:
     assert result.data[0].severity == InteractionSeverity.MODERATE
 
 
+async def test_interaction_checker_curates_description_instead_of_dumping_raw_dict() -> None:
+    """Regression test: description used to be str(the_entire_response_dict),
+    including market-analysis/publication-trend noise irrelevant to a
+    clinician, and unbounded in size across every pairwise combination."""
+    fake_client = _FakeResearchClient(
+        {
+            "executiveSummary": "Basic analysis available.",
+            "riskProfile": {"level": "Medium", "factors": ["Limited proprietary analysis"]},
+            "keyInsights": ["Basic analysis available", "Contact provider for advanced insights"],
+            "marketAnalysis": {"competitivePosition": "Analysis unavailable"},
+            "trialsByPhase": {"PHASE1": 1},
+        }
+    )
+    checker = InteractionCheckerTool(research_client=fake_client)  # type: ignore[arg-type]
+
+    result = await checker.run([Medication(name="Metformin"), Medication(name="Glimepiride")])
+
+    description = result.data[0].description
+    assert "Basic analysis available" in description
+    assert "Risk level: Medium" in description
+    assert "marketAnalysis" not in description
+    assert "competitivePosition" not in description
+
+
 async def test_interaction_checker_no_pairs_for_single_drug() -> None:
     fake_client = _FakeResearchClient("n/a")
     checker = InteractionCheckerTool(research_client=fake_client)  # type: ignore[arg-type]

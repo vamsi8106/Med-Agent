@@ -5,8 +5,10 @@ from datetime import UTC, datetime
 from itertools import combinations
 from typing import Any
 
+from medagent.core.config import get_settings
 from medagent.core.models import DrugInteraction, Medication
 from medagent.core.types import InteractionSeverity
+from medagent.infra.context_budget import truncate_text
 from medagent.infra.logging import get_logger
 from medagent.tools.base import BaseTool, ToolResult
 from medagent.tools.mcp.research import ResearchMCPClient
@@ -64,17 +66,53 @@ def _parse_severity(response: Any) -> InteractionSeverity:
     return InteractionSeverity.NONE
 
 
-def _extract_text(response: Any) -> str:
-    """Flattens the research-mcp REST JSON response body into severity-parseable text.
+def _extract_data(response: Any) -> Any:
+    """Unwraps research-mcp's {"success": bool, "data": {...}} REST envelope.
 
-    web-server.ts returns {"success": bool, "data": {...}, ...} rather than
-    MCP content blocks, so this just stringifies the whole payload -- the
-    severity/risk-profile wording _parse_severity looks for lives somewhere
-    inside `data` regardless of its exact nested shape.
+    web-server.ts returns that shape rather than MCP content blocks, so this
+    just reads `data` regardless of its exact nested contents.
     """
     if isinstance(response, dict):
-        return str(response.get("data", response))
-    return str(response)
+        return response.get("data", response)
+    return response
+
+
+def _describe_interaction(response: Any) -> str:
+    """Curates the clinically-relevant fields out of research-mcp's
+    comprehensive-analysis payload instead of dumping the entire raw dict.
+
+    That payload also carries market-analysis/publication-trend/trial-phase
+    noise irrelevant to a clinician, and str(dict)-ing the whole thing used
+    to get forwarded verbatim into the synthesis prompt -- for N medications
+    that's combinations(N, 2) full raw dumps stacked into one prompt, which
+    scales badly and adds cost/latency for no clinical value. Still capped
+    by truncate_text as a safety net in case a field itself is huge.
+    """
+    data = _extract_data(response)
+    if not isinstance(data, dict):
+        text = str(data)
+    else:
+        parts: list[str] = []
+        if summary := data.get("executiveSummary"):
+            parts.append(str(summary))
+
+        risk_profile = data.get("riskProfile")
+        if isinstance(risk_profile, dict) and risk_profile.get("level"):
+            factors = risk_profile.get("factors") or []
+            parts.append(
+                f"Risk level: {risk_profile['level']}. Factors: {', '.join(map(str, factors))}"
+            )
+
+        for field in ("keyInsights", "literatureKeyFindings", "recommendedActions"):
+            values = data.get(field)
+            if values:
+                parts.append(f"{field}: " + "; ".join(str(v) for v in values[:3]))
+
+        text = " | ".join(parts) if parts else str(data)
+
+    return truncate_text(
+        text, get_settings().agent_context_field_max_tokens, source="interaction_checker"
+    )
 
 
 class InteractionCheckerTool(BaseTool):
@@ -105,7 +143,7 @@ class InteractionCheckerTool(BaseTool):
                         drug_a=drug_a.name,
                         drug_b=drug_b.name,
                         severity=_parse_severity(content),
-                        description=_extract_text(content),
+                        description=_describe_interaction(content),
                         source="med-research-mcp-suite",
                         checked_at=datetime.now(UTC),
                     )

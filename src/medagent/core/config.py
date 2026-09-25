@@ -30,6 +30,14 @@ class Settings(BaseSettings):
     # multi-agent run (one assess/followup call) may spend before remaining
     # specialist steps are skipped rather than run unboundedly.
     agent_max_tokens_per_run: int = 8000
+    # Per-field cap on any single piece of external text (an MCP tool's raw
+    # response, a literature/trial dump) folded into a prompt -- independent
+    # of agent_max_tokens_per_run, which caps total spend across a whole run.
+    agent_context_field_max_tokens: int = 1000
+    # Final safety net on the fully-assembled synthesis prompt sent to the
+    # LLM, in case several individually-capped fields still add up to too
+    # much (e.g. many guideline hits concatenated into one citations block).
+    agent_prompt_max_tokens: int = 6000
 
     postgres_dsn: str = "postgresql://medagent:medagent@localhost:5432/medagent"
     # ChromaDB runs as its own server container so a persist-dir volume can be

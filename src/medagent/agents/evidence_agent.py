@@ -2,9 +2,11 @@
 
 import asyncio
 
+from medagent.core.config import get_settings
 from medagent.core.interfaces import BaseAgent, BaseLLMProvider
 from medagent.core.models import AgentResult, ClinicalEvidence, Message, PatientContext
 from medagent.core.types import AgentRole
+from medagent.infra.context_budget import truncate_text
 from medagent.infra.logging import get_logger
 from medagent.rag.retriever import GuidelineRetrieverTool
 from medagent.tools.mcp.medical import MedicalMCPClient
@@ -79,14 +81,24 @@ class EvidenceAgent(BaseAgent):
         evidence = [*guideline_hits, *literature_evidence]
 
         citations = "\n".join(f"- {e.title} (source: {e.source or 'unknown'})" for e in evidence)
+        # Unlike `citations` (titles/sources only, for the footer), this
+        # includes each item's actual retrieved text -- without it the LLM
+        # had nothing to ground a "summary" in except titles, and would be
+        # summarizing evidence it was never shown.
+        evidence_context = "\n\n".join(
+            f"- {e.title} (source: {e.source or 'unknown'}):\n{e.summary}" for e in evidence
+        )
         preamble = _patient_context_preamble(context)
         synthesis_prompt = "\n".join(
             [
                 *([preamble] if preamble else []),
                 f"Summarize the clinical evidence for: {message}",
                 "",
-                f"Evidence found:\n{citations}",
+                f"Evidence found:\n{evidence_context}",
             ]
+        )
+        synthesis_prompt = truncate_text(
+            synthesis_prompt, get_settings().agent_prompt_max_tokens, source="evidence_agent"
         )
         response = await self._llm.complete(
             [
@@ -106,4 +118,8 @@ class EvidenceAgent(BaseAgent):
     async def _search_literature(self, query: str) -> str:
         async with self._medical_client as client:
             content = await client.search_medical_literature(query)
-        return _extract_text(content)
+        return truncate_text(
+            _extract_text(content),
+            get_settings().agent_context_field_max_tokens,
+            source="evidence_agent.literature",
+        )
