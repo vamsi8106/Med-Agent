@@ -31,6 +31,59 @@ jobs:
       - name: Run format check, lint, type check, and unit tests
         run: make ci-check
 
+  eval:
+    runs-on: ubuntu-latest
+    # Requires the GROQ_API_KEY repo secret (Settings -> Secrets and
+    # variables -> Actions). Runs the golden-dataset suite against real Groq
+    # + real MCP servers on every push/PR -- unit tests use mocks and can't
+    # catch a model-behavior or MCP-response-shape regression (see the
+    # severity-parsing bug this eval suite caught: 1/4 -> 4/4 cases passing
+    # after the fix, invisible to the mocked unit tests the whole time).
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: "0.9.7"
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        run: uv sync --all-extras
+
+      - name: Set up vendor MCP servers
+        run: ./scripts/setup_vendor_mcp.sh
+
+      - name: Start MCP servers
+        run: docker compose up -d --build healthcare-mcp research-mcp medical-mcp-bridge
+
+      - name: Wait for MCP servers to be healthy
+        run: |
+          for i in $(seq 1 30); do
+            statuses=$(docker compose ps --format '{{.Health}}' healthcare-mcp research-mcp medical-mcp-bridge)
+            if ! echo "$statuses" | grep -qv "healthy"; then
+              echo "All MCP servers healthy"; exit 0
+            fi
+            sleep 2
+          done
+          echo "MCP servers did not become healthy in time"; docker compose logs; exit 1
+
+      - name: Run golden-dataset eval
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          MEDICAL_MCP_URL: http://localhost:8081
+          HEALTHCARE_MCP_URL: http://localhost:3001
+          RESEARCH_MCP_URL: http://localhost:3002
+        run: make eval
+
+      - name: Tear down MCP servers
+        if: always()
+        run: docker compose down
+
   docker-build:
     runs-on: ubuntu-latest
     steps:
