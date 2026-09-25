@@ -28,6 +28,7 @@ dependencies = [
     "sentence-transformers>=6.0.1",
     "sqlalchemy>=2.0.52",
     "structlog>=26.1.0",
+    "torch>=2.0",
     "uvicorn[standard]>=0.52.4",
 ]
 
@@ -60,6 +61,19 @@ select = ["E", "F", "I", "UP", "B"]
 [tool.ruff.lint.per-file-ignores]
 "src/medagent/app.py" = ["B008"]
 "src/medagent/auth/dependencies.py" = ["B008"]
+
+[tool.uv.sources]
+# sentence-transformers pulls in torch transitively; without this override uv
+# resolves the default GPU-enabled wheel, which drags in ~2.5GB of NVIDIA
+# CUDA libraries (cudnn, cublas, nccl, triton, ...) this CPU-only server
+# never uses -- it just runs a small local embedding model
+# (all-MiniLM-L6-v2) for RAG, no GPU anywhere in this deployment.
+torch = { index = "pytorch-cpu" }
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
 
 [tool.mypy]
 python_version = "3.12"

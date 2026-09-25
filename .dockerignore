@@ -7,3 +7,12 @@ __pycache__/
 .chroma/
 *.db
 .env
+
+# Node.js source + node_modules for the two vendored MCP servers -- these
+# build and run as their own separate containers (see docker/*/Dockerfile
+# and docker-compose.yml), the medagent image never touches this directory.
+vendor/
+tests/
+docs/
+guidelines_pdf/
+.github/
