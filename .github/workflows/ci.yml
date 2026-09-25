@@ -1,8 +1,12 @@
 name: CI
 
 on:
+  # Fast checks (format/lint/type/unit) run on every push to every branch,
+  # for quick feedback while iterating. Expensive jobs (the live-Groq/MCP
+  # eval suite, multi-image Docker builds) are gated to `if:
+  # github.event_name == 'pull_request'` below so they only run once, at
+  # PR time into main, instead of on every WIP commit.
   push:
-    branches: [main]
   pull_request:
     branches: [main]
 
@@ -33,12 +37,15 @@ jobs:
 
   eval:
     runs-on: ubuntu-latest
-    # Requires the GROQ_API_KEY repo secret (Settings -> Secrets and
-    # variables -> Actions). Runs the golden-dataset suite against real Groq
-    # + real MCP servers on every push/PR -- unit tests use mocks and can't
-    # catch a model-behavior or MCP-response-shape regression (see the
-    # severity-parsing bug this eval suite caught: 1/4 -> 4/4 cases passing
-    # after the fix, invisible to the mocked unit tests the whole time).
+    # PRs into main only, not every push -- this hits real Groq (costs money)
+    # and spins up 3 Docker containers, too expensive to run on every WIP
+    # commit on a feature branch. Requires the GROQ_API_KEY repo secret
+    # (Settings -> Secrets and variables -> Actions). Unit tests use mocks
+    # and can't catch a model-behavior or MCP-response-shape regression (see
+    # the severity-parsing bug this eval suite caught: 1/4 -> 4/4 cases
+    # passing after the fix, invisible to the mocked unit tests the whole
+    # time) -- so this still runs before anything reaches main.
+    if: github.event_name == 'pull_request'
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -86,6 +93,9 @@ jobs:
 
   docker-build:
     runs-on: ubuntu-latest
+    # PRs into main only, same reasoning as eval -- building 4 images on
+    # every WIP push is slow and not needed until merge time.
+    if: github.event_name == 'pull_request'
     steps:
       - name: Checkout
         uses: actions/checkout@v4
