@@ -51,3 +51,11 @@ class PatientNotFoundError(MedAgentError):
     maps to 404 rather than the base class's 400."""
 
     status_code = 404
+
+
+class AgentBudgetExceededError(MedAgentError):
+    """Raised when a multi-agent run's cumulative LLM token usage would
+    exceed its configured ceiling -- a resource-exhaustion condition, so it
+    maps to 429 rather than 400."""
+
+    status_code = 429

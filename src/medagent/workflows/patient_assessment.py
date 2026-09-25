@@ -9,6 +9,7 @@ auto-save (e.g. the plain REST endpoints) save explicitly after this returns.
 """
 
 import operator
+import uuid
 from typing import Annotated, TypedDict
 
 from langgraph.graph import END, START, StateGraph
@@ -18,8 +19,10 @@ from medagent.agents.evidence_agent import EvidenceAgent
 from medagent.agents.report_agent import ReportAgent
 from medagent.agents.triage_agent import TriageAgent
 from medagent.agents.trial_finder_agent import TrialFinderAgent
+from medagent.core.config import get_settings
 from medagent.core.models import AgentResult, PatientContext
 from medagent.core.types import AgentRole
+from medagent.infra.agent_run import AgentRunTracker
 from medagent.infra.logging import get_logger
 
 logger = get_logger(__name__)
@@ -31,6 +34,7 @@ class AssessmentState(TypedDict):
     roles: list[AgentRole]
     results: Annotated[list[AgentResult], operator.add]
     report: str
+    tracker: AgentRunTracker
 
 
 def _build_graph(
@@ -45,19 +49,43 @@ def _build_graph(
         return {"roles": roles}
 
     async def drug_safety_node(state: AssessmentState) -> dict[str, object]:
+        tracker = state["tracker"]
+        if tracker.over_budget():
+            tracker.skip("drug_safety")
+            return {}
         result = await drug_safety.run_result(state["context"], state["message"])
+        tracker.record("drug_safety", result.usage)
         return {"results": [result]}
 
     async def evidence_node(state: AssessmentState) -> dict[str, object]:
+        tracker = state["tracker"]
+        if tracker.over_budget():
+            tracker.skip("evidence")
+            return {}
         result = await evidence.gather_evidence(state["context"], state["message"])
+        tracker.record("evidence", result.usage)
         return {"results": [result]}
 
     async def trial_finder_node(state: AssessmentState) -> dict[str, object]:
+        tracker = state["tracker"]
+        if tracker.over_budget():
+            tracker.skip("trial_finder")
+            return {}
         result = await trial_finder.find_trials(state["context"], state["message"])
+        tracker.record("trial_finder", result.usage)
         return {"results": [result]}
 
     async def report_node(state: AssessmentState) -> dict[str, object]:
+        tracker = state["tracker"]
         markdown = await report.generate(state["context"], state["results"])
+        skipped = tracker.skipped_steps()
+        if skipped:
+            markdown += (
+                f"\n\n## Note\n\nSkipped due to token budget "
+                f"({tracker.tokens_used}/{tracker.max_tokens} used): {', '.join(skipped)}. "
+                "Re-run individually if this evidence is needed."
+            )
+        logger.info("agent_run_completed", run_id=tracker.run_id, trace=tracker.trace_summary())
         return {"report": markdown}
 
     def route_after_triage(state: AssessmentState) -> list[str]:
@@ -100,7 +128,14 @@ async def run_patient_assessment(
     report: ReportAgent,
     context: PatientContext,
     message: str,
+    max_tokens: int | None = None,
 ) -> str:
+    tracker = AgentRunTracker(
+        max_tokens=max_tokens or get_settings().agent_max_tokens_per_run,
+        run_id=str(uuid.uuid4()),
+    )
     graph = _build_graph(triage, drug_safety, evidence, trial_finder, report).compile()
-    result = await graph.ainvoke({"context": context, "message": message, "results": []})
+    result = await graph.ainvoke(
+        {"context": context, "message": message, "results": [], "tracker": tracker}
+    )
     return result["report"]

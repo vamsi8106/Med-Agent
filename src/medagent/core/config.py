@@ -26,6 +26,10 @@ class Settings(BaseSettings):
     mcp_rate_limit_capacity: int = 10
 
     llm_timeout_seconds: float = 30.0
+    # Ceiling on cumulative LLM tokens (prompt + completion) a single
+    # multi-agent run (one assess/followup call) may spend before remaining
+    # specialist steps are skipped rather than run unboundedly.
+    agent_max_tokens_per_run: int = 8000
 
     postgres_dsn: str = "postgresql://medagent:medagent@localhost:5432/medagent"
     # ChromaDB runs as its own server container so a persist-dir volume can be

@@ -60,18 +60,21 @@ class DrugSafetyAgent(BaseAgent):
         self._interaction_checker = interaction_checker
 
     async def run(self, context: PatientContext, message: str) -> str:
-        final_answer, _ = await self._check_and_synthesize(context, message)
+        final_answer, _, _ = await self._check_and_synthesize(context, message)
         return final_answer
 
     async def run_result(self, context: PatientContext, message: str) -> AgentResult:
-        final_answer, interactions = await self._check_and_synthesize(context, message)
+        final_answer, interactions, usage = await self._check_and_synthesize(context, message)
         return AgentResult(
-            role=AgentRole.DRUG_SAFETY, summary=final_answer, interactions=interactions
+            role=AgentRole.DRUG_SAFETY,
+            summary=final_answer,
+            interactions=interactions,
+            usage=usage,
         )
 
     async def _check_and_synthesize(
         self, context: PatientContext, message: str
-    ) -> tuple[str, list[DrugInteraction]]:
+    ) -> tuple[str, list[DrugInteraction], dict[str, int]]:
         drug_names = _extract_drug_names(message, context)
         if len(drug_names) < 2:
             raise ToolError(
@@ -116,4 +119,4 @@ class DrugSafetyAgent(BaseAgent):
             # Appended after the LLM's own text too, so a conflict can never
             # be silently dropped even if the LLM's synthesis omits it.
             final_answer += "\n\n" + "\n".join(allergy_conflicts)
-        return final_answer, interactions
+        return final_answer, interactions, response.usage

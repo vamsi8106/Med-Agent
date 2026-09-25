@@ -9,6 +9,7 @@ from medagent.core.models import (
     AgentResult,
     ClinicalEvidence,
     DrugInteraction,
+    LLMResponse,
     Medication,
     PatientContext,
 )
@@ -120,6 +121,47 @@ async def test_workflow_skips_drug_safety_when_single_medication() -> None:
 
     assert "## Drug Safety" not in result
     assert "Patient Beta" in result
+
+
+async def test_workflow_skips_remaining_agents_once_token_budget_exhausted() -> None:
+    class _UsageLLM(MockLLMProvider):
+        async def complete(self, messages: list, tools: list | None = None) -> LLMResponse:  # type: ignore[override]
+            return LLMResponse(
+                content=self._fixed_response,
+                model="mock-model",
+                usage={"prompt_tokens": 100, "completion_tokens": 0},
+            )
+
+    triage = TriageAgent()
+    drug_safety = DrugSafetyAgent(
+        llm=_UsageLLM(fixed_response="Monitor for hypoglycemia."),
+        interaction_checker=_FakeInteractionChecker([]),  # type: ignore[arg-type]
+    )
+    guideline_retriever = AsyncMock()
+    guideline_retriever.run.return_value = []
+    evidence = EvidenceAgent(
+        llm=_UsageLLM(fixed_response="Metformin remains first-line."),
+        medical_client=_FakeMedicalClient("PubMed article summary."),  # type: ignore[arg-type]
+        guideline_retriever=guideline_retriever,
+    )
+    trial_finder = AsyncMock()
+    report = ReportAgent()
+
+    patient = _complex_patient()
+    result = await run_patient_assessment(
+        triage,
+        drug_safety,
+        evidence,
+        trial_finder,
+        report,
+        patient,
+        "Check interactions for current medications and any relevant treatment evidence",
+        max_tokens=100,
+    )
+
+    assert "## Note" in result
+    assert "token budget" in result
+    assert "evidence" in result
 
 
 async def test_workflow_runs_trial_finder_when_message_mentions_trials() -> None:

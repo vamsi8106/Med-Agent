@@ -118,6 +118,7 @@ class AgentResult(BaseModel):
     summary: str
     evidence: list[ClinicalEvidence] = Field(default_factory=list)
     interactions: list[DrugInteraction] = Field(default_factory=list)
+    usage: dict[str, int] = Field(default_factory=dict)
 
 
 class User(BaseModel):

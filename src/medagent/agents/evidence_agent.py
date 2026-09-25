@@ -99,7 +99,9 @@ class EvidenceAgent(BaseAgent):
         )
 
         summary = f"{response.content}\n\nCitations:\n{citations}"
-        return AgentResult(role=AgentRole.EVIDENCE, summary=summary, evidence=evidence)
+        return AgentResult(
+            role=AgentRole.EVIDENCE, summary=summary, evidence=evidence, usage=response.usage
+        )
 
     async def _search_literature(self, query: str) -> str:
         async with self._medical_client as client:

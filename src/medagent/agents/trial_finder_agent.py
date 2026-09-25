@@ -58,4 +58,6 @@ class TrialFinderAgent(BaseAgent):
         )
 
         summary = f"{response.content}\n\nCitations:\n- {condition} (source: ClinicalTrials.gov)"
-        return AgentResult(role=AgentRole.TRIAL_FINDER, summary=summary, evidence=evidence)
+        return AgentResult(
+            role=AgentRole.TRIAL_FINDER, summary=summary, evidence=evidence, usage=response.usage
+        )
