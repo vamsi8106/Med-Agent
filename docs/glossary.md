@@ -123,4 +123,6 @@ Canonical names for every domain concept in MedAgent. Use these exact terms in c
 | **request_id** | Per-request id (inbound `X-Request-ID` if well-formed, else generated), echoed in the response header and on every log line together with `trace_id`/`span_id`. |
 | **Liveness vs Readiness** | `/health` says the process is up (Docker). `/ready` says whether dependencies work: `ok`, `degraded` (a non-critical dependency down or breaker open) or `down` (Postgres; HTTP 503). |
 | **No-PHI rule** | Traces, logs and metric labels contain no patient identifiers or clinical text; enforced by a test. |
+| **Import check** | `make import-check` runs import-linter over the layer table in AGENTS.md (one contract per layer, direct imports only). A new upward or sideways import fails `pre-commit` and CI. |
+| **API layer** | `src/medagent/api/`: `AppState`, error mapping, schemas and the route modules. `app.py` only builds the app (lifespan, middleware, routers). |
 | **Settings** | The `Settings` singleton from pydantic-settings. Reads from env vars → `.env` → defaults. Single source of truth for all config. |

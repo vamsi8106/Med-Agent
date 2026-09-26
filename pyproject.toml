@@ -41,6 +41,7 @@ build-backend = "hatchling.build"
 
 [dependency-groups]
 dev = [
+    "import-linter>=2.15",
     "mypy>=2.3.1",
     "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0",
@@ -59,7 +60,7 @@ target-version = "py312"
 select = ["E", "F", "I", "UP", "B"]
 
 [tool.ruff.lint.per-file-ignores]
-"src/medagent/app.py" = ["B008"]
+"src/medagent/api/routes/*.py" = ["B008"]
 "src/medagent/auth/dependencies.py" = ["B008"]
 
 [tool.uv.sources]
@@ -89,3 +90,72 @@ no_implicit_optional = true
 # groq, mcp, langgraph) ship no stubs -- ignore missing imports globally
 # rather than maintaining a growing per-package allowlist.
 ignore_missing_imports = true
+
+[tool.importlinter]
+root_package = "medagent"
+# The layer rules from AGENTS.md ("Dependency Rules"), enforced. One contract per
+# layer: it may import only what the table lists. `api` and `app` sit on top and
+# may import anything; nothing below them may import them.
+
+[[tool.importlinter.contracts]]
+name = "core does not import upward or sideways"
+type = "forbidden"
+allow_indirect_imports = true
+source_modules = ["medagent.core"]
+forbidden_modules = ["medagent.infra", "medagent.llm", "medagent.tools", "medagent.memory", "medagent.rag", "medagent.auth", "medagent.agents", "medagent.workflows", "medagent.api", "medagent.app"]
+
+[[tool.importlinter.contracts]]
+name = "infra does not import upward or sideways"
+type = "forbidden"
+allow_indirect_imports = true
+source_modules = ["medagent.infra"]
+forbidden_modules = ["medagent.llm", "medagent.tools", "medagent.memory", "medagent.rag", "medagent.auth", "medagent.agents", "medagent.workflows", "medagent.api", "medagent.app"]
+
+[[tool.importlinter.contracts]]
+name = "llm does not import upward or sideways"
+type = "forbidden"
+allow_indirect_imports = true
+source_modules = ["medagent.llm"]
+forbidden_modules = ["medagent.tools", "medagent.memory", "medagent.rag", "medagent.auth", "medagent.agents", "medagent.workflows", "medagent.api", "medagent.app"]
+
+[[tool.importlinter.contracts]]
+name = "tools does not import upward or sideways"
+type = "forbidden"
+allow_indirect_imports = true
+source_modules = ["medagent.tools"]
+forbidden_modules = ["medagent.llm", "medagent.memory", "medagent.rag", "medagent.auth", "medagent.agents", "medagent.workflows", "medagent.api", "medagent.app"]
+
+[[tool.importlinter.contracts]]
+name = "memory does not import upward or sideways"
+type = "forbidden"
+allow_indirect_imports = true
+source_modules = ["medagent.memory"]
+forbidden_modules = ["medagent.infra", "medagent.llm", "medagent.tools", "medagent.rag", "medagent.auth", "medagent.agents", "medagent.workflows", "medagent.api", "medagent.app"]
+
+[[tool.importlinter.contracts]]
+name = "rag does not import upward or sideways"
+type = "forbidden"
+allow_indirect_imports = true
+source_modules = ["medagent.rag"]
+forbidden_modules = ["medagent.llm", "medagent.tools", "medagent.memory", "medagent.auth", "medagent.agents", "medagent.workflows", "medagent.api", "medagent.app"]
+
+[[tool.importlinter.contracts]]
+name = "auth does not import upward or sideways"
+type = "forbidden"
+allow_indirect_imports = true
+source_modules = ["medagent.auth"]
+forbidden_modules = ["medagent.infra", "medagent.llm", "medagent.tools", "medagent.rag", "medagent.agents", "medagent.workflows", "medagent.api", "medagent.app"]
+
+[[tool.importlinter.contracts]]
+name = "agents does not import upward or sideways"
+type = "forbidden"
+allow_indirect_imports = true
+source_modules = ["medagent.agents"]
+forbidden_modules = ["medagent.llm", "medagent.auth", "medagent.workflows", "medagent.api", "medagent.app"]
+
+[[tool.importlinter.contracts]]
+name = "workflows does not import upward or sideways"
+type = "forbidden"
+allow_indirect_imports = true
+source_modules = ["medagent.workflows"]
+forbidden_modules = ["medagent.llm", "medagent.tools", "medagent.memory", "medagent.rag", "medagent.auth", "medagent.api", "medagent.app"]

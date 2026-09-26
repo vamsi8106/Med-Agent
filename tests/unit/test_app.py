@@ -68,9 +68,9 @@ def _make_client(pg_dsn: str) -> Iterator[TestClient]:
     # __enter__ -- so these patches must still be active at that point, not
     # just while create_app() itself runs.
     with (
-        patch("medagent.app.EmbeddingModel", _FakeEmbeddingModel),
-        patch("medagent.app.VectorStore", _FakeVectorStore),
-        patch("medagent.app.EvidenceAgent", _FakeEvidenceAgent),
+        patch("medagent.api.state.EmbeddingModel", _FakeEmbeddingModel),
+        patch("medagent.api.state.VectorStore", _FakeVectorStore),
+        patch("medagent.api.state.EvidenceAgent", _FakeEvidenceAgent),
         TestClient(create_app(_settings(pg_dsn))) as client,
     ):
         yield client
@@ -298,7 +298,10 @@ def test_assess_endpoint_returns_report(pg_dsn: str) -> None:
             json={"id": "P-TEST-801", "name": "Patient Beta", "age": 60, "sex": "M"},
             headers=headers,
         )
-        with patch("medagent.app.run_patient_assessment", AsyncMock(return_value="# Report")):
+        with patch(
+            "medagent.api.routes.patients.run_patient_assessment",
+            AsyncMock(return_value="# Report"),
+        ):
             response = client.post(
                 "/patients/P-TEST-801/assess", json={"message": "hi"}, headers=headers
             )
@@ -315,7 +318,10 @@ def test_assess_endpoint_creates_visit_record(pg_dsn: str) -> None:
             json={"id": "P-TEST-820", "name": "Patient Omega", "age": 60, "sex": "M"},
             headers=headers,
         )
-        with patch("medagent.app.run_patient_assessment", AsyncMock(return_value="# Report")):
+        with patch(
+            "medagent.api.routes.patients.run_patient_assessment",
+            AsyncMock(return_value="# Report"),
+        ):
             client.post(
                 "/patients/P-TEST-820/assess", json={"message": "headache"}, headers=headers
             )
@@ -331,7 +337,10 @@ def test_assess_endpoint_creates_visit_record(pg_dsn: str) -> None:
 def test_drug_check_endpoint(pg_dsn: str) -> None:
     with _make_client(pg_dsn) as client:
         headers = _auth_headers(client)
-        with patch("medagent.app.run_drug_check", AsyncMock(return_value="No major concerns.")):
+        with patch(
+            "medagent.api.routes.patients.run_drug_check",
+            AsyncMock(return_value="No major concerns."),
+        ):
             response = client.post(
                 "/drug-check",
                 json={"patient_id": "P-TEST-802", "new_drug": "Glimepiride"},
@@ -345,7 +354,10 @@ def test_drug_check_endpoint(pg_dsn: str) -> None:
 def test_mcp_error_maps_to_502(pg_dsn: str) -> None:
     with _make_client(pg_dsn) as client:
         headers = _auth_headers(client)
-        with patch("medagent.app.run_drug_check", AsyncMock(side_effect=MCPError("upstream down"))):
+        with patch(
+            "medagent.api.routes.patients.run_drug_check",
+            AsyncMock(side_effect=MCPError("upstream down")),
+        ):
             response = client.post(
                 "/drug-check",
                 json={"patient_id": "P-TEST-803", "new_drug": "Glimepiride"},
@@ -362,7 +374,7 @@ def test_patient_not_found_error_maps_to_404(pg_dsn: str) -> None:
     with _make_client(pg_dsn) as client:
         headers = _auth_headers(client)
         with patch(
-            "medagent.app.run_drug_check",
+            "medagent.api.routes.patients.run_drug_check",
             AsyncMock(side_effect=PatientNotFoundError("no such patient")),
         ):
             response = client.post(
@@ -548,7 +560,9 @@ def test_a_rate_limited_assessment_is_a_429_with_retry_after(pg_dsn: str) -> Non
             json={"id": "P-TEST-820", "name": "Patient Iota", "age": 50, "sex": "F"},
             headers=headers,
         )
-        with patch("medagent.app.run_patient_assessment", AsyncMock(side_effect=error)):
+        with patch(
+            "medagent.api.routes.patients.run_patient_assessment", AsyncMock(side_effect=error)
+        ):
             response = client.post(
                 "/patients/P-TEST-820/assess", json={"message": "hi"}, headers=headers
             )
@@ -566,7 +580,7 @@ def test_a_rate_limited_upstream_error_on_drug_check_is_a_429_and_hides_the_raw_
     )
     with _make_client(pg_dsn) as client:
         headers = _auth_headers(client)
-        with patch("medagent.app.run_drug_check", AsyncMock(side_effect=error)):
+        with patch("medagent.api.routes.patients.run_drug_check", AsyncMock(side_effect=error)):
             response = client.post(
                 "/drug-check",
                 json={"patient_id": "P-TEST-803", "new_drug": "Glimepiride"},
@@ -585,7 +599,7 @@ def test_a_rate_limit_without_a_known_wait_has_no_retry_after_header(pg_dsn: str
     error = ProviderError("x", reason="rate_limited")
     with _make_client(pg_dsn) as client:
         headers = _auth_headers(client)
-        with patch("medagent.app.run_drug_check", AsyncMock(side_effect=error)):
+        with patch("medagent.api.routes.patients.run_drug_check", AsyncMock(side_effect=error)):
             response = client.post(
                 "/drug-check",
                 json={"patient_id": "P-TEST-803", "new_drug": "Glimepiride"},
@@ -603,7 +617,8 @@ def test_our_own_errors_keep_their_own_message(pg_dsn: str) -> None:
     with _make_client(pg_dsn) as client:
         headers = _auth_headers(client)
         with patch(
-            "medagent.app.run_drug_check", AsyncMock(side_effect=ToolError("Need two medications"))
+            "medagent.api.routes.patients.run_drug_check",
+            AsyncMock(side_effect=ToolError("Need two medications")),
         ):
             response = client.post(
                 "/drug-check",
@@ -623,9 +638,9 @@ class _RateLimitedEvidenceAgent(_FakeEvidenceAgent):
 def test_the_websocket_error_frame_carries_retry_after(pg_dsn: str) -> None:
     # the agent is built in the app's lifespan, so patch before the client starts
     with (
-        patch("medagent.app.EmbeddingModel", _FakeEmbeddingModel),
-        patch("medagent.app.VectorStore", _FakeVectorStore),
-        patch("medagent.app.EvidenceAgent", _RateLimitedEvidenceAgent),
+        patch("medagent.api.state.EmbeddingModel", _FakeEmbeddingModel),
+        patch("medagent.api.state.VectorStore", _FakeVectorStore),
+        patch("medagent.api.state.EvidenceAgent", _RateLimitedEvidenceAgent),
         TestClient(create_app(_settings(pg_dsn))) as client,
     ):
         token = _admin_token(client)

@@ -78,7 +78,12 @@ src/medagent/
 │   └── drug_check.py            # enumerate pairs → check → aggregate
 ├── cli.py                       # `medagent ingest-guideline` (RAG ingestion), separate process from the server
 ├── health.py                    # readiness aggregation for /ready (ok/degraded/down)
-└── app.py                       # Phase 6 — FastAPI + WebSocket
+├── api/                         # HTTP + WebSocket layer
+│   ├── state.py                 # AppState (all clients/agents, built once) + get_state dependency
+│   ├── errors.py                # error → status/body mapping, doctor_scope, Retry-After
+│   ├── schemas.py               # request/response bodies
+│   └── routes/                  # system (health/ready/metrics), auth, patients (REST workflows), ws (approval chat)
+└── app.py                       # Phase 6 — create_app(): lifespan, middleware, routers
 ```
 
 Outside `src/`: `migrations/` (Alembic), `docker/` (MCP server images), `ops/` (Prometheus/Grafana config), `tests/eval/` (live golden-dataset evals).
@@ -97,10 +102,11 @@ rag/      → core/, infra/
 auth/     → core/, memory/
 agents/   → core/, infra/, tools/, memory/, rag/   (LLMs arrive via core.interfaces, not llm/)
 workflows/→ core/, infra/, agents/
+api/      → everything except app.py
 app.py    → everything
 ```
 
-Never import upward. `core/` never imports from `llm/`. `tools/` never imports from `agents/`.
+Never import upward. `core/` never imports from `llm/`. `tools/` never imports from `agents/`. `make import-check` (import-linter, contracts in `pyproject.toml`) enforces this table on direct imports and runs in `pre-commit` and CI.
 
 # Phases
 
@@ -190,8 +196,9 @@ make lint-fix        # uv run ruff check --fix .
 make format-fix      # uv run ruff format .
 make format-check    # uv run ruff format --check .
 make type-check      # uv run mypy
-make pre-commit      # format-fix + lint-fix + lint-check + type-check + unit-tests
-make ci-check        # format-check + lint-check + type-check + unit-tests (what CI runs; no auto-fix)
+make import-check    # import-linter: the layer rules above
+make pre-commit      # format-fix + lint-fix + lint-check + type-check + import-check + unit-tests
+make ci-check        # format-check + lint-check + type-check + import-check + unit-tests (what CI runs; no auto-fix)
 make serve           # uv run uvicorn medagent.app:app --reload
 make docker-up-deps  # backing services only (postgres, chromadb, 3 MCP servers) for bare-host dev
 make docker-up       # full stack incl. the app; make docker-down / docker-logs
