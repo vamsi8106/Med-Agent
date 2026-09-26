@@ -1,0 +1,16 @@
+SYNTHETIC DEMO GUIDELINE -- NOT REAL CLINICAL GUIDANCE. For exercising the RAG pipeline only.
+
+1. Overview
+This synthetic document describes an invented approach to managing type 2 diabetes in adults. It exists so the guideline retriever has something to find in demos and tests.
+
+2. Glycemic Monitoring
+In this synthetic guideline, glycated hemoglobin (HbA1c) is reviewed at every routine visit for adults with type 2 diabetes. When HbA1c is above the individual target, the care team reviews adherence, diet, and the current medication regimen before any change is made.
+
+3. Treatment Intensification
+When HbA1c remains above target despite metformin, this synthetic guideline suggests reviewing whether adding a second agent is appropriate, taking into account hypoglycemia risk, cost, and comorbid hypertension. Combining a sulfonylurea with metformin increases hypoglycemia risk, so glucose monitoring is emphasised.
+
+4. Hypertension in Diabetes
+Blood pressure is checked at each visit. Patients with type 2 diabetes and hypertension are reviewed for kidney function at least once a year.
+
+5. Sulfonamide Allergy
+Patients with a documented sulfonamide allergy are flagged before a new drug is started, and the prescriber confirms cross-reactivity risk for the chosen agent.
