@@ -80,7 +80,7 @@ src/medagent/
 
 Outside `src/`: `migrations/` (Alembic), `docker/` (MCP server images), `ops/` (Prometheus/Grafana config), `tests/eval/` (live golden-dataset evals).
 
-`tests/` mirrors `src/` 1:1. `docs/glossary.md` for canonical terms. `docs/adr/` for architecture decisions.
+`tests/` mirrors `src/` 1:1. `docs/glossary.md` for canonical terms. Architecture decisions and their rationale live in commit messages and the README.
 
 # Dependency Rules
 
