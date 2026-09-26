@@ -1,0 +1,58 @@
+{
+  "title": "MedAgent Overview",
+  "uid": "medagent-overview",
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "10s",
+  "time": { "from": "now-1h", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "title": "HTTP Requests / sec",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "targets": [
+        {
+          "expr": "sum(rate(medagent_http_requests_total[1m])) by (path, status_code)",
+          "legendFormat": "{{path}} ({{status_code}})"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "HTTP p95 Latency",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(medagent_http_request_duration_seconds_bucket[5m])) by (le, path))",
+          "legendFormat": "{{path}}"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Agent Runs by Outcome",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "targets": [
+        {
+          "expr": "sum(rate(medagent_agent_run_total[5m])) by (agent_role, outcome)",
+          "legendFormat": "{{agent_role}} - {{outcome}}"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Total Requests (last 1h)",
+      "type": "stat",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "targets": [
+        {
+          "expr": "sum(increase(medagent_http_requests_total[1h]))"
+        }
+      ]
+    }
+  ]
+}

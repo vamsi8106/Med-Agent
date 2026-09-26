@@ -1,0 +1,11 @@
+{
+  "name": "medical-mcp-bridge",
+  "private": true,
+  "type": "module",
+  "version": "1.0.0",
+  "description": "Stdio<->HTTP bridge for medical-mcp, which only supports stdio transport.",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.15.0",
+    "medical-mcp": "1.0.8"
+  }
+}
