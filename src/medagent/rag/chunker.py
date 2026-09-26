@@ -7,7 +7,22 @@ pulling in a tokenizer dependency purely for chunk sizing.
 import re
 from dataclasses import dataclass
 
-_HEADER_PATTERN = re.compile(r"^(#{1,6}\s+.*|[A-Z][A-Z0-9 /-]{3,}:?)$", re.MULTILINE)
+# What counts as a section header, in guideline PDFs as pypdf extracts them:
+#   - markdown "# Title" lines;
+#   - numbered headings such as "2.2 Risk prediction" (needs at least one dot, so a
+#     reference-list "1. Smith" or a lone number is not one; the title starts with a
+#     capital, so a dose like "2.5 mg" is not one, and it must not end like a sentence);
+#   - ALL-CAPS titles of two or more real words ("INTRODUCTION AND METHODOLOGY").
+# Table cells and stray labels ("CKD G1", "NA/NA", "A C A C", a lone "CITATION")
+# used to match an older all-caps rule and became junk section names.
+_HEADER_PATTERN = re.compile(
+    r"^(?:"
+    r"#{1,6}[ \t]+.*"
+    r"|\d+(?:\.\d+)+[ \t]+[A-Z][^\n]{2,90}(?<![.:;,])"
+    r"|[A-Z]{3,}(?:[ \t]+[A-Z]{3,})+:?"
+    r")$",
+    re.MULTILINE,
+)
 
 CHUNK_SIZE_TOKENS = 512
 CHUNK_OVERLAP_TOKENS = 64
