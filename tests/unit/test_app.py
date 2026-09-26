@@ -8,7 +8,13 @@ from starlette.testclient import WebSocketTestSession
 
 from medagent.app import create_app
 from medagent.core.config import Settings
-from medagent.core.exceptions import MCPError, PatientNotFoundError
+from medagent.core.exceptions import (
+    AllAgentsFailedError,
+    MCPError,
+    PatientNotFoundError,
+    ProviderError,
+    ToolError,
+)
 from medagent.core.models import AgentResult, PatientContext
 from medagent.core.types import AgentRole
 from medagent.memory.patient_store import PatientStore
@@ -344,7 +350,9 @@ def test_mcp_error_maps_to_502(pg_dsn: str) -> None:
             )
 
     assert response.status_code == 502
-    assert response.json() == {"detail": "upstream down"}
+    # Fixed text, not the raw message: MCP errors carry internal URLs/hostnames.
+    assert response.json() == {"detail": "an external medical data source was unavailable"}
+    assert "retry-after" not in response.headers
 
 
 def test_patient_not_found_error_maps_to_404(pg_dsn: str) -> None:
@@ -523,3 +531,108 @@ def test_another_user_cannot_resume_someone_elses_draft(pg_dsn: str) -> None:
             assert "P-TEST-808" in frame["detail"]
 
     assert _visits(pg_dsn, "P-TEST-808") == []
+
+
+# --- rate limits over HTTP and WebSocket ---------------------------------------------------
+
+
+def test_a_rate_limited_assessment_is_a_429_with_retry_after(pg_dsn: str) -> None:
+    error = AllAgentsFailedError("all throttled", reason="rate_limited", retry_after=7.2)
+    with _make_client(pg_dsn) as client:
+        headers = _auth_headers(client)
+        client.post(
+            "/patients",
+            json={"id": "P-TEST-820", "name": "Patient Iota", "age": 50, "sex": "F"},
+            headers=headers,
+        )
+        with patch("medagent.app.run_patient_assessment", AsyncMock(side_effect=error)):
+            response = client.post(
+                "/patients/P-TEST-820/assess", json={"message": "hi"}, headers=headers
+            )
+
+    assert response.status_code == 429
+    assert response.headers["retry-after"] == "8"  # 7.2s rounded up
+    assert response.json()["retry_after"] == 7.2
+
+
+def test_a_rate_limited_upstream_error_on_drug_check_is_a_429_and_hides_the_raw_message(
+    pg_dsn: str,
+) -> None:
+    error = ProviderError(
+        "Groq 429 in organization org_01SECRET", reason="rate_limited", retry_after=30
+    )
+    with _make_client(pg_dsn) as client:
+        headers = _auth_headers(client)
+        with patch("medagent.app.run_drug_check", AsyncMock(side_effect=error)):
+            response = client.post(
+                "/drug-check",
+                json={"patient_id": "P-TEST-803", "new_drug": "Glimepiride"},
+                headers=headers,
+            )
+
+    assert response.status_code == 429
+    assert response.headers["retry-after"] == "30"
+    assert response.json()["detail"] == (
+        "the language model service is rate-limited; try again in about 30 seconds"
+    )
+    assert "org_01SECRET" not in response.text
+
+
+def test_a_rate_limit_without_a_known_wait_has_no_retry_after_header(pg_dsn: str) -> None:
+    error = ProviderError("x", reason="rate_limited")
+    with _make_client(pg_dsn) as client:
+        headers = _auth_headers(client)
+        with patch("medagent.app.run_drug_check", AsyncMock(side_effect=error)):
+            response = client.post(
+                "/drug-check",
+                json={"patient_id": "P-TEST-803", "new_drug": "Glimepiride"},
+                headers=headers,
+            )
+
+    assert response.status_code == 429
+    assert "retry-after" not in response.headers
+    assert "retry_after" not in response.json()
+
+
+def test_our_own_errors_keep_their_own_message(pg_dsn: str) -> None:
+    """Only upstream errors are replaced by fixed text; a bad-input error is
+    already written for the client."""
+    with _make_client(pg_dsn) as client:
+        headers = _auth_headers(client)
+        with patch(
+            "medagent.app.run_drug_check", AsyncMock(side_effect=ToolError("Need two medications"))
+        ):
+            response = client.post(
+                "/drug-check",
+                json={"patient_id": "P-TEST-803", "new_drug": "X"},
+                headers=headers,
+            )
+
+    assert response.status_code == 400
+    assert response.json() == {"detail": "Need two medications"}
+
+
+class _RateLimitedEvidenceAgent(_FakeEvidenceAgent):
+    async def gather_evidence(self, context: PatientContext, message: str) -> AgentResult:
+        raise ProviderError("Groq 429 org_01SECRET", reason="rate_limited", retry_after=4.5)
+
+
+def test_the_websocket_error_frame_carries_retry_after(pg_dsn: str) -> None:
+    # the agent is built in the app's lifespan, so patch before the client starts
+    with (
+        patch("medagent.app.EmbeddingModel", _FakeEmbeddingModel),
+        patch("medagent.app.VectorStore", _FakeVectorStore),
+        patch("medagent.app.EvidenceAgent", _RateLimitedEvidenceAgent),
+        TestClient(create_app(_settings(pg_dsn))) as client,
+    ):
+        token = _admin_token(client)
+        _create_patient(client, token, "P-TEST-822", "Patient Lambda")
+        with client.websocket_connect(_ws_url("P-TEST-822", token)) as websocket:
+            websocket.send_text("any updates?")
+            while (frame := websocket.receive_json())["type"] == "progress":
+                pass
+
+    assert frame["type"] == "error"
+    assert frame["retry_after"] == 4.5
+    assert "rate-limited" in frame["detail"]
+    assert "org_01SECRET" not in frame["detail"]

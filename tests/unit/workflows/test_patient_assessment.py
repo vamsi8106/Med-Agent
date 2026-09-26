@@ -382,3 +382,74 @@ async def test_specialist_steps_are_counted_by_outcome() -> None:
 
     assert total("drug_safety", "completed") - before["ok"] == 1
     assert total("evidence", "failed") - before["failed"] == 1
+
+
+# --- rate limits ---------------------------------------------------------------------------
+
+
+def _throttled(retry_after: float | None = None, error_type: type[Exception] = ProviderError):
+    return error_type(
+        "Groq 429 org_01SECRET", reason="rate_limited", retryable=True, retry_after=retry_after
+    )
+
+
+async def test_a_rate_limited_specialist_is_reported_as_rate_limited_not_unavailable() -> None:
+    drug_safety = AsyncMock()
+    drug_safety.run_result.return_value = _agent_result(AgentRole.DRUG_SAFETY, "ok")
+    evidence = AsyncMock()
+    evidence.gather_evidence.side_effect = _throttled(retry_after=7.2)
+
+    report = await _assess_with(drug_safety, evidence, AsyncMock(), _BOTH)
+
+    assert "the language model service is rate-limited; try again in about 8 seconds" in report
+    assert "unavailable" not in report.split("## Note")[-1]
+    assert "org_01SECRET" not in report
+
+
+async def test_a_long_rate_limit_is_worded_in_minutes() -> None:
+    drug_safety = AsyncMock()
+    drug_safety.run_result.return_value = _agent_result(AgentRole.DRUG_SAFETY, "ok")
+    evidence = AsyncMock()
+    evidence.gather_evidence.side_effect = _throttled(retry_after=487)
+
+    report = await _assess_with(drug_safety, evidence, AsyncMock(), _BOTH)
+
+    assert "try again in about 9 minutes" in report
+
+
+async def test_an_unknown_wait_says_shortly() -> None:
+    drug_safety = AsyncMock()
+    drug_safety.run_result.return_value = _agent_result(AgentRole.DRUG_SAFETY, "ok")
+    evidence = AsyncMock()
+    evidence.gather_evidence.side_effect = _throttled(retry_after=None)
+
+    report = await _assess_with(drug_safety, evidence, AsyncMock(), _BOTH)
+
+    assert "rate-limited; try again shortly" in report
+
+
+async def test_all_specialists_rate_limited_is_a_429_with_the_longest_wait() -> None:
+    drug_safety = AsyncMock()
+    drug_safety.run_result.side_effect = _throttled(retry_after=3)
+    evidence = AsyncMock()
+    evidence.gather_evidence.side_effect = _throttled(retry_after=40, error_type=MCPError)
+
+    with pytest.raises(AllAgentsFailedError) as excinfo:
+        await _assess_with(drug_safety, evidence, AsyncMock(), _BOTH)
+
+    assert excinfo.value.status_code == 429
+    assert excinfo.value.retry_after == 40
+    assert "org_01SECRET" not in str(excinfo.value)
+
+
+async def test_a_mix_of_rate_limit_and_outage_is_still_a_502() -> None:
+    drug_safety = AsyncMock()
+    drug_safety.run_result.side_effect = _throttled(retry_after=3)
+    evidence = AsyncMock()
+    evidence.gather_evidence.side_effect = ProviderError("down", reason="server_error")
+
+    with pytest.raises(AllAgentsFailedError) as excinfo:
+        await _assess_with(drug_safety, evidence, AsyncMock(), _BOTH)
+
+    assert excinfo.value.status_code == 502
+    assert excinfo.value.retry_after is None

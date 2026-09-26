@@ -31,7 +31,7 @@ from medagent.agents.report_agent import ReportAgent
 from medagent.agents.triage_agent import TriageAgent
 from medagent.agents.trial_finder_agent import TrialFinderAgent
 from medagent.core.config import get_settings
-from medagent.core.exceptions import AllAgentsFailedError, MCPError, MedAgentError, ProviderError
+from medagent.core.exceptions import AllAgentsFailedError, MedAgentError, UpstreamError
 from medagent.core.models import AgentFailure, AgentResult, PatientContext
 from medagent.core.types import AgentRole
 from medagent.infra.agent_run import AgentRunTracker
@@ -41,10 +41,6 @@ from medagent.infra.metrics import agent_run_total
 logger = get_logger(__name__)
 
 _DEFAULT_FAILURE_TEXT = "the check could not be completed"
-_FAILURE_TEXT: tuple[tuple[type[MedAgentError], str], ...] = (
-    (ProviderError, "the language model service was unavailable"),
-    (MCPError, "an external medical data source was unavailable"),
-)
 
 
 class AssessmentState(TypedDict):
@@ -59,12 +55,11 @@ class AssessmentState(TypedDict):
 
 
 def _doctor_safe_reason(exc: MedAgentError) -> str:
-    """Fixed text per error class. Raw exception messages never reach the
-    report: a provider error can embed account identifiers (the Groq 413 we
-    hit contained the organisation id)."""
-    for error_type, text in _FAILURE_TEXT:
-        if isinstance(exc, error_type):
-            return text
+    """Fixed text, never the raw exception message: a provider error can embed
+    account identifiers (the Groq 413 we hit contained the organisation id).
+    A rate limit says so and how long to wait; an outage says unavailable."""
+    if isinstance(exc, UpstreamError):
+        return exc.public_message()
     return _DEFAULT_FAILURE_TEXT
 
 
@@ -111,7 +106,16 @@ async def _run_specialist(
         )
         tracker.fail(name, type(exc).__name__)
         agent_run_total.labels(agent_role=role.value, outcome="failed").inc()
-        return {"failures": [AgentFailure(role=role, error=_doctor_safe_reason(exc))]}
+        return {
+            "failures": [
+                AgentFailure(
+                    role=role,
+                    error=_doctor_safe_reason(exc),
+                    reason=getattr(exc, "reason", "error"),
+                    retry_after=getattr(exc, "retry_after", None),
+                )
+            ]
+        }
     tracker.record(name, result.usage)
     agent_run_total.labels(agent_role=role.value, outcome="completed").inc()
     return {"results": [result]}
@@ -165,7 +169,15 @@ def _build_graph(
             # returning an empty "unavailable" report would let the REST
             # endpoints auto-save it as a visit that later prompts replay.
             reasons = ", ".join(f"{f.role.value} ({f.error})" for f in failures)
-            raise AllAgentsFailedError(f"No specialist agent could complete: {reasons}")
+            # All throttled -> tell the client to back off (429 + Retry-After)
+            # rather than report an outage; any other mix stays a 502.
+            throttled = all(f.reason == "rate_limited" for f in failures)
+            waits = [f.retry_after for f in failures if f.retry_after is not None]
+            raise AllAgentsFailedError(
+                f"No specialist agent could complete: {reasons}",
+                reason="rate_limited" if throttled else "error",
+                retry_after=max(waits) if throttled and waits else None,
+            )
 
         markdown = await report.generate(state["context"], results)
         note = _completeness_note(tracker, failures)

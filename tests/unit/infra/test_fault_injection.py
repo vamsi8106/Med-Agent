@@ -58,12 +58,16 @@ async def test_a_rate_limit_storm_fails_fast_instead_of_stacking_retries(clock: 
     sdk = _FakeSDK(_status_error(429, {"retry-after": "487"}))
     provider, _ = _provider(sdk)
 
-    with pytest.raises(AllAgentsFailedError):
+    with pytest.raises(AllAgentsFailedError) as excinfo:
         await _assess(_evidence_agent(provider))
 
     # ReAct attempt + the deterministic fallback = 2 LLM calls, 1 HTTP call each.
     assert sdk.calls == 2
     assert clock.sleeps == []
+    # ...and the caller is told to back off, not that the service is down.
+    assert excinfo.value.status_code == 429
+    assert excinfo.value.retry_after == 487.0
+    assert "rate-limited; try again in about 9 minutes" in str(excinfo.value)
 
 
 async def test_a_wrong_model_name_is_attempted_once_not_nine_times(clock: FakeClock) -> None:

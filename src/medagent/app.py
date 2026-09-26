@@ -1,5 +1,6 @@
 """FastAPI + WebSocket entrypoint wiring every layer together."""
 
+import math
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import timedelta
@@ -20,7 +21,7 @@ from medagent.auth.dependencies import get_current_user, get_current_user_ws, re
 from medagent.auth.security import create_access_token, hash_password, verify_password
 from medagent.auth.store import UserStore
 from medagent.core.config import Settings, get_settings
-from medagent.core.exceptions import AuthError, MedAgentError
+from medagent.core.exceptions import AuthError, MedAgentError, UpstreamError
 from medagent.core.models import PatientContext, User
 from medagent.infra.logging import configure_logging, get_logger
 from medagent.infra.middleware import ObservabilityMiddleware
@@ -54,6 +55,27 @@ logger = get_logger(__name__)
 def _doctor_scope(user: User) -> str | None:
     """Per-doctor data isolation filter: None means unrestricted (admin)."""
     return None if user.role == "admin" else user.id
+
+
+def _retry_after(exc: MedAgentError) -> float | None:
+    """The wait to advertise, only for a 429 (rate limit) that knows it."""
+    if exc.status_code != 429:
+        return None
+    wait: float | None = getattr(exc, "retry_after", None)
+    return wait
+
+
+def _error_payload(exc: MedAgentError) -> dict[str, Any]:
+    """Client-facing body for an error. An upstream error's raw message can carry
+    account ids or internal hostnames, so it is replaced by fixed text; our own
+    errors (bad input, unknown patient) are already written for the client."""
+    payload: dict[str, Any] = {
+        "detail": exc.public_message() if isinstance(exc, UpstreamError) else str(exc)
+    }
+    retry_after = _retry_after(exc)
+    if retry_after is not None:
+        payload["retry_after"] = retry_after
+    return payload
 
 
 def _require_doctor_id(patient: PatientContext) -> str:
@@ -165,7 +187,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.exception_handler(MedAgentError)
     async def _medagent_error_handler(_request: Request, exc: MedAgentError) -> JSONResponse:
-        return JSONResponse(status_code=exc.status_code, content={"detail": str(exc)})
+        headers = {}
+        retry_after = _retry_after(exc)
+        if retry_after is not None:
+            headers["Retry-After"] = str(math.ceil(retry_after))
+        return JSONResponse(
+            status_code=exc.status_code, content=_error_payload(exc), headers=headers
+        )
 
     @app.get("/health")
     async def health() -> dict[str, str]:
@@ -357,7 +385,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         on_progress=websocket.send_json,
                     )
                 except MedAgentError as exc:
-                    await websocket.send_json({"type": "error", "detail": str(exc)})
+                    await websocket.send_json({"type": "error", **_error_payload(exc)})
                     continue
 
                 await state.audit_log.record(

@@ -135,6 +135,10 @@ class AgentFailure(BaseModel):
 
     role: AgentRole
     error: str
+    # Non-sensitive classification carried alongside the safe text so the caller
+    # can tell a rate limit (back off, retry) from an outage.
+    reason: str = "error"
+    retry_after: float | None = None
 
 
 class User(BaseModel):
