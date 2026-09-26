@@ -75,17 +75,25 @@ class DrugInteraction(BaseModel):
     checked_at: datetime
 
 
+class ToolCall(BaseModel):
+    # id ties a tool-result message back to the assistant turn that requested
+    # it; providers that do real function calling require it.
+    id: str | None = None
+    tool_name: str
+    arguments: dict[str, Any] = Field(default_factory=dict)
+    result: Any | None = None
+
+
 class Message(BaseModel):
     role: str
     content: str
     name: str | None = None
     timestamp: datetime | None = None
-
-
-class ToolCall(BaseModel):
-    tool_name: str
-    arguments: dict[str, Any] = Field(default_factory=dict)
-    result: Any | None = None
+    # Set on an assistant turn that requested tools, and on the role="tool"
+    # messages carrying their results (tool_call_id), so a provider can replay
+    # the exact call/result protocol back to the model.
+    tool_calls: list[ToolCall] | None = None
+    tool_call_id: str | None = None
 
 
 class LLMResponse(BaseModel):

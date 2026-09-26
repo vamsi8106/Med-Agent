@@ -8,6 +8,7 @@ tests/integration/test_followup_recall.py, kept out of this eval's
 dependency footprint on purpose.
 """
 
+from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
@@ -15,6 +16,8 @@ import pytest
 from medagent.agents.evidence_agent import EvidenceAgent
 from medagent.core.config import get_settings
 from medagent.core.exceptions import MCPError
+from medagent.core.interfaces import BaseLLMProvider
+from medagent.core.models import LLMResponse, Message
 from medagent.llm.registry import ProviderRegistry
 from medagent.tools.mcp.medical import MedicalMCPClient
 from tests.eval.evidence_golden_dataset import CASES, GoldenEvidenceCase
@@ -53,3 +56,41 @@ async def test_evidence_response_uses_patient_context(
         f"Response never referenced any of {case.must_reference} ({case.notes})\n"
         f"Response was:\n{result.summary}"
     )
+
+
+class _CallRecorder(BaseLLMProvider):
+    """Wraps the real LLM and records what each call looked like."""
+
+    def __init__(self, inner: BaseLLMProvider) -> None:
+        self._inner = inner
+        self.histories: list[list[Message]] = []
+
+    async def complete(
+        self, messages: list[Message], tools: list[dict[str, Any]] | None = None
+    ) -> LLMResponse:
+        self.histories.append(list(messages))
+        return await self._inner.complete(messages, tools)
+
+
+async def test_real_model_takes_the_react_path_not_the_fallback(
+    evidence_agent: EvidenceAgent,
+) -> None:
+    """EvidenceAgent falls back to the fixed pipeline on any ReAct failure, so
+    the quality assertions above would still pass if tool calling silently
+    broke (provider parsing, message protocol, model behavior). This pins the
+    ReAct path itself: the real model must emit tool calls, the loop must feed
+    their results back, and the answer must come after them."""
+    recorder = _CallRecorder(evidence_agent._llm)
+    evidence_agent._llm = recorder
+    case = CASES[0]
+
+    result = await evidence_agent.gather_evidence(case.patient, case.message)
+
+    tool_result_seen = any(m.role == "tool" for history in recorder.histories for m in history)
+    assert tool_result_seen, (
+        "No tool result ever reached the model -- the ReAct path did not run and the "
+        "deterministic fallback served this request instead "
+        f"({len(recorder.histories)} LLM call(s))"
+    )
+    assert len(recorder.histories) >= 2
+    assert result.evidence, "ReAct path retrieved no evidence"
