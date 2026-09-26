@@ -231,13 +231,35 @@ wscat -c "ws://localhost:8000/ws/P-TEST-001?token=$ALICE_TOKEN"
 
 ---
 
+## Safety and context controls
+
+The LLM only ever summarizes; safety-relevant facts are computed deterministically and never left to it.
+
+- **Prompt-injection hardening**: the doctor's message, patient-record fields (conditions, allergies, visit history — these are stored and replayed into every later prompt) and external MCP text are wrapped in `<<< >>>` delimiters, and each agent's system prompt says to treat that text as data, not instructions.
+- **Output allergy cross-check**: on top of the input-side allergy check, the LLM's own response is scanned for any recorded allergy, so an alternative drug it suggests on its own is still flagged with `⚠️ ALLERGY CONFLICT`. A cheap sanity pass (empty response, system-prompt leakage) is logged, not auto-blocked.
+- **Context budgets**: raw MCP payloads are curated to the clinically relevant fields (not dumped as JSON), every external text field and the final prompt are capped, and each past visit is truncated when replayed as history. Sizes are the `AGENT_*_TOKENS` settings in `.env.example` — tune them to your Groq tier's per-request limit (the free `openai/gpt-oss-20b` tier is 8000 tokens).
+- **Per-run token budget**: one assess/followup run stops launching further specialist agents once `AGENT_MAX_TOKENS_PER_RUN` is spent, and the report says which were skipped. Each step's cost and outcome is logged (`agent_step_completed` / `agent_step_skipped`).
+- **Human approval**: the WebSocket chat drafts a report and saves nothing until the doctor approves, edits or rejects it. The REST endpoints save immediately.
+
 ## Tests
 
 ```bash
 make unit-tests    # network-free, requires Docker for Postgres-backed tests (auto-skips if unavailable)
+make type-check    # mypy over src/medagent
 make eval          # golden-dataset eval against real Groq + real MCP servers (needs GROQ_API_KEY)
-make pre-commit    # format + lint + unit-tests, run this before committing
+make pre-commit    # format + lint + type-check + unit-tests, run this before committing
 ```
+
+`make eval` is the only check that exercises real model output and real MCP response shapes; the unit tests use mocks. It has caught bugs the unit tests could not (a severity parser that silently returned "none" on real data).
+
+### CI
+
+- **Every push, any branch**: format check, lint, mypy, unit tests (`make ci-check`).
+- **Pull requests into `main` only**: additionally the golden-dataset eval against live MCP containers and a Docker build of every image. These are gated to PRs because they call the real Groq API and build several images. The eval job needs a `GROQ_API_KEY` repository secret (Settings → Secrets and variables → Actions).
+
+## Docker image
+
+`torch` is pinned to PyTorch's CPU-only wheels (`[tool.uv.sources]` in `pyproject.toml`). The default wheel bundles ~2.5 GB of NVIDIA CUDA libraries this CPU-only service never uses; pinning it took the image to ~2.1 GB. If you later deploy on GPU hardware, remove that override and re-lock.
 
 ## More detail
 
