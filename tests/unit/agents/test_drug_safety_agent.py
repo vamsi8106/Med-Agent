@@ -3,7 +3,7 @@ from datetime import UTC, datetime
 import pytest
 
 from medagent.agents.drug_safety_agent import DrugSafetyAgent
-from medagent.core.exceptions import ToolError
+from medagent.core.exceptions import MCPError, ProviderError, ToolError
 from medagent.core.models import DrugInteraction, Medication, PatientContext
 from medagent.core.types import InteractionSeverity
 from medagent.llm.mock_provider import MockLLMProvider
@@ -162,3 +162,45 @@ async def test_allergy_conflict_misses_cross_reactive_drug_class() -> None:
     # asserting the current (unsafe) behavior so a future fix has to update
     # this test, forcing a deliberate decision rather than an accidental one.
     assert "ALLERGY CONFLICT" not in result
+
+
+# --- specific failure kinds ------------------------------------------------------------
+
+
+class _FailingChecker:
+    def __init__(self, error_type: str | None) -> None:
+        self._error_type = error_type
+
+    async def run(self, medications: list) -> ToolResult:
+        return ToolResult(
+            tool_name="interaction_checker",
+            success=False,
+            error="connection refused",
+            error_type=self._error_type,
+        )
+
+
+@pytest.mark.parametrize(
+    ("error_type", "expected"),
+    [
+        ("MCPError", MCPError),
+        ("ProviderError", ProviderError),
+        ("ValueError", ToolError),
+        (None, ToolError),
+    ],
+)
+async def test_a_failed_interaction_check_keeps_the_kind_of_failure(
+    error_type: str | None, expected: type[Exception]
+) -> None:
+    """An unreachable MCP server used to collapse into a generic ToolError, so the
+    report said "the check could not be completed" instead of naming the cause."""
+    agent = DrugSafetyAgent(
+        llm=MockLLMProvider(),
+        interaction_checker=_FailingChecker(error_type),  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(expected) as excinfo:
+        await agent.run(_patient(), "Check interactions for Metformin and Glimepiride")
+
+    assert type(excinfo.value) is expected
+    assert "connection refused" in str(excinfo.value)

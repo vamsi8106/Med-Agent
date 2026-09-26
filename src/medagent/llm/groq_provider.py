@@ -1,17 +1,74 @@
-"""Groq LLM provider. No Groq imports allowed outside this file."""
+"""Groq LLM provider. No Groq imports allowed outside this file.
+
+Reliability lives here, in one place. The SDK's own retries are switched off
+(max_retries=0): left on, they stacked under ours -- up to 9 HTTP calls per LLM
+call -- and wrapped nothing we could observe or classify. Errors are mapped to
+ProviderError with a reason, a retryable flag and the wait Groq asked for, so
+the retry policy and the circuit breaker can act on them correctly: a 429 is
+retried (or failed fast if it needs a long wait), a 404 or 400 is never
+retried, and only genuine upstream trouble (timeouts, connection failures, 5xx)
+counts toward opening the breaker.
+"""
 
 import asyncio
 import json
 import os
+import re
+import time
 from typing import Any
 
+import groq
 from groq import AsyncGroq
 from langsmith import traceable
 
 from medagent.core.exceptions import ProviderError
 from medagent.core.interfaces import BaseLLMProvider
 from medagent.core.models import LLMResponse, Message, ToolCall
+from medagent.infra.circuit_breaker import CircuitBreaker
+from medagent.infra.metrics import llm_call_duration_seconds, llm_calls_total, llm_tokens_total
 from medagent.infra.retry import retry
+
+_PROVIDER = "groq"
+_RETRY_HINT = re.compile(r"try again in ([0-9hms.\s]+)", re.IGNORECASE)
+_DURATION_PART = re.compile(r"(\d+(?:\.\d+)?)(ms|h|m|s)")
+_UNIT_SECONDS = {"ms": 0.001, "s": 1.0, "m": 60.0, "h": 3600.0}
+
+
+def _seconds_from_message(message: str) -> float | None:
+    """Groq's 429 text says how long to wait ("try again in 2.5s", "8m7.728s",
+    "559ms") -- used when the Retry-After header is absent."""
+    hint = _RETRY_HINT.search(message)
+    if hint is None:
+        return None
+    parts = _DURATION_PART.findall(hint.group(1))
+    if not parts:
+        return None
+    return sum(float(value) * _UNIT_SECONDS[unit] for value, unit in parts)
+
+
+def _retry_after(exc: groq.APIStatusError) -> float | None:
+    headers = exc.response.headers
+    for header, scale in (("retry-after-ms", 0.001), ("retry-after", 1.0)):
+        raw = headers.get(header)
+        if raw is not None:
+            try:
+                return float(raw) * scale
+            except ValueError:
+                continue
+    return _seconds_from_message(str(exc))
+
+
+def _classify_status_error(exc: groq.APIStatusError) -> ProviderError:
+    message = f"Groq completion failed: {exc}"
+    status = exc.status_code
+    if status == 429:
+        return ProviderError(
+            message, reason="rate_limited", retryable=True, retry_after=_retry_after(exc)
+        )
+    if status in (408, 409) or status >= 500:
+        return ProviderError(message, reason="server_error", retryable=True)
+    # 400/401/403/404/413/422...: the request itself is wrong. Retrying cannot help.
+    return ProviderError(message, reason="client_error")
 
 
 def _to_groq_message(message: Message) -> dict[str, Any]:
@@ -73,24 +130,56 @@ class GroqProvider(BaseLLMProvider):
         langsmith_api_key: str | None = None,
         langsmith_project: str = "medagent",
         timeout_seconds: float = 30.0,
+        retry_max_wait_seconds: float = 10.0,
+        retry_budget_seconds: float = 45.0,
     ) -> None:
-        self._client = AsyncGroq(api_key=api_key)
+        self._client = AsyncGroq(api_key=api_key, max_retries=0)
         self._model = model
         self._timeout_seconds = timeout_seconds
+        self._breaker = CircuitBreaker(
+            failure_threshold=5, recovery_timeout=30.0, name=_PROVIDER, error_type=ProviderError
+        )
+        self._call_with_retry = retry(
+            max_attempts=3,
+            max_wait=retry_max_wait_seconds,
+            budget=retry_budget_seconds,
+            target="llm",
+        )(self._call_once)
         if tracing_enabled:
             _enable_langsmith_tracing(langsmith_api_key, langsmith_project)
 
-    # langsmith's @traceable wraps this in a protocol type that mypy sees as
-    # an incompatible override of BaseLLMProvider.complete, even though it's
-    # behaviorally the same coroutine at runtime (exercised by the passing
-    # unit and eval suites).
     @traceable(run_type="llm", name="groq_chat_completion")
-    @retry(max_attempts=3, exceptions=(Exception,))
-    async def complete(  # type: ignore[override]
+    async def complete(
         self, messages: list[Message], tools: list[dict[str, Any]] | None = None
     ) -> LLMResponse:
+        started = time.monotonic()
         try:
-            response = await asyncio.wait_for(
+            response = await self._breaker.call(self._call_with_retry, messages, tools)
+        except ProviderError as exc:
+            self._record_call(exc.reason, started)
+            raise
+        self._record_call("success", started)
+
+        choice = response.choices[0]
+        usage = response.usage
+        prompt_tokens = usage.prompt_tokens if usage else 0
+        completion_tokens = usage.completion_tokens if usage else 0
+        llm_tokens_total.labels(provider=_PROVIDER, kind="prompt").inc(prompt_tokens)
+        llm_tokens_total.labels(provider=_PROVIDER, kind="completion").inc(completion_tokens)
+        return LLMResponse(
+            content=choice.message.content or "",
+            model=self._model,
+            tool_calls=_parse_tool_calls(getattr(choice.message, "tool_calls", None)),
+            usage={"prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens},
+        )
+
+    def _record_call(self, outcome: str, started: float) -> None:
+        llm_calls_total.labels(provider=_PROVIDER, outcome=outcome).inc()
+        llm_call_duration_seconds.labels(provider=_PROVIDER).observe(time.monotonic() - started)
+
+    async def _call_once(self, messages: list[Message], tools: list[dict[str, Any]] | None) -> Any:
+        try:
+            return await asyncio.wait_for(
                 self._client.chat.completions.create(
                     model=self._model,
                     # Groq's SDK wants a union of specific per-role TypedDicts;
@@ -104,19 +193,19 @@ class GroqProvider(BaseLLMProvider):
             )
         except TimeoutError as exc:
             raise ProviderError(
-                f"Groq completion timed out after {self._timeout_seconds}s"
+                f"Groq completion timed out after {self._timeout_seconds}s",
+                reason="timeout",
+                retryable=True,
+            ) from exc
+        except groq.APIStatusError as exc:
+            raise _classify_status_error(exc) from exc
+        except groq.APITimeoutError as exc:
+            raise ProviderError(
+                f"Groq completion timed out: {exc}", reason="timeout", retryable=True
+            ) from exc
+        except groq.APIConnectionError as exc:
+            raise ProviderError(
+                f"Groq connection failed: {exc}", reason="connection_error", retryable=True
             ) from exc
         except Exception as exc:
             raise ProviderError(f"Groq completion failed: {exc}") from exc
-
-        choice = response.choices[0]
-        usage = response.usage
-        return LLMResponse(
-            content=choice.message.content or "",
-            model=self._model,
-            tool_calls=_parse_tool_calls(getattr(choice.message, "tool_calls", None)),
-            usage={
-                "prompt_tokens": usage.prompt_tokens if usage else 0,
-                "completion_tokens": usage.completion_tokens if usage else 0,
-            },
-        )

@@ -71,8 +71,10 @@ async def test_circuit_breaker_opens_and_short_circuits_further_calls() -> None:
         assert breaker.state is CircuitState.OPEN
 
         calls_before = call_count
-        with pytest.raises(MCPError, match="Circuit breaker is open"):
+        with pytest.raises(MCPError, match="Circuit breaker for .* is open") as excinfo:
             await client.request("POST", "/call-tool", json={})
+        assert excinfo.value.reason == "circuit_open"
+        assert excinfo.value.retryable is False
         assert call_count == calls_before
 
 
@@ -199,3 +201,117 @@ async def test_client_can_be_reopened_after_being_fully_closed(mocked_transport:
 
     async with client:
         assert await client.request("POST", "/call-tool", json={})
+
+
+# --- reliability: classification, retries, breaker -----------------------------------
+
+from tests.conftest import FakeClock, metric_value  # noqa: E402
+
+
+def _counting_handler(*responses: httpx.Response | Exception):
+    """Plays a script (exceptions are raised); repeats the last when exhausted."""
+    script = list(responses)
+    count = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        count["n"] += 1
+        item = script.pop(0) if len(script) > 1 else script[0]
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+    return handler, count
+
+
+async def test_a_client_error_is_not_retried_and_does_not_trip_the_breaker(
+    clock: FakeClock,
+) -> None:
+    handler, count = _counting_handler(httpx.Response(404, text="no such tool"))
+    breaker = CircuitBreaker(failure_threshold=1, name="test-404")
+    async with _opened_client(handler, circuit_breaker=breaker) as client:
+        with pytest.raises(MCPError) as excinfo:
+            await client.request("POST", "/call-tool", json={})
+
+    assert count["n"] == 1
+    assert excinfo.value.reason == "client_error"
+    assert breaker.state is CircuitState.CLOSED
+
+
+async def test_a_server_error_is_retried_to_the_limit_and_counts_toward_the_breaker(
+    clock: FakeClock,
+) -> None:
+    handler, count = _counting_handler(httpx.Response(503, text="overloaded"))
+    breaker = CircuitBreaker(failure_threshold=1, name="test-503")
+    async with _opened_client(handler, circuit_breaker=breaker) as client:
+        with pytest.raises(MCPError) as excinfo:
+            await client.request("POST", "/call-tool", json={})
+
+    assert count["n"] == 3
+    assert excinfo.value.reason == "server_error"
+    assert breaker.state is CircuitState.OPEN
+
+
+async def test_a_connection_failure_is_retried(clock: FakeClock) -> None:
+    handler, count = _counting_handler(httpx.ConnectError("refused"))
+    async with _opened_client(handler) as client:
+        with pytest.raises(MCPError) as excinfo:
+            await client.request("POST", "/call-tool", json={})
+
+    assert count["n"] == 3
+    assert excinfo.value.reason == "connection_error"
+
+
+async def test_a_rate_limit_with_a_short_retry_after_is_waited_out(clock: FakeClock) -> None:
+    handler, count = _counting_handler(
+        httpx.Response(429, headers={"retry-after": "1"}),
+        httpx.Response(200, json={"ok": True}),
+    )
+    async with _opened_client(handler) as client:
+        result = await client.request("POST", "/call-tool", json={})
+
+    assert result == {"ok": True}
+    assert count["n"] == 2
+    assert 1.0 <= clock.sleeps[0] <= 1.5
+
+
+async def test_a_rate_limit_with_a_long_retry_after_fails_fast(clock: FakeClock) -> None:
+    handler, count = _counting_handler(httpx.Response(429, headers={"retry-after": "300"}))
+    async with _opened_client(handler, retry_max_wait_seconds=10.0) as client:
+        with pytest.raises(MCPError) as excinfo:
+            await client.request("POST", "/call-tool", json={})
+
+    assert count["n"] == 1
+    assert clock.sleeps == []
+    assert excinfo.value.reason == "rate_limited"
+
+
+async def test_an_unparseable_body_is_a_clear_error_and_is_not_retried(
+    clock: FakeClock,
+) -> None:
+    handler, count = _counting_handler(httpx.Response(200, text="<html>not json</html>"))
+    async with _opened_client(handler) as client:
+        with pytest.raises(MCPError, match="invalid JSON"):
+            await client.request("POST", "/call-tool", json={})
+
+    assert count["n"] == 1
+
+
+async def test_outcomes_are_recorded_per_server(clock: FakeClock) -> None:
+    ok_before = metric_value("medagent_mcp_requests_total", server="test-srv", outcome="success")
+    bad_before = metric_value(
+        "medagent_mcp_requests_total", server="test-srv", outcome="client_error"
+    )
+    good, _ = _counting_handler(httpx.Response(200, json={}))
+    bad, _ = _counting_handler(httpx.Response(400, text="bad"))
+
+    async with _opened_client(good, name="test-srv") as client:
+        await client.request("POST", "/x", json={})
+    async with _opened_client(bad, name="test-srv") as client:
+        with pytest.raises(MCPError):
+            await client.request("POST", "/x", json={})
+
+    ok_after = metric_value("medagent_mcp_requests_total", server="test-srv", outcome="success")
+    bad_after = metric_value(
+        "medagent_mcp_requests_total", server="test-srv", outcome="client_error"
+    )
+    assert (ok_after - ok_before, bad_after - bad_before) == (1, 1)

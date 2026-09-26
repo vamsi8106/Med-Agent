@@ -21,6 +21,9 @@ class ResearchMCPClient(HttpMCPClient):
             timeout_seconds=settings.mcp_timeout_seconds,
             rate_limit_per_second=settings.mcp_rate_limit_per_second,
             rate_limit_capacity=settings.mcp_rate_limit_capacity,
+            name="research",
+            retry_max_wait_seconds=settings.retry_max_wait_seconds,
+            retry_budget_seconds=settings.retry_budget_seconds,
         )
 
     async def comprehensive_analysis(self, drug_name: str, condition: str) -> Any:

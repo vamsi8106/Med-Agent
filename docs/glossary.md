@@ -110,9 +110,12 @@ Canonical names for every domain concept in MedAgent. Use these exact terms in c
 
 | Term | Definition |
 |---|---|
-| **Retry** | `@retry` decorator with exponential backoff + jitter. Applied to LLM calls and MCP tool calls. |
+| **Retry** | `@retry`: exponential backoff + jitter, applied to LLM and MCP calls. Retries only errors marked `retryable`, so a permanent failure (404, 400) is attempted once. The one place retries happen -- SDK-level retries are turned off. |
+| **Retryable Error** | An `UpstreamError` with `retryable=True`: timeouts, connection failures, 5xx, and short rate limits. `client_error` (bad request, unknown model) is never retryable; an unclassified error defaults to not retryable. |
+| **Retry-After** | The wait an upstream asks for on a rate limit (header, or Groq's "try again in 8m7s" message). Honoured if it is within `RETRY_MAX_WAIT_SECONDS`; otherwise the request fails fast rather than being held open for minutes. |
+| **Retry Budget** | `RETRY_BUDGET_SECONDS`: the total time one call may spend retrying, so a run of slow failures cannot stack up. |
 | **Rate Limiter** | Token-bucket rate limiter per API source. Prevents hitting external API rate limits (e.g., OpenFDA: 240 req/min). |
-| **Circuit Breaker** | Monitors MCP server health. After N consecutive failures the circuit opens and calls fail fast with `MCPError` instead of hanging on a dead server; after a cooldown it lets a trial call through (half-open). |
+| **Circuit Breaker** | Guards each MCP server and the LLM. After 5 consecutive *upstream-health* failures (timeout, connection, 5xx) it opens and calls fail fast with the dependency's own error type (`circuit_open`) instead of hanging on a dead server; after 30s it lets a trial call through (half-open). 4xx and rate limits never count -- the server is up. State is per process. |
 | **Structured Logging** | JSON logs via structlog. Every entry has an ISO UTC timestamp and level, plus whatever fields the call site passes (e.g. `run_id`, `step`, `source`) and any bound context vars. No field is added automatically. |
 | **Tracing** | OpenTelemetry spans, one per HTTP request (middleware) and one per MCP HTTP call; optional LangSmith tracing of LLM calls (`LANGCHAIN_TRACING_V2`). Not a single end-to-end trace of the agent flow. |
 | **Settings** | The `Settings` singleton from pydantic-settings. Reads from env vars → `.env` → defaults. Single source of truth for all config. |

@@ -14,3 +14,7 @@ class ToolResult(BaseModel):
     success: bool
     data: Any | None = None
     error: str | None = None
+    # Class name of the MedAgentError behind a failure, so a caller can tell an
+    # unreachable MCP server (MCPError) from bad input (ToolError) instead of
+    # collapsing every failure into one generic message.
+    error_type: str | None = None

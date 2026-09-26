@@ -87,6 +87,12 @@ If port 5432 is already taken by a local Postgres install, start with `POSTGRES_
 
 The API is at `http://localhost:8000` either way. Grafana is at `http://localhost:3000` (login `admin` / your `GRAFANA_ADMIN_PASSWORD`), Prometheus at `http://localhost:9090`.
 
+### Observability
+
+The provisioned **MedAgent Overview** dashboard shows, from `/metrics`: HTTP rate and latency, LLM calls by outcome (success / rate_limited / timeout / server_error / client_error / circuit_open), LLM latency and token spend, retries by reason, circuit-breaker state per dependency (Groq, each MCP server), MCP requests by outcome, specialist-agent steps, the evidence agent's ReAct-vs-fallback split (the number to watch for the agent's health), ReAct tool calls, guardrail findings and context truncations. All labels come from small fixed sets, so cardinality stays bounded.
+
+Reliability policy (tune in `.env`): a permanent error (bad model name, bad request) is attempted once; timeouts, connection failures and 5xx are retried with backoff (3 attempts, `RETRY_BUDGET_SECONDS` total); a rate limit is waited out only if it asks for `RETRY_MAX_WAIT_SECONDS` or less, otherwise the request fails fast; after 5 consecutive upstream failures the breaker opens and calls fail immediately for 30 s. When the LLM or an MCP server is down the report degrades (see *Partial failure* below) instead of hanging.
+
 ---
 
 ## Walkthrough: curl commands

@@ -47,3 +47,22 @@ def test_validate_output_flags_apparent_prompt_leakage() -> None:
 def test_validate_output_passes_normal_clinical_text() -> None:
     text = "Metformin remains first-line therapy for type 2 diabetes per ADA guidelines."
     assert validate_output(text, source="test") == []
+
+
+def test_guardrail_findings_are_counted_by_kind() -> None:
+    from tests.conftest import metric_value
+
+    allergy_before = metric_value("medagent_guardrail_flags_total", kind="allergy_mention")
+    validation_before = metric_value("medagent_guardrail_flags_total", kind="output_validation")
+
+    find_allergy_mentions("Consider Penicillin.", ["Penicillin"])
+    find_allergy_mentions("Consider metformin.", ["Penicillin"])  # no finding: not counted
+    validate_output("ok", source="test")
+
+    assert (
+        metric_value("medagent_guardrail_flags_total", kind="allergy_mention") - allergy_before == 1
+    )
+    assert (
+        metric_value("medagent_guardrail_flags_total", kind="output_validation") - validation_before
+        == 1
+    )

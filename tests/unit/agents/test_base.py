@@ -506,3 +506,62 @@ async def test_one_failing_tool_does_not_affect_its_siblings() -> None:
     tool_messages = [m for m in provider.histories[1] if m.role == "tool"]
     assert tool_messages[0].content.startswith("Error:")
     assert "fine" in tool_messages[1].content
+
+
+# --- metrics ------------------------------------------------------------------------------
+
+from tests.conftest import metric_value  # noqa: E402
+
+
+async def test_tool_calls_are_counted_by_outcome() -> None:
+    def total(outcome: str, tool_name: str = "search") -> float:
+        return metric_value("medagent_tool_calls_total", tool=tool_name, outcome=outcome)
+
+    before = {o: total(o) for o in ("success", "duplicate")}
+    registry, _ = _counting_registry()
+    provider = _ScriptedProvider(
+        [
+            _calls_turn(_call("c1", "search", query="q")),
+            _calls_turn(_call("c2", "search", query="q")),
+            LLMResponse(content="answer", model="mock"),
+        ]
+    )
+
+    await ReActAgent(provider, registry, SessionMemory(), system_prompt="t").run(_patient(), "go")
+
+    assert total("success") - before["success"] == 1
+    assert total("duplicate") - before["duplicate"] == 1
+
+
+async def test_a_model_invented_tool_name_never_becomes_a_metric_label() -> None:
+    """The model chooses tool names; an unbounded label would let it (or an
+    injected prompt) blow up metric cardinality."""
+    before = metric_value("medagent_tool_calls_total", tool="unknown", outcome="error")
+    provider = _ScriptedProvider(
+        [
+            _calls_turn(_call("c1", "definitely_not_a_real_tool_xyz")),
+            LLMResponse(content="answer", model="mock"),
+        ]
+    )
+
+    await ReActAgent(provider, ToolRegistry(), SessionMemory(), system_prompt="t").run(
+        _patient(), "go"
+    )
+
+    assert metric_value("medagent_tool_calls_total", tool="unknown", outcome="error") - before == 1
+    assert (
+        metric_value(
+            "medagent_tool_calls_total", tool="definitely_not_a_real_tool_xyz", outcome="error"
+        )
+        == 0
+    )
+
+
+async def test_the_loop_deadline_raises_a_distinct_timeout_error() -> None:
+    from medagent.agents.base import ReActTimeoutError
+
+    agent = ReActAgent(
+        _SlowProvider(5), ToolRegistry(), SessionMemory(), system_prompt="t", timeout_seconds=0.05
+    )
+    with pytest.raises(ReActTimeoutError):
+        await agent.run(_patient(), "go")

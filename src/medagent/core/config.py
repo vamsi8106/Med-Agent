@@ -29,6 +29,12 @@ class Settings(BaseSettings):
     mcp_rate_limit_capacity: int = 10
 
     llm_timeout_seconds: float = 30.0
+    # Retry policy shared by the LLM and MCP clients. A rate limit whose
+    # Retry-After exceeds retry_max_wait_seconds is not waited out (Groq's daily
+    # cap says "try again in 8m" -- holding a doctor's request for that helps
+    # nobody); retries stop once retry_budget_seconds have been spent in total.
+    retry_max_wait_seconds: float = 10.0
+    retry_budget_seconds: float = 45.0
     # Ceiling on cumulative LLM tokens (prompt + completion) a single
     # multi-agent run (one assess/followup call) may spend before remaining
     # specialist steps are skipped rather than run unboundedly.

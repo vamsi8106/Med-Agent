@@ -36,6 +36,7 @@ from medagent.core.models import AgentFailure, AgentResult, PatientContext
 from medagent.core.types import AgentRole
 from medagent.infra.agent_run import AgentRunTracker
 from medagent.infra.logging import get_logger
+from medagent.infra.metrics import agent_run_total
 
 logger = get_logger(__name__)
 
@@ -100,6 +101,7 @@ async def _run_specialist(
     tracker = state["tracker"]
     if tracker.over_budget():
         tracker.skip(name)
+        agent_run_total.labels(agent_role=role.value, outcome="skipped").inc()
         return {}
     try:
         result = await call()
@@ -108,8 +110,10 @@ async def _run_specialist(
             "specialist_failed", step=name, error_type=type(exc).__name__, detail=str(exc)
         )
         tracker.fail(name, type(exc).__name__)
+        agent_run_total.labels(agent_role=role.value, outcome="failed").inc()
         return {"failures": [AgentFailure(role=role, error=_doctor_safe_reason(exc))]}
     tracker.record(name, result.usage)
+    agent_run_total.labels(agent_role=role.value, outcome="completed").inc()
     return {"results": [result]}
 
 

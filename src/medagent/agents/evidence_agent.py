@@ -2,7 +2,7 @@
 
 import asyncio
 
-from medagent.agents.base import ReActAgent
+from medagent.agents.base import ReActAgent, ReActTimeoutError
 from medagent.core.config import get_settings
 from medagent.core.exceptions import ProviderError, ToolError
 from medagent.core.interfaces import BaseAgent, BaseLLMProvider
@@ -16,6 +16,7 @@ from medagent.infra.guardrails import (
     wrap_untrusted,
 )
 from medagent.infra.logging import get_logger
+from medagent.infra.metrics import evidence_react_total, guardrail_flags_total
 from medagent.infra.verification import find_unverified_figures, unverified_figures_warning
 from medagent.memory.session import SessionMemory
 from medagent.rag.retriever import GuidelineRetrieverTool
@@ -129,8 +130,17 @@ class EvidenceAgent(BaseAgent):
 
     async def gather_evidence(self, context: PatientContext, message: str) -> AgentResult:
         try:
-            return await self._gather_with_react(context, message)
+            result = await self._gather_with_react(context, message)
+            evidence_react_total.labels(outcome="completed").inc()
+            return result
         except (ToolError, ProviderError) as exc:
+            if isinstance(exc, _UngroundedAnswerError):
+                outcome = "fallback_ungrounded"
+            elif isinstance(exc, ReActTimeoutError):
+                outcome = "fallback_timeout"
+            else:
+                outcome = "fallback_error"
+            evidence_react_total.labels(outcome=outcome).inc()
             logger.warning("evidence_react_fallback", reason=str(exc)[:200])
             wasted = exc.usage if isinstance(exc, _UngroundedAnswerError) else {}
             result = await self._gather_deterministic(context, message)
@@ -273,6 +283,7 @@ class EvidenceAgent(BaseAgent):
             message,
         )
         if unverified:
+            guardrail_flags_total.labels(kind="unverified_figures").inc()
             logger.warning("unverified_figures_flagged", figures=unverified)
             summary += "\n\n" + unverified_figures_warning(unverified)
         return AgentResult(

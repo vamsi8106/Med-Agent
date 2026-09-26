@@ -332,3 +332,53 @@ async def test_failure_and_budget_skip_share_one_note() -> None:
     )
 
     assert report.count("## Note") == 1
+
+
+# --- metrics and specific failure wording ---------------------------------------------
+
+from medagent.agents.drug_safety_agent import DrugSafetyAgent as _RealDrugSafety  # noqa: E402
+from medagent.tools.base import ToolResult as _ToolResult  # noqa: E402
+from tests.conftest import metric_value  # noqa: E402
+
+
+class _McpDownChecker:
+    async def run(self, medications: list) -> _ToolResult:
+        return _ToolResult(
+            tool_name="interaction_checker",
+            success=False,
+            error="connection refused",
+            error_type="MCPError",
+        )
+
+
+async def test_an_unreachable_mcp_server_is_named_in_the_report_not_a_generic_failure() -> None:
+    drug_safety = _RealDrugSafety(
+        llm=MockLLMProvider(),
+        interaction_checker=_McpDownChecker(),  # type: ignore[arg-type]
+    )
+    evidence = AsyncMock()
+    evidence.gather_evidence.return_value = _agent_result(AgentRole.EVIDENCE, "Evidence text.")
+
+    report = await _assess_with(drug_safety, evidence, AsyncMock(), _BOTH)
+
+    assert "Unavailable: Drug Safety (an external medical data source was unavailable)" in report
+    assert "could not be completed" not in report
+
+
+async def test_specialist_steps_are_counted_by_outcome() -> None:
+    def total(role: str, outcome: str) -> float:
+        return metric_value("medagent_agent_run_total", agent_role=role, outcome=outcome)
+
+    before = {
+        "ok": total("drug_safety", "completed"),
+        "failed": total("evidence", "failed"),
+    }
+    drug_safety = AsyncMock()
+    drug_safety.run_result.return_value = _agent_result(AgentRole.DRUG_SAFETY, "ok")
+    evidence = AsyncMock()
+    evidence.gather_evidence.side_effect = ProviderError("down")
+
+    await _assess_with(drug_safety, evidence, AsyncMock(), _BOTH)
+
+    assert total("drug_safety", "completed") - before["ok"] == 1
+    assert total("evidence", "failed") - before["failed"] == 1

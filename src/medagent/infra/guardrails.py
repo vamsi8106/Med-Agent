@@ -19,6 +19,7 @@ seeing an odd response.
 """
 
 from medagent.infra.logging import get_logger
+from medagent.infra.metrics import guardrail_flags_total
 
 logger = get_logger(__name__)
 
@@ -49,7 +50,10 @@ def find_allergy_mentions(response_text: str, allergies: list[str]) -> list[str]
     response text -- independent of which drugs the caller explicitly asked
     to check."""
     lowered = response_text.lower()
-    return [allergy for allergy in allergies if allergy.lower() in lowered]
+    mentioned = [allergy for allergy in allergies if allergy.lower() in lowered]
+    if mentioned:
+        guardrail_flags_total.labels(kind="allergy_mention").inc()
+    return mentioned
 
 
 def allergy_mention_warning(allergy: str) -> str:
@@ -72,5 +76,6 @@ def validate_output(text: str, *, source: str) -> list[str]:
             issues.append(f"response may leak internal prompt content: {marker!r}")
 
     if issues:
+        guardrail_flags_total.labels(kind="output_validation").inc()
         logger.warning("llm_output_guardrail_flagged", source=source, issues=issues)
     return issues

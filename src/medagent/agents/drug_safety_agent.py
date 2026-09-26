@@ -3,7 +3,7 @@
 import re
 
 from medagent.core.config import get_settings
-from medagent.core.exceptions import ToolError
+from medagent.core.exceptions import MCPError, MedAgentError, ProviderError, ToolError
 from medagent.core.interfaces import BaseAgent, BaseLLMProvider
 from medagent.core.models import AgentResult, DrugInteraction, Medication, Message, PatientContext
 from medagent.core.types import AgentRole
@@ -19,6 +19,10 @@ from medagent.tools.custom.interaction_checker import InteractionCheckerTool
 
 logger = get_logger(__name__)
 
+_UPSTREAM_ERRORS: dict[str, type[MedAgentError]] = {
+    "MCPError": MCPError,
+    "ProviderError": ProviderError,
+}
 _SPLIT_PATTERN = re.compile(r"\s*(?:\+|,|\band\b)\s*", flags=re.IGNORECASE)
 _FOR_PATTERN = re.compile(r"\bfor\s+(.*)", flags=re.IGNORECASE)
 
@@ -92,7 +96,10 @@ class DrugSafetyAgent(BaseAgent):
 
         result = await self._interaction_checker.run(medications)
         if not result.success:
-            raise ToolError(f"Interaction check failed: {result.error}")
+            # Keep the kind of failure: an unreachable MCP server should read as
+            # "data source unavailable" in the report, not the generic wording.
+            error_class = _UPSTREAM_ERRORS.get(result.error_type or "", ToolError)
+            raise error_class(f"Interaction check failed: {result.error}")
 
         # ToolResult.data is intentionally untyped (Any); InteractionCheckerTool
         # always puts a list[DrugInteraction] there.

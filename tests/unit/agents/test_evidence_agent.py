@@ -548,3 +548,61 @@ async def test_the_models_parallel_tool_calls_run_concurrently() -> None:
 
     assert time.monotonic() - started < 0.55  # sequential would be >= 0.6
     assert {e.source for e in result.evidence} == {"PubMed", "ada"}
+
+
+# --- metrics ------------------------------------------------------------------------------
+
+from medagent.agents.base import ReActTimeoutError  # noqa: E402
+from tests.conftest import metric_value  # noqa: E402
+
+
+def _react_outcome(outcome: str) -> float:
+    return metric_value("medagent_evidence_react_total", outcome=outcome)
+
+
+async def test_a_completed_react_run_is_counted() -> None:
+    before = _react_outcome("completed")
+    await _agent_with_evidence(_react_then_answer("Metformin is first-line.")).gather_evidence(
+        _patient(), "q?"
+    )
+    assert _react_outcome("completed") - before == 1
+
+
+async def test_each_kind_of_fallback_is_counted_separately() -> None:
+    ungrounded_before = _react_outcome("fallback_ungrounded")
+    error_before = _react_outcome("fallback_error")
+    timeout_before = _react_outcome("fallback_timeout")
+
+    # answered without searching
+    await _agent_with_evidence(
+        _ReActScriptedLLM(
+            [
+                LLMResponse(content="from memory", model="m"),
+                LLMResponse(content="ok ok ok", model="m"),
+            ]
+        )
+    ).gather_evidence(_patient(), "q?")
+    # the provider failed
+    await _agent_with_evidence(
+        _ReActScriptedLLM([ProviderError("down"), LLMResponse(content="ok ok ok", model="m")])
+    ).gather_evidence(_patient(), "q?")
+    # the loop deadline fired
+    with patch(
+        "medagent.agents.evidence_agent.ReActAgent.run_detailed",
+        AsyncMock(side_effect=ReActTimeoutError("too slow")),
+    ):
+        await _agent_with_evidence(MockLLMProvider(fixed_response="ok ok ok")).gather_evidence(
+            _patient(), "q?"
+        )
+
+    assert _react_outcome("fallback_ungrounded") - ungrounded_before == 1
+    assert _react_outcome("fallback_error") - error_before == 1
+    assert _react_outcome("fallback_timeout") - timeout_before == 1
+
+
+async def test_unverified_figures_are_counted_as_a_guardrail_flag() -> None:
+    before = metric_value("medagent_guardrail_flags_total", kind="unverified_figures")
+    await _agent_with_evidence(_react_then_answer("Give 850 mg daily.")).gather_evidence(
+        _patient(), "dose?"
+    )
+    assert metric_value("medagent_guardrail_flags_total", kind="unverified_figures") - before == 1

@@ -13,15 +13,37 @@ from typing import Any, Self
 
 import httpx
 
-from medagent.core.exceptions import MCPError
+from medagent.core.exceptions import MCPError, UpstreamError
 from medagent.infra.circuit_breaker import CircuitBreaker
 from medagent.infra.logging import get_logger
+from medagent.infra.metrics import mcp_requests_total
 from medagent.infra.rate_limiter import TokenBucket
 from medagent.infra.retry import retry
 from medagent.infra.tracing import get_tracer
 
 logger = get_logger(__name__)
 tracer = get_tracer(__name__)
+
+
+def _status_error(response: httpx.Response, url: str) -> MCPError:
+    """Classifies an HTTP error status: 5xx and 408 mean the server is unwell
+    (retryable, count toward the breaker); 429 asks us to slow down; any other
+    4xx means our request is wrong, so retrying can't help and it must not make
+    a healthy server look broken."""
+    message = f"Request to {url} returned {response.status_code}: {response.text}"
+    status = response.status_code
+    if status == 429:
+        retry_after: float | None
+        try:
+            retry_after = float(response.headers["retry-after"])
+        except (KeyError, ValueError):
+            retry_after = None
+        return MCPError(message, reason="rate_limited", retryable=True, retry_after=retry_after)
+    if status == 408:
+        return MCPError(message, reason="timeout", retryable=True)
+    if status >= 500:
+        return MCPError(message, reason="server_error", retryable=True)
+    return MCPError(message, reason="client_error")
 
 
 class HttpMCPClient:
@@ -32,8 +54,13 @@ class HttpMCPClient:
         timeout_seconds: float = 30.0,
         rate_limit_per_second: float = 5.0,
         rate_limit_capacity: int = 10,
+        *,
+        name: str = "mcp",
+        retry_max_wait_seconds: float = 10.0,
+        retry_budget_seconds: float = 45.0,
     ) -> None:
         self._base_url = base_url.rstrip("/")
+        self._name = name
         self._timeout_seconds = timeout_seconds
         self._client: httpx.AsyncClient | None = None
         # One instance is shared by every request the app serves, so several
@@ -42,9 +69,15 @@ class HttpMCPClient:
         self._open_users = 0
         self._lifecycle = asyncio.Lock()
         self._breaker = circuit_breaker or CircuitBreaker(
-            failure_threshold=5, recovery_timeout=30.0
+            failure_threshold=5, recovery_timeout=30.0, name=name, error_type=MCPError
         )
         self._bucket = TokenBucket(rate_limit_per_second, rate_limit_capacity)
+        self._request_with_retry = retry(
+            max_attempts=3,
+            max_wait=retry_max_wait_seconds,
+            budget=retry_budget_seconds,
+            target="mcp",
+        )(self._request_once)
 
     async def __aenter__(self) -> Self:
         # Self, not HttpMCPClient -- callers using `async with SubclassClient()`
@@ -68,26 +101,38 @@ class HttpMCPClient:
         with tracer.start_as_current_span(f"mcp_http.{method.lower()}.{path}") as span:
             span.set_attribute("mcp.base_url", self._base_url)
             span.set_attribute("mcp.path", path)
-            return await self._breaker.call(self._request_with_retry, method, path, **kwargs)
+            try:
+                result = await self._breaker.call(self._request_with_retry, method, path, **kwargs)
+            except UpstreamError as exc:
+                mcp_requests_total.labels(server=self._name, outcome=exc.reason).inc()
+                raise
+            mcp_requests_total.labels(server=self._name, outcome="success").inc()
+            return result
 
-    @retry(max_attempts=3, exceptions=(Exception,))
-    async def _request_with_retry(self, method: str, path: str, **kwargs: Any) -> Any:
+    async def _request_once(self, method: str, path: str, **kwargs: Any) -> Any:
         if self._client is None:
             raise MCPError("HTTP client is not open; use 'async with' before making requests")
 
         await self._bucket.acquire()
+        url = f"{self._base_url}{path}"
         try:
             response = await self._client.request(method, path, **kwargs)
         except httpx.TimeoutException as exc:
             raise MCPError(
-                f"Request to {self._base_url}{path} timed out after {self._timeout_seconds}s"
+                f"Request to {url} timed out after {self._timeout_seconds}s",
+                reason="timeout",
+                retryable=True,
+            ) from exc
+        except httpx.TransportError as exc:
+            raise MCPError(
+                f"Request to {url} failed: {exc}", reason="connection_error", retryable=True
             ) from exc
         except Exception as exc:
-            raise MCPError(f"Request to {self._base_url}{path} failed: {exc}") from exc
+            raise MCPError(f"Request to {url} failed: {exc}") from exc
 
         if response.status_code >= 400:
-            raise MCPError(
-                f"Request to {self._base_url}{path} returned {response.status_code}: "
-                f"{response.text}"
-            )
-        return response.json()
+            raise _status_error(response, url)
+        try:
+            return response.json()
+        except ValueError as exc:
+            raise MCPError(f"Request to {url} returned invalid JSON") from exc

@@ -18,6 +18,7 @@ import math
 import re
 
 from medagent.infra.logging import get_logger
+from medagent.infra.metrics import context_truncations_total
 
 logger = get_logger(__name__)
 
@@ -44,6 +45,7 @@ def truncate_text(text: str, max_tokens: int, *, source: str) -> str:
         if partial:
             cut = cut[: partial.start()]
 
+    context_truncations_total.labels(source=source).inc()
     logger.warning(
         "context_truncated",
         source=source,

@@ -41,3 +41,14 @@ def test_truncate_text_never_ends_mid_word() -> None:
 def test_truncate_text_boundary_exact_length_is_not_truncated() -> None:
     text = "x" * 35
     assert truncate_text(text, max_tokens=10, source="test") == text
+
+
+def test_truncations_are_counted_by_source() -> None:
+    from tests.conftest import metric_value
+
+    before = metric_value("medagent_context_truncations_total", source="test-source")
+
+    truncate_text("word " * 500, max_tokens=10, source="test-source")
+    truncate_text("short", max_tokens=10, source="test-source")  # untouched: not counted
+
+    assert metric_value("medagent_context_truncations_total", source="test-source") - before == 1

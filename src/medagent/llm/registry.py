@@ -26,6 +26,8 @@ class ProviderRegistry:
                 langsmith_api_key=settings.langchain_api_key,
                 langsmith_project=settings.langchain_project,
                 timeout_seconds=settings.llm_timeout_seconds,
+                retry_max_wait_seconds=settings.retry_max_wait_seconds,
+                retry_budget_seconds=settings.retry_budget_seconds,
             )
 
         raise ProviderError(f"Unknown LLM provider: {name}")

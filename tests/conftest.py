@@ -129,3 +129,39 @@ async def pg_dsn(postgres_dsn: str) -> str:
     finally:
         await conn.close()
     return postgres_dsn
+
+
+# --- retry-policy test helpers ---------------------------------------------------
+
+
+class FakeClock:
+    """Replaces retry's sleep and clock: sleeping advances a fake clock instantly
+    and records the delay, so a policy that would wait for minutes runs in
+    microseconds and its exact behaviour can be asserted."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+        self.sleeps: list[float] = []
+
+    async def sleep(self, delay: float) -> None:
+        self.sleeps.append(delay)
+        self.now += delay
+
+    def monotonic(self) -> float:
+        return self.now
+
+
+@pytest.fixture
+def clock(monkeypatch: pytest.MonkeyPatch) -> FakeClock:
+    fake = FakeClock()
+    monkeypatch.setattr("medagent.infra.retry._sleep", fake.sleep)
+    monkeypatch.setattr("medagent.infra.retry._now", fake.monotonic)
+    return fake
+
+
+def metric_value(name: str, **labels: str) -> float:
+    """Current value of a Prometheus sample (0 if it hasn't been touched yet).
+    Metrics are process-global, so tests compare before/after, not absolutes."""
+    from prometheus_client import REGISTRY
+
+    return REGISTRY.get_sample_value(name, labels) or 0.0

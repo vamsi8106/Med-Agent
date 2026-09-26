@@ -12,11 +12,44 @@ class MedAgentError(Exception):
     status_code: int = 400
 
 
-class ProviderError(MedAgentError):
-    """Raised when an LLM provider call fails -- an upstream dependency, not
-    a bad request, so it maps to 502 rather than 400."""
+# Reasons whose failures say the upstream itself is unhealthy. Rate limits and
+# client errors (bad request, unknown model) do not: the server is up and
+# answering, so they must never open a circuit breaker.
+_BREAKER_TRIPPING_REASONS = frozenset({"timeout", "server_error", "connection_error"})
+
+
+class UpstreamError(MedAgentError):
+    """A failure calling a dependency we don't control (the LLM, an MCP server).
+
+    Carries what the retry policy and circuit breaker need to act correctly:
+    `reason` classifies it, `retryable` says whether trying again can help
+    (default False -- an unclassified error is never blindly retried), and
+    `retry_after` is the wait in seconds the upstream itself asked for. An
+    upstream problem, not a bad request, so it maps to 502.
+    """
 
     status_code = 502
+
+    def __init__(
+        self,
+        message: str = "",
+        *,
+        reason: str = "error",
+        retryable: bool = False,
+        retry_after: float | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.reason = reason
+        self.retryable = retryable
+        self.retry_after = retry_after
+
+    @property
+    def trips_breaker(self) -> bool:
+        return self.reason in _BREAKER_TRIPPING_REASONS
+
+
+class ProviderError(UpstreamError):
+    """Raised when an LLM provider call fails."""
 
 
 class ToolError(MedAgentError):
@@ -33,11 +66,8 @@ class MemoryError(MedAgentError):
     status_code = 500
 
 
-class MCPError(MedAgentError):
-    """Raised when an MCP server call fails -- an upstream dependency, not
-    a bad request, so it maps to 502 rather than 400."""
-
-    status_code = 502
+class MCPError(UpstreamError):
+    """Raised when an MCP server call fails."""
 
 
 class AuthError(MedAgentError):

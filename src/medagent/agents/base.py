@@ -28,6 +28,7 @@ from medagent.core.models import LLMResponse, Message, PatientContext, ToolCall
 from medagent.infra.context_budget import approx_token_count, truncate_text
 from medagent.infra.guardrails import wrap_untrusted
 from medagent.infra.logging import get_logger
+from medagent.infra.metrics import tool_calls_total
 from medagent.memory.session import SessionMemory
 from medagent.tools.base import ToolResult
 from medagent.tools.registry import ToolRegistry
@@ -42,6 +43,11 @@ _DUPLICATE_CALL_MESSAGE = (
     "Error: you already made this exact call to {tool}; its result is above. Do not repeat "
     "it -- refine the query or write your final answer."
 )
+
+
+class ReActTimeoutError(ToolError):
+    """The loop hit its whole-loop deadline. A distinct type so callers can tell
+    a timeout from other failures (the evidence agent counts them separately)."""
 
 
 class ReActState(TypedDict):
@@ -128,7 +134,7 @@ class ReActAgent(BaseAgent):
         except TimeoutError as exc:
             if not deadline.expired():
                 raise
-            raise ToolError(
+            raise ReActTimeoutError(
                 f"ReAct loop exceeded its {self._timeout_seconds:g}s time limit"
             ) from exc
         return ReActResult(
@@ -242,6 +248,7 @@ class ReActAgent(BaseAgent):
             if key in seen:
                 results[index] = _DUPLICATE_CALL_MESSAGE.format(tool=call.tool_name)
                 logger.info("react_duplicate_call_blocked", tool=call.tool_name)
+                self._count_tool_call(call, "duplicate")
             else:
                 seen.append(key)
                 to_run.append((index, call))
@@ -262,6 +269,13 @@ class ReActAgent(BaseAgent):
             )
         stalled = all(text.startswith("Error:") for text in results.values())
         return [call for _, call in to_run], seen, stalled
+
+    def _count_tool_call(self, call: ToolCall, outcome: str) -> None:
+        # The model chooses the tool name, so an unregistered one must not
+        # become a metric label (unbounded cardinality).
+        known = {tool.name for tool in self._tools.list_tools()}
+        name = call.tool_name if call.tool_name in known else "unknown"
+        tool_calls_total.labels(tool=name, outcome=outcome).inc()
 
     async def _execute(self, call: ToolCall) -> str:
         """Runs one tool call and returns its result as text for the model.
@@ -285,8 +299,10 @@ class ReActAgent(BaseAgent):
             else:
                 text = str(result)
 
-        logger.info("react_tool_executed", tool=call.tool_name, is_error=text.startswith("Error:"))
-        if text.startswith("Error:"):
+        is_error = text.startswith("Error:")
+        logger.info("react_tool_executed", tool=call.tool_name, is_error=is_error)
+        self._count_tool_call(call, "error" if is_error else "success")
+        if is_error:
             return text
         capped = truncate_text(
             text, get_settings().agent_context_field_max_tokens, source=f"react.{call.tool_name}"

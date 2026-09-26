@@ -26,7 +26,7 @@ src/medagent/
 ├── core/                        # Phase 1 — shared kernel, zero external deps beyond pydantic
 │   ├── interfaces.py            # ABCs: BaseLLMProvider, BaseTool, BaseAgent, BaseMemory
 │   ├── models.py                # PatientContext, Medication, LabResult, Visit, DrugInteraction, Message, ToolCall, LLMResponse
-│   ├── exceptions.py            # MedAgentError → ProviderError, ToolError, MemoryError, MCPError, AuthError, PatientNotFoundError, AgentBudgetExceededError, AllAgentsFailedError (each carries its HTTP status_code)
+│   ├── exceptions.py            # MedAgentError → UpstreamError (→ ProviderError, MCPError; carries `reason`, `retryable`, `retry_after`), ToolError, MemoryError, AuthError, PatientNotFoundError, AgentBudgetExceededError, AllAgentsFailedError (each carries its HTTP status_code)
 │   ├── config.py                # Settings (pydantic-settings)
 │   └── types.py                 # Enums: EvidenceGrade, InteractionSeverity, CKDStage, TrialPhase, AgentRole
 ├── llm/                         # Phase 1 — provider layer
@@ -35,11 +35,11 @@ src/medagent/
 │   └── mock_provider.py         # deterministic, for tests
 ├── infra/                       # Phase 1+ — cross-cutting
 │   ├── logging.py               # structlog JSON setup
-│   ├── retry.py                 # @retry with exponential backoff + jitter
+│   ├── retry.py                 # @retry: retries only `retryable` UpstreamErrors, honours Retry-After (fails fast past `max_wait`), bounded by a total `budget`
 │   ├── rate_limiter.py          # token-bucket per API source
-│   ├── circuit_breaker.py       # degrade if MCP server down
+│   ├── circuit_breaker.py       # fail fast when a dependency (an MCP server, the LLM) is down; only timeouts/connection/5xx count, never 4xx or rate limits
 │   ├── tracing.py               # OpenTelemetry setup
-│   ├── metrics.py               # Prometheus counters/histograms
+│   ├── metrics.py               # Prometheus catalogue: HTTP, LLM calls/latency/tokens, retries, breaker state, MCP, tool calls, ReAct paths, guardrail flags, truncations
 │   ├── middleware.py            # request logging + metrics middleware
 │   ├── context_budget.py        # token estimate (3.5 chars/token) + truncate_text for prompt inputs
 │   ├── guardrails.py            # wrap_untrusted (prompt-injection delimiting), allergy output check, output sanity checks
@@ -170,6 +170,8 @@ Tools available: `search-drugs`, `get-drug-details`, `search-drug-nomenclature`,
 - Test with `MockLLMProvider`. No network in unit tests (Postgres-backed tests use a throwaway Docker container and skip if Docker is unavailable).
 - LLM prompts: wrap doctor/patient/external text with `wrap_untrusted`, and cap it with `truncate_text` (`AGENT_*_TOKENS` settings). Deterministic safety checks (allergies, interactions, lab flags) stay outside any LLM loop.
 - Anything that can only fail against the real model or real MCP responses gets a case in `tests/eval/` -- unit tests use mocks and cannot see it.
+- A client for anything we don't control (LLM, MCP, a future API) must raise `UpstreamError` subclasses with a `reason` and `retryable`, own its retries in one place (turn any SDK's built-in retries off -- they stacked under ours, up to 9 HTTP calls per LLM call), put a circuit breaker in front, and emit metrics. A 4xx is never retryable and never trips the breaker; a rate limit is retried only if the requested wait is short. Add a fault-injection test for each new failure mode (`tests/unit/infra/test_fault_injection.py` shows the pattern with the `clock` fixture).
+- Metric labels must come from a small fixed set -- never a patient id, query text, error message, or a name the model chose.
 - Anything shared across requests (`AppState` clients, models) is used concurrently -- `HttpMCPClient` is re-entrant and `EmbeddingModel` serializes encodes for this reason. A new shared resource must be safe under overlapping use, with a test that overlaps it.
 - A new type in graph state (`AssessmentState` / `FollowupState`, including nested models) must be added to `_CHECKPOINT_STATE_TYPES` in `workflows/checkpointing.py`; a test fails if one is missing. Graph nodes must not swallow non-`MedAgentError` exceptions -- those are bugs and stay loud.
 

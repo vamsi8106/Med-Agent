@@ -128,7 +128,12 @@ class InteractionCheckerTool(BaseTool):
         try:
             interactions = await self._check_all_pairs(medications)
         except Exception as exc:  # noqa: BLE001 - boundary: convert to ToolResult
-            return ToolResult(tool_name=self.name, success=False, error=str(exc))
+            return ToolResult(
+                tool_name=self.name,
+                success=False,
+                error=str(exc),
+                error_type=type(exc).__name__,
+            )
         return ToolResult(tool_name=self.name, success=True, data=interactions)
 
     async def _check_all_pairs(self, medications: list[Medication]) -> list[DrugInteraction]:
