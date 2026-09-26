@@ -85,7 +85,7 @@ services:
     environment:
       LLM_PROVIDER: ${LLM_PROVIDER:-groq}
       GROQ_API_KEY: ${GROQ_API_KEY:-}
-      GROQ_MODEL: ${GROQ_MODEL:-llama-3.3-70b-versatile}
+      GROQ_MODEL: ${GROQ_MODEL:-openai/gpt-oss-20b}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       POSTGRES_DSN: postgresql://medagent:${POSTGRES_PASSWORD:-medagent}@postgres:5432/medagent
       CHROMA_HOST: chromadb

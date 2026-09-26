@@ -8,7 +8,10 @@ class Settings(BaseSettings):
 
     llm_provider: str = "groq"
     groq_api_key: str | None = None
-    groq_model: str = "llama-3.3-70b-versatile"
+    # Must support tool calling (the evidence agent is a ReAct agent). A default that
+    # the Groq org cannot access fails every fresh checkout and CI run with a 404, so
+    # this is the model actually verified end to end, not a guess.
+    groq_model: str = "openai/gpt-oss-20b"
 
     log_level: str = "INFO"
 
