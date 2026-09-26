@@ -4,11 +4,13 @@ from contextlib import contextmanager
 from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
+from starlette.testclient import WebSocketTestSession
 
 from medagent.app import create_app
 from medagent.core.config import Settings
 from medagent.core.exceptions import MCPError, PatientNotFoundError
-from medagent.core.models import PatientContext
+from medagent.core.models import AgentResult, PatientContext
+from medagent.core.types import AgentRole
 from medagent.memory.patient_store import PatientStore
 from medagent.memory.persistent import PersistentStore
 
@@ -19,6 +21,17 @@ _ADMIN_PASSWORD = "admin-pass!"
 class _FakeEmbeddingModel:
     async def embed(self, texts: list[str]) -> list[list[float]]:
         return [[0.0, 0.0] for _ in texts]
+
+
+class _FakeEvidenceAgent:
+    """Stands in for the LLM-backed agent so the real graph, checkpointer and
+    WebSocket handler run end to end with no network."""
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        pass
+
+    async def gather_evidence(self, context: PatientContext, message: str) -> AgentResult:
+        return AgentResult(role=AgentRole.EVIDENCE, summary="Follow-up evidence summary")
 
 
 class _FakeVectorStore:
@@ -48,6 +61,7 @@ def _make_client(pg_dsn: str) -> Iterator[TestClient]:
     with (
         patch("medagent.app.EmbeddingModel", _FakeEmbeddingModel),
         patch("medagent.app.VectorStore", _FakeVectorStore),
+        patch("medagent.app.EvidenceAgent", _FakeEvidenceAgent),
         TestClient(create_app(_settings(pg_dsn))) as client,
     ):
         yield client
@@ -361,70 +375,151 @@ def test_websocket_without_token_is_rejected(pg_dsn: str) -> None:
             raise AssertionError("expected the connection to be rejected")
 
 
-def test_websocket_chat_requires_approval_before_saving(pg_dsn: str) -> None:
-    patient = PatientContext(
-        id="P-TEST-803", name="Patient Gamma", age=70, sex="M", doctor_id="DR-TEST-001"
+def _create_patient(client: TestClient, token: str, patient_id: str, name: str) -> None:
+    response = client.post(
+        "/patients",
+        json={"id": patient_id, "name": name, "age": 70, "sex": "M"},
+        headers={"Authorization": f"Bearer {token}"},
     )
+    assert response.status_code == 200
+
+
+def _ws_url(patient_id: str, token: str, resume: bool = False) -> str:
+    return f"/ws/{patient_id}?token={token}" + ("&resume=1" if resume else "")
+
+
+def _draft(websocket: WebSocketTestSession, message: str) -> tuple[list[dict], dict]:
+    """Sends a message and returns (progress frames, the pending_approval frame)."""
+    websocket.send_text(message)
+    progress = []
+    while True:
+        frame = websocket.receive_json()
+        if frame["type"] != "progress":
+            return progress, frame
+        progress.append(frame)
+
+
+def _visits(pg_dsn: str, patient_id: str) -> list:
+    store = PatientStore(PersistentStore(pg_dsn))
+    loaded = asyncio.run(store.get_patient(patient_id))
+    assert loaded is not None
+    return loaded.visits
+
+
+def test_websocket_chat_streams_progress_then_requires_approval_before_saving(
+    pg_dsn: str,
+) -> None:
     with _make_client(pg_dsn) as client:
         token = _admin_token(client)
-        fake_followup = AsyncMock(return_value=("Follow-up report", patient))
-        with patch("medagent.app.run_followup", fake_followup):
-            with client.websocket_connect(f"/ws/P-TEST-803?token={token}") as websocket:
-                websocket.send_text("any updates?")
-                pending = websocket.receive_json()
-                assert pending == {"type": "pending_approval", "report": "Follow-up report"}
+        _create_patient(client, token, "P-TEST-803", "Patient Gamma")
+        with client.websocket_connect(_ws_url("P-TEST-803", token)) as websocket:
+            progress, pending = _draft(websocket, "any updates?")
+            assert [(f["step"], f["status"]) for f in progress] == [
+                ("triage", "completed"),
+                ("evidence", "completed"),
+                ("report", "completed"),
+            ]
+            assert pending["type"] == "pending_approval"
+            assert "Follow-up evidence summary" in pending["report"]
+            assert "resumed" not in pending
+            assert _visits(pg_dsn, "P-TEST-803") == []
 
-                websocket.send_text("approve")
-                saved = websocket.receive_json()
-                assert saved == {"type": "saved", "report": "Follow-up report"}
+            websocket.send_text("approve")
+            saved = websocket.receive_json()
+            assert saved == {"type": "saved", "report": pending["report"]}
 
-        headers = {"Authorization": f"Bearer {token}"}
-        get_resp = client.get("/patients/P-TEST-803", headers=headers)
-    assert get_resp.status_code == 200
-
-    store = PatientStore(PersistentStore(pg_dsn))
-    loaded = asyncio.run(store.get_patient("P-TEST-803"))
-    assert loaded is not None
-    assert len(loaded.visits) == 1
-    assert loaded.visits[0].chief_complaint == "any updates?"
+    visits = _visits(pg_dsn, "P-TEST-803")
+    assert len(visits) == 1
+    assert visits[0].chief_complaint == "any updates?"
 
 
 def test_websocket_chat_reject_does_not_save(pg_dsn: str) -> None:
-    patient = PatientContext(
-        id="P-TEST-804", name="Patient Delta", age=65, sex="F", doctor_id="DR-TEST-001"
-    )
     with _make_client(pg_dsn) as client:
         token = _admin_token(client)
-        fake_followup = AsyncMock(return_value=("Draft report", patient))
-        with patch("medagent.app.run_followup", fake_followup):
-            with client.websocket_connect(f"/ws/P-TEST-804?token={token}") as websocket:
-                websocket.send_text("any updates?")
-                websocket.receive_json()
+        _create_patient(client, token, "P-TEST-804", "Patient Delta")
+        with client.websocket_connect(_ws_url("P-TEST-804", token)) as websocket:
+            _draft(websocket, "any updates?")
+            websocket.send_text("reject")
+            assert websocket.receive_json() == {"type": "rejected"}
 
-                websocket.send_text("reject")
-                decision = websocket.receive_json()
-                assert decision == {"type": "rejected"}
-
-        headers = {"Authorization": f"Bearer {token}"}
-        get_resp = client.get("/patients/P-TEST-804", headers=headers)
-    assert get_resp.status_code == 404
+    assert _visits(pg_dsn, "P-TEST-804") == []
 
 
 def test_websocket_chat_edited_text_is_saved_instead(pg_dsn: str) -> None:
-    patient = PatientContext(
-        id="P-TEST-805", name="Patient Epsilon", age=45, sex="F", doctor_id="DR-TEST-001"
-    )
     with _make_client(pg_dsn) as client:
         token = _admin_token(client)
-        fake_followup = AsyncMock(return_value=("Draft report", patient))
-        with patch("medagent.app.run_followup", fake_followup):
-            with client.websocket_connect(f"/ws/P-TEST-805?token={token}") as websocket:
-                websocket.send_text("any updates?")
-                websocket.receive_json()
+        _create_patient(client, token, "P-TEST-805", "Patient Epsilon")
+        with client.websocket_connect(_ws_url("P-TEST-805", token)) as websocket:
+            _draft(websocket, "any updates?")
+            websocket.send_text("Edited: monitor renal function closely.")
+            saved = websocket.receive_json()
+            assert saved == {"type": "saved", "report": "Edited: monitor renal function closely."}
 
-                websocket.send_text("Edited: monitor renal function closely.")
-                saved = websocket.receive_json()
-                assert saved == {
-                    "type": "saved",
-                    "report": "Edited: monitor renal function closely.",
-                }
+    visits = _visits(pg_dsn, "P-TEST-805")
+    assert [v.assessment for v in visits] == ["Edited: monitor renal function closely."]
+
+
+def test_websocket_draft_survives_a_dropped_connection_and_resumes(pg_dsn: str) -> None:
+    with _make_client(pg_dsn) as client:
+        token = _admin_token(client)
+        _create_patient(client, token, "P-TEST-806", "Patient Zeta")
+        with client.websocket_connect(_ws_url("P-TEST-806", token)) as websocket:
+            _, pending = _draft(websocket, "how is she doing?")
+        # connection dropped with the draft still awaiting a decision
+        assert _visits(pg_dsn, "P-TEST-806") == []
+
+        with client.websocket_connect(_ws_url("P-TEST-806", token, resume=True)) as websocket:
+            resumed = websocket.receive_json()
+            assert resumed == {
+                "type": "pending_approval",
+                "report": pending["report"],
+                "resumed": True,
+            }
+            websocket.send_text("approve")
+            assert websocket.receive_json()["type"] == "saved"
+
+    visits = _visits(pg_dsn, "P-TEST-806")
+    assert len(visits) == 1
+    # the visit records the question asked before the drop, not the reconnect
+    assert visits[0].chief_complaint == "how is she doing?"
+
+
+def test_reconnecting_without_resume_discards_the_draft_so_a_new_question_is_not_an_edit(
+    pg_dsn: str,
+) -> None:
+    with _make_client(pg_dsn) as client:
+        token = _admin_token(client)
+        _create_patient(client, token, "P-TEST-807", "Patient Eta")
+        with client.websocket_connect(_ws_url("P-TEST-807", token)) as websocket:
+            _draft(websocket, "first question")
+
+        with client.websocket_connect(_ws_url("P-TEST-807", token)) as websocket:
+            # Without resume=1 this is a fresh question, NOT the reply to the
+            # stale draft -- it must not be saved as an "edited" report.
+            _, pending = _draft(websocket, "a brand new question")
+            assert pending["type"] == "pending_approval"
+            websocket.send_text("reject")
+            assert websocket.receive_json() == {"type": "rejected"}
+
+    assert _visits(pg_dsn, "P-TEST-807") == []
+
+
+def test_another_user_cannot_resume_someone_elses_draft(pg_dsn: str) -> None:
+    with _make_client(pg_dsn) as client:
+        admin_token = _admin_token(client)
+        _create_patient(client, admin_token, "P-TEST-808", "Patient Theta")
+        with client.websocket_connect(_ws_url("P-TEST-808", admin_token)) as websocket:
+            _draft(websocket, "any updates?")
+
+        headers = _auth_headers(client, "dr.intruder")
+        intruder_token = headers["Authorization"].removeprefix("Bearer ")
+        with client.websocket_connect(
+            _ws_url("P-TEST-808", intruder_token, resume=True)
+        ) as websocket:
+            websocket.send_text("any updates?")
+            frame = websocket.receive_json()
+            # no draft handed over, and the patient isn't theirs to draft for
+            assert frame["type"] == "error"
+            assert "P-TEST-808" in frame["detail"]
+
+    assert _visits(pg_dsn, "P-TEST-808") == []

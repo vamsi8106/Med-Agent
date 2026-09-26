@@ -47,3 +47,22 @@ def test_trace_summary_lists_every_step_with_status_and_tokens() -> None:
 
     assert "drug_safety=completed(100 tok)" in summary
     assert "evidence=skipped(0 tok)" in summary
+
+
+def test_fail_records_the_step_as_failed_and_reports_it() -> None:
+    tracker = AgentRunTracker(max_tokens=100, run_id="run-1")
+    tracker.record("drug_safety", {"prompt_tokens": 10})
+
+    tracker.fail("evidence", "ProviderError")
+
+    assert tracker.failed_steps() == ["evidence"]
+    assert tracker.skipped_steps() == []
+    assert tracker.steps[-1].detail == "ProviderError"
+    assert "evidence=failed(0 tok)" in tracker.trace_summary()
+
+
+def test_a_failed_step_does_not_count_against_the_budget() -> None:
+    tracker = AgentRunTracker(max_tokens=100, run_id="run-1")
+    tracker.fail("evidence", "ProviderError")
+    assert tracker.tokens_used == 0
+    assert tracker.over_budget() is False

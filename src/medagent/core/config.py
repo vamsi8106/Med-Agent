@@ -45,6 +45,10 @@ class Settings(BaseSettings):
     # replaying five of those verbatim into every prompt is unbounded and
     # self-amplifying (each new report embeds the previous ones' evidence).
     agent_visit_summary_max_tokens: int = 250
+    # A report drafted over the WebSocket waits in memory for the doctor's
+    # decision, and survives a dropped connection so they can reconnect and
+    # finish. Drafts hold patient data, so abandoned ones are purged after this.
+    approval_draft_ttl_minutes: int = 30
 
     postgres_dsn: str = "postgresql://medagent:medagent@localhost:5432/medagent"
     # ChromaDB runs as its own server container so a persist-dir volume can be

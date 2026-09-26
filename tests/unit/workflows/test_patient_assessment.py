@@ -1,10 +1,13 @@
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock
 
+import pytest
+
 from medagent.agents.drug_safety_agent import DrugSafetyAgent
 from medagent.agents.evidence_agent import EvidenceAgent
 from medagent.agents.report_agent import ReportAgent
 from medagent.agents.triage_agent import TriageAgent
+from medagent.core.exceptions import AllAgentsFailedError, MCPError, ProviderError, ToolError
 from medagent.core.models import (
     AgentResult,
     ClinicalEvidence,
@@ -200,3 +203,132 @@ async def test_workflow_runs_trial_finder_when_message_mentions_trials() -> None
     trial_finder.find_trials.assert_awaited_once()
     assert "## Trial Finder" in result
     assert "Clinical trials for type 2 diabetes" in result
+
+
+# --- partial failure -----------------------------------------------------------
+
+
+def _agent_result(role: AgentRole, summary: str) -> AgentResult:
+    return AgentResult(role=role, summary=summary)
+
+
+async def _assess_with(drug_safety: object, evidence: object, trial_finder: object, message: str):
+    return await run_patient_assessment(
+        TriageAgent(),
+        drug_safety,  # type: ignore[arg-type]
+        evidence,  # type: ignore[arg-type]
+        trial_finder,  # type: ignore[arg-type]
+        ReportAgent(),
+        _complex_patient(),
+        message,
+    )
+
+
+_BOTH = "Check interactions for current medications and any relevant treatment evidence"
+
+
+async def test_one_failed_specialist_still_yields_a_report_with_a_note() -> None:
+    drug_safety = AsyncMock()
+    drug_safety.run_result.return_value = _agent_result(AgentRole.DRUG_SAFETY, "Interaction found.")
+    evidence = AsyncMock()
+    evidence.gather_evidence.side_effect = ProviderError("Groq 413 ... org_01SECRET123")
+
+    report = await _assess_with(drug_safety, evidence, AsyncMock(), _BOTH)
+
+    assert "Interaction found." in report
+    assert "## Note" in report
+    assert "Unavailable: Evidence (the language model service was unavailable)" in report
+
+
+async def test_failure_note_never_leaks_the_raw_exception_message() -> None:
+    """Provider errors can embed account identifiers (the Groq 413 we hit
+    contained the organisation id); only fixed, doctor-safe text may reach a
+    report."""
+    drug_safety = AsyncMock()
+    drug_safety.run_result.return_value = _agent_result(AgentRole.DRUG_SAFETY, "ok")
+    evidence = AsyncMock()
+    evidence.gather_evidence.side_effect = ProviderError("org_01SECRET123 tokens 9644")
+
+    report = await _assess_with(drug_safety, evidence, AsyncMock(), _BOTH)
+
+    assert "org_01SECRET123" not in report
+    assert "9644" not in report
+
+
+async def test_failed_specialist_does_not_drop_the_deterministic_sections() -> None:
+    patient = _complex_patient()
+    patient.allergies = ["Sulfa"]
+    drug_safety = AsyncMock()
+    drug_safety.run_result.side_effect = MCPError("down")
+    evidence = AsyncMock()
+    evidence.gather_evidence.return_value = _agent_result(AgentRole.EVIDENCE, "Evidence text.")
+
+    report = await run_patient_assessment(
+        TriageAgent(), drug_safety, evidence, AsyncMock(), ReportAgent(), patient, _BOTH
+    )
+
+    assert "Evidence text." in report
+    assert "## Known Allergies" in report
+    assert "Unavailable: Drug Safety (an external medical data source was unavailable)" in report
+
+
+async def test_a_tool_error_gets_the_generic_failure_text() -> None:
+    drug_safety = AsyncMock()
+    drug_safety.run_result.side_effect = ToolError("At least two medications required")
+    evidence = AsyncMock()
+    evidence.gather_evidence.return_value = _agent_result(AgentRole.EVIDENCE, "fine")
+
+    report = await _assess_with(drug_safety, evidence, AsyncMock(), _BOTH)
+
+    assert "Unavailable: Drug Safety (the check could not be completed)" in report
+
+
+async def test_every_specialist_failing_raises_instead_of_returning_an_empty_report() -> None:
+    drug_safety = AsyncMock()
+    drug_safety.run_result.side_effect = ProviderError("down")
+    evidence = AsyncMock()
+    evidence.gather_evidence.side_effect = MCPError("down")
+
+    with pytest.raises(AllAgentsFailedError) as excinfo:
+        await _assess_with(drug_safety, evidence, AsyncMock(), _BOTH)
+
+    assert "drug_safety" in str(excinfo.value)
+    assert "evidence" in str(excinfo.value)
+
+
+async def test_an_unexpected_exception_is_a_bug_and_still_propagates() -> None:
+    """Only MedAgentError is an expected operational failure. Swallowing a
+    KeyError as "unavailable" would hide real bugs behind a friendly note."""
+    drug_safety = AsyncMock()
+    drug_safety.run_result.return_value = _agent_result(AgentRole.DRUG_SAFETY, "ok")
+    evidence = AsyncMock()
+    evidence.gather_evidence.side_effect = KeyError("bug")
+
+    with pytest.raises(KeyError):
+        await _assess_with(drug_safety, evidence, AsyncMock(), _BOTH)
+
+
+async def test_failure_and_budget_skip_share_one_note() -> None:
+    class _CostlyDrugSafety:
+        async def run_result(self, context: PatientContext, message: str) -> AgentResult:
+            return AgentResult(
+                role=AgentRole.DRUG_SAFETY, summary="ok", usage={"prompt_tokens": 500}
+            )
+
+    evidence = AsyncMock()
+    evidence.gather_evidence.return_value = _agent_result(AgentRole.EVIDENCE, "never runs")
+    trial_finder = AsyncMock()
+    trial_finder.find_trials.side_effect = ProviderError("down")
+
+    report = await run_patient_assessment(
+        TriageAgent(),
+        _CostlyDrugSafety(),  # type: ignore[arg-type]
+        evidence,
+        trial_finder,
+        ReportAgent(),
+        _complex_patient(),
+        f"{_BOTH} and any clinical trials",
+        max_tokens=100,
+    )
+
+    assert report.count("## Note") == 1

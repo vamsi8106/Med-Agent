@@ -53,6 +53,14 @@ class PatientNotFoundError(MedAgentError):
     status_code = 404
 
 
+class AllAgentsFailedError(MedAgentError):
+    """Raised when every specialist agent routed for a request failed, so there
+    is nothing clinical to report -- an upstream dependency problem, so 502.
+    A partial failure does not raise; it yields a degraded report instead."""
+
+    status_code = 502
+
+
 class AgentBudgetExceededError(MedAgentError):
     """Raised when a multi-agent run's cumulative LLM token usage would
     exceed its configured ceiling -- a resource-exhaustion condition, so it

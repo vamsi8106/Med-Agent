@@ -129,6 +129,14 @@ class AgentResult(BaseModel):
     usage: dict[str, int] = Field(default_factory=dict)
 
 
+class AgentFailure(BaseModel):
+    """A specialist step that could not complete. `error` is doctor-safe text,
+    never a raw exception message (provider errors can embed account ids)."""
+
+    role: AgentRole
+    error: str
+
+
 class User(BaseModel):
     id: str
     username: str

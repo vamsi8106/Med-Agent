@@ -1,18 +1,29 @@
 """New-patient workflow: triage -> parallel(drug_safety, evidence, trial_finder) -> report.
 
-Depends only on core/ and agents/ per the dependency rules. Does NOT persist
-the patient record itself: generation and persistence are deliberately
+Depends only on core/, infra/ and agents/ per the dependency rules. Does NOT
+persist the patient record itself: generation and persistence are deliberately
 separated so a human-in-the-loop checkpoint can sit between them (see
-app.py's WebSocket chat handler, which holds the report for doctor
-approval/edit/rejection before saving). Callers that want unconditional
-auto-save (e.g. the plain REST endpoints) save explicitly after this returns.
+followup.py's approval node and app.py's WebSocket chat handler). Callers that
+want unconditional auto-save (e.g. the plain REST endpoints) save explicitly
+after this returns.
+
+The graph is self-contained -- its first node creates the per-run token
+tracker -- so it runs standalone via run_patient_assessment() and also embeds
+as a subgraph node in the follow-up workflow.
+
+A specialist that fails with a MedAgentError does not sink the run: the other
+sections and the deterministic allergy/lab sections still reach the doctor,
+with a note saying what was unavailable. Only if every routed specialist fails
+is there nothing clinical to report, and AllAgentsFailedError is raised.
 """
 
 import operator
 import uuid
+from collections.abc import Awaitable, Callable
 from typing import Annotated, TypedDict
 
 from langgraph.graph import END, START, StateGraph
+from langgraph.graph.state import CompiledStateGraph
 
 from medagent.agents.drug_safety_agent import DrugSafetyAgent
 from medagent.agents.evidence_agent import EvidenceAgent
@@ -20,21 +31,86 @@ from medagent.agents.report_agent import ReportAgent
 from medagent.agents.triage_agent import TriageAgent
 from medagent.agents.trial_finder_agent import TrialFinderAgent
 from medagent.core.config import get_settings
-from medagent.core.models import AgentResult, PatientContext
+from medagent.core.exceptions import AllAgentsFailedError, MCPError, MedAgentError, ProviderError
+from medagent.core.models import AgentFailure, AgentResult, PatientContext
 from medagent.core.types import AgentRole
 from medagent.infra.agent_run import AgentRunTracker
 from medagent.infra.logging import get_logger
 
 logger = get_logger(__name__)
 
+_DEFAULT_FAILURE_TEXT = "the check could not be completed"
+_FAILURE_TEXT: tuple[tuple[type[MedAgentError], str], ...] = (
+    (ProviderError, "the language model service was unavailable"),
+    (MCPError, "an external medical data source was unavailable"),
+)
+
 
 class AssessmentState(TypedDict):
     context: PatientContext
     message: str
+    token_budget: int | None
     roles: list[AgentRole]
     results: Annotated[list[AgentResult], operator.add]
+    failures: Annotated[list[AgentFailure], operator.add]
     report: str
     tracker: AgentRunTracker
+
+
+def _doctor_safe_reason(exc: MedAgentError) -> str:
+    """Fixed text per error class. Raw exception messages never reach the
+    report: a provider error can embed account identifiers (the Groq 413 we
+    hit contained the organisation id)."""
+    for error_type, text in _FAILURE_TEXT:
+        if isinstance(exc, error_type):
+            return text
+    return _DEFAULT_FAILURE_TEXT
+
+
+def _role_label(role: AgentRole) -> str:
+    return role.value.replace("_", " ").title()
+
+
+def _completeness_note(tracker: AgentRunTracker, failures: list[AgentFailure]) -> str | None:
+    lines: list[str] = []
+    if failures:
+        unavailable = ", ".join(f"{_role_label(f.role)} ({f.error})" for f in failures)
+        lines.append(f"Unavailable: {unavailable}. Re-run to retry.")
+    skipped = tracker.skipped_steps()
+    if skipped:
+        lines.append(
+            f"Skipped due to token budget ({tracker.tokens_used}/{tracker.max_tokens} used): "
+            f"{', '.join(skipped)}. Re-run individually if this evidence is needed."
+        )
+    return "## Note\n\n" + "\n\n".join(lines) if lines else None
+
+
+async def _run_specialist(
+    state: AssessmentState,
+    name: str,
+    role: AgentRole,
+    call: Callable[[], Awaitable[AgentResult]],
+) -> dict[str, object]:
+    """Budget check, run, and turn a MedAgentError into a recorded failure.
+
+    Only MedAgentError is caught: those are the expected operational failures
+    (provider down, MCP unreachable, bad input). Anything else is a bug and
+    must stay loud rather than be quietly reported as "unavailable".
+    """
+    tracker = state["tracker"]
+    if tracker.over_budget():
+        tracker.skip(name)
+        return {}
+    try:
+        result = await call()
+    except MedAgentError as exc:
+        logger.warning(
+            "specialist_failed", step=name, error_type=type(exc).__name__, detail=str(exc)
+        )
+        tracker.fail(name, type(exc).__name__)
+        return {"failures": [AgentFailure(role=role, error=_doctor_safe_reason(exc))]}
+    tracker.record(name, result.usage)
+    return {"results": [result]}
 
 
 def _build_graph(
@@ -44,47 +120,53 @@ def _build_graph(
     trial_finder: TrialFinderAgent,
     report: ReportAgent,
 ) -> StateGraph:
+    async def init_run_node(state: AssessmentState) -> dict[str, object]:
+        budget = state.get("token_budget") or get_settings().agent_max_tokens_per_run
+        return {"tracker": AgentRunTracker(max_tokens=budget, run_id=str(uuid.uuid4()))}
+
     async def triage_node(state: AssessmentState) -> dict[str, object]:
         roles = await triage.route(state["context"], state["message"])
         return {"roles": roles}
 
     async def drug_safety_node(state: AssessmentState) -> dict[str, object]:
-        tracker = state["tracker"]
-        if tracker.over_budget():
-            tracker.skip("drug_safety")
-            return {}
-        result = await drug_safety.run_result(state["context"], state["message"])
-        tracker.record("drug_safety", result.usage)
-        return {"results": [result]}
+        return await _run_specialist(
+            state,
+            "drug_safety",
+            AgentRole.DRUG_SAFETY,
+            lambda: drug_safety.run_result(state["context"], state["message"]),
+        )
 
     async def evidence_node(state: AssessmentState) -> dict[str, object]:
-        tracker = state["tracker"]
-        if tracker.over_budget():
-            tracker.skip("evidence")
-            return {}
-        result = await evidence.gather_evidence(state["context"], state["message"])
-        tracker.record("evidence", result.usage)
-        return {"results": [result]}
+        return await _run_specialist(
+            state,
+            "evidence",
+            AgentRole.EVIDENCE,
+            lambda: evidence.gather_evidence(state["context"], state["message"]),
+        )
 
     async def trial_finder_node(state: AssessmentState) -> dict[str, object]:
-        tracker = state["tracker"]
-        if tracker.over_budget():
-            tracker.skip("trial_finder")
-            return {}
-        result = await trial_finder.find_trials(state["context"], state["message"])
-        tracker.record("trial_finder", result.usage)
-        return {"results": [result]}
+        return await _run_specialist(
+            state,
+            "trial_finder",
+            AgentRole.TRIAL_FINDER,
+            lambda: trial_finder.find_trials(state["context"], state["message"]),
+        )
 
     async def report_node(state: AssessmentState) -> dict[str, object]:
         tracker = state["tracker"]
-        markdown = await report.generate(state["context"], state["results"])
-        skipped = tracker.skipped_steps()
-        if skipped:
-            markdown += (
-                f"\n\n## Note\n\nSkipped due to token budget "
-                f"({tracker.tokens_used}/{tracker.max_tokens} used): {', '.join(skipped)}. "
-                "Re-run individually if this evidence is needed."
-            )
+        results = state.get("results", [])
+        failures = state.get("failures", [])
+        if failures and not results:
+            # Every routed specialist failed: nothing clinical to report, and
+            # returning an empty "unavailable" report would let the REST
+            # endpoints auto-save it as a visit that later prompts replay.
+            reasons = ", ".join(f"{f.role.value} ({f.error})" for f in failures)
+            raise AllAgentsFailedError(f"No specialist agent could complete: {reasons}")
+
+        markdown = await report.generate(state["context"], results)
+        note = _completeness_note(tracker, failures)
+        if note:
+            markdown += "\n\n" + note
         logger.info("agent_run_completed", run_id=tracker.run_id, trace=tracker.trace_summary())
         return {"report": markdown}
 
@@ -101,13 +183,15 @@ def _build_graph(
         return branches or ["report_node"]
 
     graph = StateGraph(AssessmentState)
+    graph.add_node("init_run_node", init_run_node)
     graph.add_node("triage_node", triage_node)
     graph.add_node("drug_safety_node", drug_safety_node)
     graph.add_node("evidence_node", evidence_node)
     graph.add_node("trial_finder_node", trial_finder_node)
     graph.add_node("report_node", report_node)
 
-    graph.add_edge(START, "triage_node")
+    graph.add_edge(START, "init_run_node")
+    graph.add_edge("init_run_node", "triage_node")
     graph.add_conditional_edges(
         "triage_node",
         route_after_triage,
@@ -120,6 +204,16 @@ def _build_graph(
     return graph
 
 
+def build_assessment_graph(
+    triage: TriageAgent,
+    drug_safety: DrugSafetyAgent,
+    evidence: EvidenceAgent,
+    trial_finder: TrialFinderAgent,
+    report: ReportAgent,
+) -> CompiledStateGraph:
+    return _build_graph(triage, drug_safety, evidence, trial_finder, report).compile()
+
+
 async def run_patient_assessment(
     triage: TriageAgent,
     drug_safety: DrugSafetyAgent,
@@ -130,12 +224,8 @@ async def run_patient_assessment(
     message: str,
     max_tokens: int | None = None,
 ) -> str:
-    tracker = AgentRunTracker(
-        max_tokens=max_tokens or get_settings().agent_max_tokens_per_run,
-        run_id=str(uuid.uuid4()),
-    )
-    graph = _build_graph(triage, drug_safety, evidence, trial_finder, report).compile()
+    graph = build_assessment_graph(triage, drug_safety, evidence, trial_finder, report)
     result = await graph.ainvoke(
-        {"context": context, "message": message, "results": [], "tracker": tracker}
+        {"context": context, "message": message, "token_budget": max_tokens}
     )
     return result["report"]

@@ -17,7 +17,7 @@ logger = get_logger(__name__)
 @dataclass
 class AgentStepRecord:
     name: str
-    status: str  # "completed" or "skipped"
+    status: str  # "completed", "skipped" (budget), or "failed"
     tokens_used: int = 0
     detail: str | None = None
 
@@ -56,8 +56,15 @@ class AgentRunTracker:
             max_tokens=self.max_tokens,
         )
 
+    def fail(self, step_name: str, reason: str) -> None:
+        self.steps.append(AgentStepRecord(name=step_name, status="failed", detail=reason))
+        logger.warning("agent_step_failed", run_id=self.run_id, step=step_name, reason=reason)
+
     def skipped_steps(self) -> list[str]:
         return [step.name for step in self.steps if step.status == "skipped"]
+
+    def failed_steps(self) -> list[str]:
+        return [step.name for step in self.steps if step.status == "failed"]
 
     def trace_summary(self) -> str:
         return ", ".join(

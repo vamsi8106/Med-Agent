@@ -62,7 +62,9 @@ Canonical names for every domain concept in MedAgent. Use these exact terms in c
 | **Truncation** | `truncate_text()` cuts on a word boundary, appends a marker, and logs `context_truncated`, so lost context is visible rather than silent. |
 | **Agent Run Tracker** | Per-run token budget (`AGENT_MAX_TOKENS_PER_RUN`) and step trace. Once spent, remaining specialist agents are skipped and the report says which. Best-effort: parallel agents can't see each other's spend. |
 | **Deterministic Fallback** | The Evidence Agent's fixed retrieve-then-summarize pipeline, used when the ReAct loop answers without retrieving anything, exhausts its turns, or the provider rejects a tool call. An unsourced answer is never returned. |
-| **Human-in-the-Loop Approval** | The WebSocket chat drafts a report but saves nothing until the doctor approves, edits, or rejects it. REST endpoints save immediately. |
+| **Human-in-the-Loop Approval** | The WebSocket chat drafts a report but saves nothing until the doctor approves, edits, or rejects it. The pause is a LangGraph `interrupt()` in the follow-up graph. REST endpoints save immediately. |
+| **Draft** | A report awaiting the doctor's decision. Held by the checkpointer under a `user_id:patient_id` thread, resumable after a dropped connection with `?resume=1`, deleted once decided, and purged after `APPROVAL_DRAFT_TTL_MINUTES`. |
+| **Degraded Report** | A report produced when some specialist agents failed: the surviving sections plus the deterministic allergy/lab sections and a `## Note` saying what was unavailable, in fixed doctor-safe wording (never the raw error). If every specialist fails, `AllAgentsFailedError` (502) is raised instead. |
 | **Per-Doctor Isolation** | Every patient-data row carries `doctor_id`, stamped server-side from the creating doctor's JWT and immutable. A doctor sees only their own patients (a non-owner gets 404, not 403); admins bypass it. |
 | **Audit Log** | Durable record of every patient-data access (created, viewed, assessed, approved, ...), with the acting user. |
 
@@ -91,8 +93,12 @@ Canonical names for every domain concept in MedAgent. Use these exact terms in c
 | Term | Definition |
 |---|---|
 | **Workflow** | A multi-agent orchestration pattern. Defines which agents run, in what order, with what data. |
-| **Patient Assessment Workflow** | New patient / assess flow: triage → parallel(drug_safety, evidence, trial_finder -- whichever triage selects) → report. Also the core of the follow-up flow. |
-| **Follow-Up Workflow** | Return visit flow: recall patient memory → check changes → run relevant agents → update records. |
+| **Patient Assessment Workflow** | New patient / assess flow, a LangGraph graph: init_run (token tracker) → triage → parallel(drug_safety, evidence, trial_finder -- whichever triage selects) → report. Self-contained, so it runs standalone and embeds as a **subgraph** in the follow-up flow. |
+| **Follow-Up Workflow** | Return visit flow: load the patient → run the assessment subgraph → (WebSocket only) pause at the approval node. The workflow never saves; the caller persists according to the `ApprovalOutcome`. |
+| **Subgraph** | A compiled graph used as a node in another graph. The assessment graph is a node of the follow-up graph; with `subgraphs=True` streaming, its inner steps report progress. |
+| **Checkpointer** | LangGraph's store for a paused run's state. Ours is in-memory only: a checkpoint holds the whole `PatientContext` and draft report (patient data), so it stays in process memory instead of a table outside the `doctor_id`-isolated schema. Loses drafts on restart; single replica only. |
+| **Interrupt** | `interrupt()` pauses a graph at a node until the caller resumes it with `Command(resume=...)`. The node re-runs from its start on resume, so nothing before the interrupt may have side effects. |
+| **Progress Event** | `{"type":"progress","step":...,"status":"completed\|failed\|skipped"}` streamed over the WebSocket for triage, each specialist, and the report. |
 | **Drug Check Workflow** | Focused flow: enumerate all medication pairs → check each for interactions → aggregate risk scores. |
 
 ## Infrastructure

@@ -225,9 +225,23 @@ curl -s "$BASE/metrics" | grep medagent
 ```bash
 wscat -c "ws://localhost:8000/ws/P-TEST-001?token=$ALICE_TOKEN"
 # type a message, e.g.: Any changes given her latest labs?
-# server replies: {"type":"pending_approval","report":"..."}
+# server streams progress as it works:
+#   {"type":"progress","step":"triage","status":"completed"}
+#   {"type":"progress","step":"evidence","status":"completed"}   (or "failed" / "skipped")
+#   {"type":"progress","step":"report","status":"completed"}
+# then: {"type":"pending_approval","report":"..."}
 # reply with: approve   (or "reject", or your own edited text to save instead)
 ```
+
+A drafted report survives a dropped connection. Reconnect with `?resume=1` to get it back
+(`"resumed": true`) and finish deciding:
+
+```bash
+wscat -c "ws://localhost:8000/ws/P-TEST-001?token=$ALICE_TOKEN&resume=1"
+# server replies: {"type":"pending_approval","report":"...","resumed":true}
+```
+
+Connecting *without* `resume=1` discards any stale draft, so a fresh question is never mistaken for the reply to an old one. Drafts are held in server memory only (they contain patient data), are private to the doctor who drafted them, and are purged after `APPROVAL_DRAFT_TTL_MINUTES` (default 30). A server restart loses pending drafts.
 
 ---
 
@@ -241,7 +255,8 @@ The LLM only ever summarizes; safety-relevant facts are computed deterministical
 - **Output allergy cross-check**: on top of the input-side allergy check, the LLM's own response is scanned for any recorded allergy, so an alternative drug it suggests on its own is still flagged with `⚠️ ALLERGY CONFLICT`. A cheap sanity pass (empty response, system-prompt leakage) is logged, not auto-blocked.
 - **Context budgets**: raw MCP payloads are curated to the clinically relevant fields (not dumped as JSON), every external text field and the final prompt are capped, and each past visit is truncated when replayed as history. Sizes are the `AGENT_*_TOKENS` settings in `.env.example` — tune them to your Groq tier's per-request limit (the free `openai/gpt-oss-20b` tier is 8000 tokens).
 - **Per-run token budget**: one assess/followup run stops launching further specialist agents once `AGENT_MAX_TOKENS_PER_RUN` is spent, and the report says which were skipped. Each step's cost and outcome is logged (`agent_step_completed` / `agent_step_skipped`).
-- **Human approval**: the WebSocket chat drafts a report and saves nothing until the doctor approves, edits or rejects it. The REST endpoints save immediately.
+- **Human approval**: the WebSocket chat drafts a report and saves nothing until the doctor approves, edits or rejects it. The pause is a LangGraph `interrupt()` held by an in-memory checkpointer, so a dropped connection can resume the draft. The REST endpoints save immediately.
+- **Partial failure**: if one specialist agent fails (LLM or MCP outage), the report still ships with the other sections and the deterministic allergy/lab sections, plus a note saying what was unavailable (in fixed, doctor-safe wording, never the raw error). If *every* specialist fails there is nothing clinical to report and the request returns 502.
 
 ## Tests
 

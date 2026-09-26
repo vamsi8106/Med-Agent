@@ -26,7 +26,7 @@ src/medagent/
 ├── core/                        # Phase 1 — shared kernel, zero external deps beyond pydantic
 │   ├── interfaces.py            # ABCs: BaseLLMProvider, BaseTool, BaseAgent, BaseMemory
 │   ├── models.py                # PatientContext, Medication, LabResult, Visit, DrugInteraction, Message, ToolCall, LLMResponse
-│   ├── exceptions.py            # MedAgentError → ProviderError, ToolError, MemoryError, MCPError, AuthError, PatientNotFoundError, AgentBudgetExceededError (each carries its HTTP status_code)
+│   ├── exceptions.py            # MedAgentError → ProviderError, ToolError, MemoryError, MCPError, AuthError, PatientNotFoundError, AgentBudgetExceededError, AllAgentsFailedError (each carries its HTTP status_code)
 │   ├── config.py                # Settings (pydantic-settings)
 │   └── types.py                 # Enums: EvidenceGrade, InteractionSeverity, CKDStage, TrialPhase, AgentRole
 ├── llm/                         # Phase 1 — provider layer
@@ -71,8 +71,9 @@ src/medagent/
 │   └── retriever.py             # GuidelineRetrieverTool (BaseTool): RAG over ingested guidelines
 ├── auth/                        # JWT auth: security.py (hashing, tokens), store.py (users), dependencies.py (FastAPI deps)
 ├── workflows/                   # Phase 5
-│   ├── patient_assessment.py    # triage → parallel(drug_safety, evidence) → report
-│   ├── followup.py              # recall → check changes → advise → update
+│   ├── patient_assessment.py    # LangGraph: init_run → triage → parallel specialists → report. A specialist's MedAgentError becomes a recorded failure (degraded report), not an abort; all failing raises AllAgentsFailedError. Embeddable as a subgraph
+│   ├── followup.py              # load patient → assessment subgraph → optional approval node (interrupt()); draft_followup / resolve_followup / pending_draft, progress streaming
+│   ├── checkpointing.py         # in-memory checkpointer (PHI stays in process memory) with a msgpack type allowlist; purge_expired_drafts
 │   └── drug_check.py            # enumerate pairs → check → aggregate
 ├── cli.py                       # `medagent ingest-guideline` (RAG ingestion), separate process from the server
 └── app.py                       # Phase 6 — FastAPI + WebSocket
@@ -168,6 +169,7 @@ Tools available: `search-drugs`, `get-drug-details`, `search-drug-nomenclature`,
 - Test with `MockLLMProvider`. No network in unit tests (Postgres-backed tests use a throwaway Docker container and skip if Docker is unavailable).
 - LLM prompts: wrap doctor/patient/external text with `wrap_untrusted`, and cap it with `truncate_text` (`AGENT_*_TOKENS` settings). Deterministic safety checks (allergies, interactions, lab flags) stay outside any LLM loop.
 - Anything that can only fail against the real model or real MCP responses gets a case in `tests/eval/` -- unit tests use mocks and cannot see it.
+- A new type in graph state (`AssessmentState` / `FollowupState`, including nested models) must be added to `_CHECKPOINT_STATE_TYPES` in `workflows/checkpointing.py`; a test fails if one is missing. Graph nodes must not swallow non-`MedAgentError` exceptions -- those are bugs and stay loud.
 
 # Commands
 
