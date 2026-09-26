@@ -1,23 +1,23 @@
 # MedAgent
 
-Clinical decision support agent for doctors. Checks drug interactions, retrieves treatment evidence, finds clinical trials, tracks patient history across sessions. All medical data from free open APIs via MCP servers. Patient data stays local (SQLite + ChromaDB). Synthetic data only for demos.
+Clinical decision support agent for doctors. Checks drug interactions, retrieves treatment evidence, finds clinical trials, tracks patient history across sessions. All medical data from free open APIs via MCP servers. Patient data stays local (Postgres + ChromaDB). Synthetic data only for demos.
 
-**Stack:** Python 3.12+, uv, ruff, pytest, pydantic v2, structlog, httpx, FastAPI.
+**Stack:** Python 3.12+, uv, ruff, mypy, pytest, pydantic v2, structlog, httpx, FastAPI, LangGraph, asyncpg + Alembic.
 **LLM:** Groq (initial) → swappable via `LLM_PROVIDER` env var. No Groq imports outside `llm/groq_provider.py`.
 **MCP:** medical-mcp (FDA/WHO/RxNorm/PubMed), healthcare-mcp (ICD-10/trials/calculator), med-research-mcp-suite (cross-DB analysis). All run locally, no API keys.
-**Storage:** SQLite (patients, meds, labs, visits), ChromaDB (guideline embeddings), sentence-transformers `all-MiniLM-L6-v2` (local).
+**Storage:** Postgres (patients, meds, labs, visits, users, audit log; schema owned by Alembic in `migrations/`), ChromaDB (guideline embeddings, its own container), sentence-transformers `all-MiniLM-L6-v2` (local, CPU-only torch).
 
 # User Flows
 
-**New patient:** Doctor enters demographics + meds + labs → Triage routes to Drug Safety Agent (checks interactions via MCP) + Evidence Agent (searches PubMed + RAG guidelines) in parallel → Report Agent synthesizes → saves patient to SQLite.
+**New patient:** Doctor enters demographics + meds + labs → Triage routes to Drug Safety Agent (checks interactions via MCP) + Evidence Agent (searches PubMed + RAG guidelines) in parallel → Report Agent synthesizes → saves patient to Postgres.
 
-**Follow-up:** Doctor references patient ID → agent loads full history from SQLite → checks what changed → runs relevant agents → updates records.
+**Follow-up:** Doctor references patient ID → agent loads full history from Postgres → checks what changed → runs relevant agents → updates records.
 
 **Drug interaction:** Doctor asks "can I add Drug X?" → loads current meds from memory → runs all pairwise interaction checks via MCP → flags risks with severity + FDA data.
 
 **Trial search:** Doctor asks about trials → Trial Finder searches ClinicalTrials.gov via MCP → filters by condition/phase/status → cross-references PubMed for results.
 
-**Evidence lookup:** Doctor asks clinical question → RAG retrieves from ingested guidelines → PubMed MCP fetches recent papers → structures response with citations.
+**Evidence lookup:** Doctor asks clinical question → the Evidence Agent runs a ReAct loop, choosing between guideline RAG and PubMed MCP searches → structures response with citations. If the model retrieves nothing or the loop fails, it falls back to the fixed retrieve-then-summarize pipeline. Every LLM answer passes the output guardrails (allergy cross-check, sanity validation) regardless of path.
 
 # Structure
 
@@ -26,7 +26,7 @@ src/medagent/
 ├── core/                        # Phase 1 — shared kernel, zero external deps beyond pydantic
 │   ├── interfaces.py            # ABCs: BaseLLMProvider, BaseTool, BaseAgent, BaseMemory
 │   ├── models.py                # PatientContext, Medication, LabResult, Visit, DrugInteraction, Message, ToolCall, LLMResponse
-│   ├── exceptions.py            # MedAgentError → ProviderError, ToolError, MemoryError, MCPError
+│   ├── exceptions.py            # MedAgentError → ProviderError, ToolError, MemoryError, MCPError, AuthError, PatientNotFoundError, AgentBudgetExceededError (each carries its HTTP status_code)
 │   ├── config.py                # Settings (pydantic-settings)
 │   └── types.py                 # Enums: EvidenceGrade, InteractionSeverity, CKDStage, TrialPhase, AgentRole
 ├── llm/                         # Phase 1 — provider layer
@@ -37,36 +37,48 @@ src/medagent/
 │   ├── logging.py               # structlog JSON setup
 │   ├── retry.py                 # @retry with exponential backoff + jitter
 │   ├── rate_limiter.py          # token-bucket per API source
-│   └── circuit_breaker.py       # degrade if MCP server down (Phase 6)
+│   ├── circuit_breaker.py       # degrade if MCP server down
+│   ├── tracing.py               # OpenTelemetry setup
+│   ├── metrics.py               # Prometheus counters/histograms
+│   ├── middleware.py            # request logging + metrics middleware
+│   ├── context_budget.py        # token estimate (3.5 chars/token) + truncate_text for prompt inputs
+│   ├── guardrails.py            # wrap_untrusted (prompt-injection delimiting), allergy output check, output sanity checks
+│   └── agent_run.py             # AgentRunTracker: per-run token budget + step trace
 ├── tools/                       # Phase 2
 │   ├── base.py                  # BaseTool ABC + ToolResult
 │   ├── registry.py              # ToolRegistry: auto-discovery
 │   ├── decorators.py            # @tool: auto JSON schema from type hints
-│   ├── mcp/                     # MCP clients (medical.py, healthcare.py, research.py)
-│   └── custom/                  # interaction_checker, patient_context, lab_interpreter,
-│                                # report_generator, guideline_retriever
+│   ├── mcp/                     # HTTP clients: http_base.py (breaker/retry/rate-limit/tracing), medical.py, healthcare.py, research.py
+│   └── custom/                  # interaction_checker, patient_context, lab_interpreter, report_generator
 ├── agents/                      # Phase 3 (base + drug_safety), Phase 5 (rest)
-│   ├── base.py                  # ReAct loop: perceive → think → act
+│   ├── base.py                  # ReActAgent: LangGraph think → act loop (bounded turns, prompt ceiling, capped/untrusted tool output, final-answer directive)
 │   ├── triage_agent.py          # routes to specialists
 │   ├── drug_safety_agent.py     # interactions, adverse events
-│   ├── evidence_agent.py        # literature + guideline retrieval
+│   ├── evidence_agent.py        # ReAct over literature + guideline tools, fixed-pipeline fallback
 │   ├── trial_finder_agent.py    # ClinicalTrials.gov search
 │   └── report_agent.py          # synthesizes multi-agent output
 ├── memory/                      # Phase 4
-│   ├── patient_store.py         # SQLite CRUD for patient records
-│   ├── session.py               # sliding-window conversation buffer
-│   └── persistent.py            # SQLite schema + migrations
+│   ├── patient_store.py         # Postgres CRUD for patient records (per-doctor isolation via doctor_id)
+│   ├── audit_log.py             # durable record of every patient-data access
+│   ├── session.py               # sliding-window conversation buffer (used by ReActAgent)
+│   ├── schema.py                # table DDL + doctor_id statements
+│   └── persistent.py            # asyncpg pool + connection handling
 ├── rag/                         # Phase 4
 │   ├── embeddings.py            # sentence-transformers (local)
 │   ├── vector_store.py          # ChromaDB adapter
 │   ├── chunker.py               # section-header-aware, 512 tokens, 64 overlap
-│   └── pipeline.py              # PDF → chunk → embed → store
+│   ├── pipeline.py              # PDF → chunk → embed → store
+│   └── retriever.py             # GuidelineRetrieverTool (BaseTool): RAG over ingested guidelines
+├── auth/                        # JWT auth: security.py (hashing, tokens), store.py (users), dependencies.py (FastAPI deps)
 ├── workflows/                   # Phase 5
 │   ├── patient_assessment.py    # triage → parallel(drug_safety, evidence) → report
 │   ├── followup.py              # recall → check changes → advise → update
 │   └── drug_check.py            # enumerate pairs → check → aggregate
+├── cli.py                       # `medagent ingest-guideline` (RAG ingestion), separate process from the server
 └── app.py                       # Phase 6 — FastAPI + WebSocket
 ```
+
+Outside `src/`: `migrations/` (Alembic), `docker/` (MCP server images), `ops/` (Prometheus/Grafana config), `tests/eval/` (live golden-dataset evals).
 
 `tests/` mirrors `src/` 1:1. `docs/glossary.md` for canonical terms. `docs/adr/` for architecture decisions.
 
@@ -74,13 +86,14 @@ src/medagent/
 
 ```
 core/     → nothing
-infra/    → nothing (3rd-party only)
-llm/      → core/
+infra/    → core/
+llm/      → core/, infra/
 tools/    → core/, infra/
 memory/   → core/
-rag/      → core/
-agents/   → core/, llm/, tools/, memory/, rag/
-workflows/→ core/, agents/
+rag/      → core/, infra/
+auth/     → core/, memory/
+agents/   → core/, infra/, tools/, memory/, rag/   (LLMs arrive via core.interfaces, not llm/)
+workflows/→ core/, infra/, agents/
 app.py    → everything
 ```
 
@@ -94,7 +107,7 @@ Never import upward. `core/` never imports from `llm/`. `tools/` never imports f
 
 **Phase 3 — Single Agent:** `agents/base.py` (ReAct loop) + `drug_safety_agent` + `memory/session.py`. Gate: "Check interactions for Metformin + Glimepiride" → correct response with citations.
 
-**Phase 4 — Memory & RAG:** `memory/` (patient_store, persistent with SQLite) + `rag/` (full pipeline) + `guideline_retriever` + `lab_interpreter`. Gate: follow-up visit recalls patient, retrieves matching guidelines.
+**Phase 4 — Memory & RAG:** `memory/` (patient_store, persistent with Postgres) + `rag/` (full pipeline) + `guideline_retriever` + `lab_interpreter`. Gate: follow-up visit recalls patient, retrieves matching guidelines.
 
 **Phase 5 — Multi-Agent:** remaining agents + `workflows/` + `report_generator`. Gate: complex patient → multi-agent → structured report.
 
@@ -138,9 +151,9 @@ Tools available: `search-drugs`, `get-drug-details`, `search-drug-nomenclature`,
 |---|---|---|
 | `interaction_checker` | pairwise drug checks via MCP | `list[Medication]` → `list[DrugInteraction]` |
 | `patient_context` | CRUD patient records | `patient_id` → `PatientContext` |
-| `lab_interpreter` | flag abnormals by age/sex/condition | `list[LabResult], PatientContext` → `list[LabFlag]` |
+| `lab_interpreter` | flag abnormals against each result's own reference range (`PatientContext` is accepted but not yet used: no age/sex/condition adjustment) | `list[LabResult], PatientContext` → `list[LabFlag]` |
 | `report_generator` | structure findings with citations | `AgentResult` → markdown report |
-| `guideline_retriever` | RAG over ingested guidelines | `query, top_k` → `list[ClinicalEvidence]` |
+| `guideline_retriever` (in `rag/retriever.py`) | RAG over ingested guidelines | `query, top_k` → `list[ClinicalEvidence]` |
 
 # Rules
 
@@ -152,7 +165,9 @@ Tools available: `search-drugs`, `get-drug-details`, `search-drug-nomenclature`,
 - Config via `Settings` singleton. New env var → `.env.example` + `config.py`.
 - Synthetic patient data only. Names like "Patient Alpha", IDs like "P-TEST-001".
 - No abstraction without a second caller.
-- Test with `MockLLMProvider`. No network in unit tests.
+- Test with `MockLLMProvider`. No network in unit tests (Postgres-backed tests use a throwaway Docker container and skip if Docker is unavailable).
+- LLM prompts: wrap doctor/patient/external text with `wrap_untrusted`, and cap it with `truncate_text` (`AGENT_*_TOKENS` settings). Deterministic safety checks (allergies, interactions, lab flags) stay outside any LLM loop.
+- Anything that can only fail against the real model or real MCP responses gets a case in `tests/eval/` -- unit tests use mocks and cannot see it.
 
 # Commands
 
@@ -160,8 +175,19 @@ Tools available: `search-drugs`, `get-drug-details`, `search-drug-nomenclature`,
 make install         # uv sync
 make test            # uv run pytest
 make unit-tests      # uv run pytest tests/unit/
+make eval            # live golden-dataset evals: real Groq + real MCP servers (needs GROQ_API_KEY, `make docker-up-deps`)
 make lint-check      # uv run ruff check .
+make lint-fix        # uv run ruff check --fix .
 make format-fix      # uv run ruff format .
-make pre-commit      # format-fix + lint-fix + lint-check + unit-tests
+make format-check    # uv run ruff format --check .
+make type-check      # uv run mypy
+make pre-commit      # format-fix + lint-fix + lint-check + type-check + unit-tests
+make ci-check        # format-check + lint-check + type-check + unit-tests (what CI runs; no auto-fix)
 make serve           # uv run uvicorn medagent.app:app --reload
+make docker-up-deps  # backing services only (postgres, chromadb, 3 MCP servers) for bare-host dev
+make docker-up       # full stack incl. the app; make docker-down / docker-logs
+make db-upgrade      # alembic upgrade head (db-downgrade, db-revision name=... also exist)
+make ingest-guideline file=... source=...   # RAG ingestion via the CLI
 ```
+
+CI: `ci-check` on every push; the live eval and Docker builds on PRs into `main` only.
