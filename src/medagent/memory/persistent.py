@@ -25,6 +25,11 @@ class PersistentStore:
         """Ensure the connection pool is ready. Schema itself comes from Alembic."""
         await self._get_pool()
 
+    async def ping(self) -> bool:
+        """Readiness probe: can we reach the database and run a query?"""
+        async with self.connect() as conn:
+            return await conn.fetchval("SELECT 1") == 1
+
     async def close(self) -> None:
         if self._pool is not None:
             await self._pool.close()

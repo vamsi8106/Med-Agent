@@ -141,7 +141,11 @@ class EvidenceAgent(BaseAgent):
             else:
                 outcome = "fallback_error"
             evidence_react_total.labels(outcome=outcome).inc()
-            logger.warning("evidence_react_fallback", reason=str(exc)[:200])
+            # Class and outcome only: an upstream error's free text can echo
+            # request content, and telemetry carries no patient data.
+            logger.warning(
+                "evidence_react_fallback", outcome=outcome, error_type=type(exc).__name__
+            )
             wasted = exc.usage if isinstance(exc, _UngroundedAnswerError) else {}
             result = await self._gather_deterministic(context, message)
             for key, value in wasted.items():
@@ -284,7 +288,7 @@ class EvidenceAgent(BaseAgent):
         )
         if unverified:
             guardrail_flags_total.labels(kind="unverified_figures").inc()
-            logger.warning("unverified_figures_flagged", figures=unverified)
+            logger.warning("unverified_figures_flagged", count=len(unverified))
             summary += "\n\n" + unverified_figures_warning(unverified)
         return AgentResult(
             role=AgentRole.EVIDENCE, summary=summary, evidence=evidence, usage=dict(usage)

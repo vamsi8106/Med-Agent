@@ -15,6 +15,8 @@ import time
 from collections.abc import Awaitable, Callable
 from typing import ParamSpec, TypeVar
 
+from opentelemetry import trace
+
 from medagent.core.exceptions import UpstreamError
 from medagent.infra.metrics import retry_attempts_total
 
@@ -61,9 +63,19 @@ def retry(
                     delay = _delay(exc, attempt, base_delay, max_delay)
                     if budget is not None and _now() - started + delay > budget:
                         raise
-                    retry_attempts_total.labels(
-                        target=target, reason=getattr(exc, "reason", "error")
-                    ).inc()
+                    reason = getattr(exc, "reason", "error")
+                    retry_attempts_total.labels(target=target, reason=reason).inc()
+                    # An event on the current span, so a trace shows *why* a call
+                    # was slow (a rate limit waited out, a timeout retried).
+                    trace.get_current_span().add_event(
+                        "retry",
+                        {
+                            "medagent.retry.target": target,
+                            "medagent.retry.reason": reason,
+                            "medagent.retry.attempt": attempt,
+                            "medagent.retry.delay_s": round(delay, 3),
+                        },
+                    )
                     await _sleep(delay)
 
         return wrapper

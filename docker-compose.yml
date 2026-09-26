@@ -79,7 +79,7 @@ services:
 
   medagent:
     build: .
-    command: sh -c "alembic upgrade head && uvicorn medagent.app:app --host 0.0.0.0 --port 8000"
+    command: sh -c "alembic upgrade head && uvicorn medagent.app:app --host 0.0.0.0 --port 8000 --no-access-log"
     ports:
       - "8000:8000"
     environment:
@@ -103,6 +103,9 @@ services:
       MCP_TIMEOUT_SECONDS: ${MCP_TIMEOUT_SECONDS:-30}
       MCP_RATE_LIMIT_PER_SECOND: ${MCP_RATE_LIMIT_PER_SECOND:-5}
       MCP_RATE_LIMIT_CAPACITY: ${MCP_RATE_LIMIT_CAPACITY:-10}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://tempo:4318}
+      OTEL_SAMPLE_RATIO: ${OTEL_SAMPLE_RATIO:-1.0}
+      OTEL_CONSOLE_EXPORTER: ${OTEL_CONSOLE_EXPORTER:-false}
       ADMIN_BOOTSTRAP_USERNAME: ${ADMIN_BOOTSTRAP_USERNAME:-admin}
       ADMIN_BOOTSTRAP_PASSWORD: ${ADMIN_BOOTSTRAP_PASSWORD:-change-me-before-first-deploy}
     depends_on:
@@ -116,12 +119,28 @@ services:
         condition: service_healthy
       medical-mcp-bridge:
         condition: service_healthy
+      tempo:
+        condition: service_started
     healthcheck:
+      # Liveness only, on purpose: restarting the app cannot fix a down
+      # dependency, so this must not flap with them. Use /ready for that.
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 10s
       timeout: 5s
       retries: 10
       start_period: 120s
+
+  tempo:
+    image: grafana/tempo:2.6.1
+    command: ["-config.file=/etc/tempo/tempo.yaml"]
+    # Runs as root so the named volume is writable (the image's own user cannot
+    # write a fresh root-owned volume).
+    user: "0"
+    ports:
+      - "3200:3200"
+    volumes:
+      - ./ops/tempo/tempo.yaml:/etc/tempo/tempo.yaml:ro
+      - tempo-data:/var/tempo
 
   prometheus:
     image: prom/prometheus:v3.0.1
@@ -147,9 +166,11 @@ services:
       - grafana-data:/var/lib/grafana
     depends_on:
       - prometheus
+      - tempo
 
 volumes:
   postgres-data:
   chroma-data:
   prometheus-data:
   grafana-data:
+  tempo-data:

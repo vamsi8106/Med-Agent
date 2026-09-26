@@ -12,6 +12,7 @@ import asyncio
 from typing import Any, Self
 
 import httpx
+from opentelemetry.propagate import inject
 
 from medagent.core.exceptions import MCPError, UpstreamError
 from medagent.infra.circuit_breaker import CircuitBreaker
@@ -47,6 +48,9 @@ def _status_error(response: httpx.Response, url: str) -> MCPError:
 
 
 class HttpMCPClient:
+    # Path of the server's own health endpoint, for the readiness probe.
+    health_path = "/health"
+
     def __init__(
         self,
         base_url: str,
@@ -97,15 +101,30 @@ class HttpMCPClient:
                 await self._client.aclose()
                 self._client = None
 
+    @property
+    def breaker_state(self) -> str:
+        return self._breaker.state.value
+
+    async def probe(self, timeout_seconds: float = 2.0) -> bool:
+        """Readiness probe: does the server's health endpoint answer? Uses its own
+        short-lived client, outside the breaker and rate limiter, so a probe never
+        counts as a failure or consumes request budget."""
+        async with httpx.AsyncClient(base_url=self._base_url, timeout=timeout_seconds) as client:
+            response = await client.get(self.health_path)
+        return response.status_code < 500
+
     async def request(self, method: str, path: str, **kwargs: Any) -> Any:
         with tracer.start_as_current_span(f"mcp_http.{method.lower()}.{path}") as span:
             span.set_attribute("mcp.base_url", self._base_url)
             span.set_attribute("mcp.path", path)
+            span.set_attribute("medagent.mcp.server", self._name)
             try:
                 result = await self._breaker.call(self._request_with_retry, method, path, **kwargs)
             except UpstreamError as exc:
+                span.set_attribute("medagent.mcp.outcome", exc.reason)
                 mcp_requests_total.labels(server=self._name, outcome=exc.reason).inc()
                 raise
+            span.set_attribute("medagent.mcp.outcome", "success")
             mcp_requests_total.labels(server=self._name, outcome="success").inc()
             return result
 
@@ -115,6 +134,11 @@ class HttpMCPClient:
 
         await self._bucket.acquire()
         url = f"{self._base_url}{path}"
+        # Propagate the trace to the MCP server (W3C traceparent), so its side of
+        # the call can join this trace. Headers only -- no request content.
+        headers = dict(kwargs.pop("headers", None) or {})
+        inject(headers)
+        kwargs["headers"] = headers
         try:
             response = await self._client.request(method, path, **kwargs)
         except httpx.TimeoutException as exc:

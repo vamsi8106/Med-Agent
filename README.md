@@ -91,6 +91,12 @@ The API is at `http://localhost:8000` either way. Grafana is at `http://localhos
 
 The provisioned **MedAgent Overview** dashboard shows, from `/metrics`: HTTP rate and latency, LLM calls by outcome (success / rate_limited / timeout / server_error / client_error / circuit_open), LLM latency and token spend, retries by reason, circuit-breaker state per dependency (Groq, each MCP server), MCP requests by outcome, specialist-agent steps, the evidence agent's ReAct-vs-fallback split (the number to watch for the agent's health), ReAct tool calls, guardrail findings and context truncations. All labels come from small fixed sets, so cardinality stays bounded.
 
+**Traces.** With the Docker stack, spans go to Grafana Tempo. In Grafana (`http://localhost:3000`) open *Explore* -> *Tempo* and run `{ resource.service.name = "medagent" }` (or use the *Recent Traces* panel). One trace shows the request, each graph node, ReAct turns, LLM calls, tool calls and MCP calls, with retries as events. Every log line carries `trace_id` and `request_id` (also returned as the `X-Request-ID` header). Traces, logs and metrics contain no patient data. Set `OTEL_CONSOLE_EXPORTER=true` for local span printing, or `OTEL_SAMPLE_RATIO` to sample.
+
+**Privacy note:** `LANGCHAIN_TRACING_V2=true` (LangSmith) sends prompts, which contain patient data, to a third-party service; keep it off for real data.
+
+**Readiness.** `GET /ready` (no auth) reports `ok` / `degraded` / `down` per dependency; 503 only when Postgres is down. `/health` is liveness only.
+
 Reliability policy (tune in `.env`): a permanent error (bad model name, bad request) is attempted once; timeouts, connection failures and 5xx are retried with backoff (3 attempts, `RETRY_BUDGET_SECONDS` total); a rate limit is waited out only if it asks for `RETRY_MAX_WAIT_SECONDS` or less, otherwise the request fails fast; after 5 consecutive upstream failures the breaker opens and calls fail immediately for 30 s. When the LLM or an MCP server is down the report degrades (see *Partial failure* below) instead of hanging.
 
 ---
@@ -221,6 +227,7 @@ curl -s -o /dev/null -w "%{http_code}\n" "$BASE/patients/P-TEST-001" -H "Authori
 
 ```bash
 curl -s "$BASE/health"
+curl -s "$BASE/ready"
 curl -s "$BASE/metrics" | grep medagent
 ```
 

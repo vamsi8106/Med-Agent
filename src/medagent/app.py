@@ -1,11 +1,13 @@
 """FastAPI + WebSocket entrypoint wiring every layer together."""
 
 import math
+import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import timedelta
 from typing import Any
 
+import structlog
 from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, Response
 from fastapi.security import OAuth2PasswordRequestForm
@@ -23,9 +25,10 @@ from medagent.auth.store import UserStore
 from medagent.core.config import Settings, get_settings
 from medagent.core.exceptions import AuthError, MedAgentError, UpstreamError
 from medagent.core.models import PatientContext, User
+from medagent.health import check_readiness
 from medagent.infra.logging import configure_logging, get_logger
 from medagent.infra.middleware import ObservabilityMiddleware
-from medagent.infra.tracing import configure_tracing
+from medagent.infra.tracing import configure_tracing, get_tracer, shutdown_tracing
 from medagent.llm.registry import ProviderRegistry
 from medagent.memory.audit_log import AuditLogStore
 from medagent.memory.patient_store import PatientStore
@@ -35,7 +38,9 @@ from medagent.rag.retriever import GuidelineRetrieverTool
 from medagent.rag.vector_store import VectorStore
 from medagent.tools.custom.interaction_checker import InteractionCheckerTool
 from medagent.tools.mcp.healthcare import HealthcareMCPClient
+from medagent.tools.mcp.http_base import HttpMCPClient
 from medagent.tools.mcp.medical import MedicalMCPClient
+from medagent.tools.mcp.research import ResearchMCPClient
 from medagent.workflows.checkpointing import build_checkpointer, purge_expired_drafts
 from medagent.workflows.drug_check import run_drug_check
 from medagent.workflows.followup import (
@@ -50,6 +55,7 @@ from medagent.workflows.followup import (
 from medagent.workflows.patient_assessment import run_patient_assessment
 
 logger = get_logger(__name__)
+tracer = get_tracer(__name__)
 
 
 def _doctor_scope(user: User) -> str | None:
@@ -115,16 +121,25 @@ class AppState:
         self.user_store = UserStore(self.persistent_store)
         self.audit_log = AuditLogStore(self.persistent_store)
 
-        llm = ProviderRegistry.get_provider(settings.llm_provider, settings)
+        self.llm = ProviderRegistry.get_provider(settings.llm_provider, settings)
         embeddings = EmbeddingModel()
-        vector_store = VectorStore(settings.chroma_host, settings.chroma_port)
+        self.vector_store = VectorStore(settings.chroma_host, settings.chroma_port)
+        medical_client = MedicalMCPClient(settings)
+        healthcare_client = HealthcareMCPClient(settings)
+        research_client = ResearchMCPClient(settings)
+        # Held so /ready can probe them and report their circuit state.
+        self.mcp_clients: dict[str, HttpMCPClient] = {
+            "medical_mcp": medical_client,
+            "healthcare_mcp": healthcare_client,
+            "research_mcp": research_client,
+        }
 
         self.triage = TriageAgent()
-        self.drug_safety = DrugSafetyAgent(llm, InteractionCheckerTool())
+        self.drug_safety = DrugSafetyAgent(self.llm, InteractionCheckerTool(research_client))
         self.evidence = EvidenceAgent(
-            llm, MedicalMCPClient(settings), GuidelineRetrieverTool(embeddings, vector_store)
+            self.llm, medical_client, GuidelineRetrieverTool(embeddings, self.vector_store)
         )
-        self.trial_finder = TrialFinderAgent(llm, HealthcareMCPClient(settings))
+        self.trial_finder = TrialFinderAgent(self.llm, healthcare_client)
         self.report = ReportAgent()
 
         # One long-lived graph with a checkpointer: the WebSocket approval flow
@@ -173,13 +188,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         configure_logging(resolved_settings.log_level)
-        configure_tracing()
+        configure_tracing(resolved_settings)
+        if resolved_settings.langchain_tracing_v2:
+            logger.warning(
+                "langsmith_tracing_enabled",
+                note="prompts and graph state, which contain patient data, are sent to "
+                "LangSmith; use only with synthetic data",
+            )
         state = AppState(resolved_settings)
         await state.init()
         app.state.medagent = state
         logger.info("medagent_startup_complete")
         yield
         await state.close()
+        shutdown_tracing()
         logger.info("medagent_shutdown_complete")
 
     app = FastAPI(title="MedAgent", lifespan=lifespan)
@@ -198,6 +220,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/health")
     async def health() -> dict[str, str]:
         return {"status": "ok"}
+
+    @app.get("/ready")
+    async def ready() -> JSONResponse:
+        state: AppState = app.state.medagent
+        circuits = {name: client.breaker_state for name, client in state.mcp_clients.items()}
+        llm_circuit = getattr(state.llm, "circuit_state", None)
+        if llm_circuit is not None:
+            circuits["llm"] = llm_circuit
+        result = await check_readiness(
+            postgres=state.persistent_store.ping,
+            chroma=state.vector_store.ping,
+            mcp={name: client.probe for name, client in state.mcp_clients.items()},
+            circuits=circuits,
+        )
+        return JSONResponse(
+            status_code=503 if result.status == "down" else 200,
+            content={"status": result.status, "checks": result.checks},
+        )
 
     @app.get("/metrics")
     async def metrics() -> Response:
@@ -357,6 +397,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         graph = state.followup_graph
         thread_id = f"{user.id}:{patient_id}"
         await websocket.accept()
+        # The HTTP middleware doesn't see WebSockets: correlate this session's
+        # log lines with an id of its own.
+        structlog.contextvars.clear_contextvars()
+        structlog.contextvars.bind_contextvars(request_id=uuid.uuid4().hex)
         try:
             await purge_expired_drafts(
                 state.checkpointer, timedelta(minutes=state.settings.approval_draft_ttl_minutes)
@@ -376,14 +420,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             while True:
                 message = await websocket.receive_text()
                 try:
-                    draft = await draft_followup(
-                        graph,
-                        patient_id=patient_id,
-                        message=message,
-                        doctor_id=_doctor_scope(user),
-                        thread_id=thread_id,
-                        on_progress=websocket.send_json,
-                    )
+                    with tracer.start_as_current_span("ws.draft"):
+                        draft = await draft_followup(
+                            graph,
+                            patient_id=patient_id,
+                            message=message,
+                            doctor_id=_doctor_scope(user),
+                            thread_id=thread_id,
+                            on_progress=websocket.send_json,
+                        )
                 except MedAgentError as exc:
                     await websocket.send_json({"type": "error", **_error_payload(exc)})
                     continue
@@ -395,7 +440,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 await _await_decision(websocket, state, user, patient_id, thread_id)
         except WebSocketDisconnect:
             # A pending draft is deliberately left in place for ?resume=1.
-            logger.info("websocket_disconnected", patient_id=patient_id)
+            logger.info("websocket_disconnected")
 
     async def _await_decision(
         websocket: WebSocket, state: AppState, user: User, patient_id: str, thread_id: str

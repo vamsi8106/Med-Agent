@@ -38,9 +38,9 @@ src/medagent/
 │   ├── retry.py                 # @retry: retries only `retryable` UpstreamErrors, honours Retry-After (fails fast past `max_wait`), bounded by a total `budget`
 │   ├── rate_limiter.py          # token-bucket per API source
 │   ├── circuit_breaker.py       # fail fast when a dependency (an MCP server, the LLM) is down; only timeouts/connection/5xx count, never 4xx or rate limits
-│   ├── tracing.py               # OpenTelemetry setup
+│   ├── tracing.py               # OpenTelemetry setup (OTLP to Tempo iff OTEL_EXPORTER_OTLP_ENDPOINT), traced_node helper
 │   ├── metrics.py               # Prometheus catalogue: HTTP, LLM calls/latency/tokens, retries, breaker state, MCP, tool calls, ReAct paths, guardrail flags, truncations
-│   ├── middleware.py            # request logging + metrics middleware
+│   ├── middleware.py            # request id, request logging, metrics + HTTP span (route templates only)
 │   ├── context_budget.py        # token estimate (3.5 chars/token) + truncate_text for prompt inputs
 │   ├── guardrails.py            # wrap_untrusted (prompt-injection delimiting), allergy output check, output sanity checks
 │   ├── verification.py          # deterministic check of an answer's numeric claims (doses, %, lab values) against its sources
@@ -77,6 +77,7 @@ src/medagent/
 │   ├── checkpointing.py         # in-memory checkpointer (PHI stays in process memory) with a msgpack type allowlist; purge_expired_drafts
 │   └── drug_check.py            # enumerate pairs → check → aggregate
 ├── cli.py                       # `medagent ingest-guideline` (RAG ingestion), separate process from the server
+├── health.py                    # readiness aggregation for /ready (ok/degraded/down)
 └── app.py                       # Phase 6 — FastAPI + WebSocket
 ```
 
@@ -171,6 +172,8 @@ Tools available: `search-drugs`, `get-drug-details`, `search-drug-nomenclature`,
 - LLM prompts: wrap doctor/patient/external text with `wrap_untrusted`, and cap it with `truncate_text` (`AGENT_*_TOKENS` settings). Deterministic safety checks (allergies, interactions, lab flags) stay outside any LLM loop.
 - Anything that can only fail against the real model or real MCP responses gets a case in `tests/eval/` -- unit tests use mocks and cannot see it.
 - A client for anything we don't control (LLM, MCP, a future API) must raise `UpstreamError` subclasses with a `reason` and `retryable`, own its retries in one place (turn any SDK's built-in retries off -- they stacked under ours, up to 9 HTTP calls per LLM call), put a circuit breaker in front, and emit metrics. A 4xx is never retryable and never trips the breaker; a rate limit is retried only if the requested wait is short. Add a fault-injection test for each new failure mode (`tests/unit/infra/test_fault_injection.py` shows the pattern with the `clock` fixture).
+- Telemetry (traces, logs, metric labels) carries NO patient data: no patient id, name, medication, allergy, prompt or response text, no raw URL paths (use route templates). Correlate by `request_id` / `trace_id` / `run_id`. `tests/unit/infra/test_no_phi_in_telemetry.py` enforces it -- a new log field or span attribute must pass it. uvicorn runs with `--no-access-log` because its access log prints raw paths.
+- `/health` is liveness (Docker uses it; must not flap on dependencies). `/ready` is readiness: Postgres down -> 503, other dependencies -> `degraded`; it never exposes hostnames or error text and never calls the LLM.
 - Metric labels must come from a small fixed set -- never a patient id, query text, error message, or a name the model chose.
 - Anything shared across requests (`AppState` clients, models) is used concurrently -- `HttpMCPClient` is re-entrant and `EmbeddingModel` serializes encodes for this reason. A new shared resource must be safe under overlapping use, with a test that overlaps it.
 - A new type in graph state (`AssessmentState` / `FollowupState`, including nested models) must be added to `_CHECKPOINT_STATE_TYPES` in `workflows/checkpointing.py`; a test fails if one is missing. Graph nodes must not swallow non-`MedAgentError` exceptions -- those are bugs and stay loud.

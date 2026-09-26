@@ -33,7 +33,7 @@ pre-commit: format-fix lint-fix lint-check type-check unit-tests
 ci-check: format-check lint-check type-check unit-tests
 
 serve:
-	uv run uvicorn medagent.app:app --reload
+	uv run uvicorn medagent.app:app --reload --no-access-log
 
 # Hybrid local dev: backing services in Docker, medagent itself bare on the
 # host (`make serve`) for fast reload. Point .env at the host-port URLs in

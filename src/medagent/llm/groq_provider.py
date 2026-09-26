@@ -27,8 +27,10 @@ from medagent.core.models import LLMResponse, Message, ToolCall
 from medagent.infra.circuit_breaker import CircuitBreaker
 from medagent.infra.metrics import llm_call_duration_seconds, llm_calls_total, llm_tokens_total
 from medagent.infra.retry import retry
+from medagent.infra.tracing import get_tracer
 
 _PROVIDER = "groq"
+tracer = get_tracer(__name__)
 _RETRY_HINT = re.compile(r"try again in ([0-9hms.\s]+)", re.IGNORECASE)
 _DURATION_PART = re.compile(r"(\d+(?:\.\d+)?)(ms|h|m|s)")
 _UNIT_SECONDS = {"ms": 0.001, "s": 1.0, "m": 60.0, "h": 3600.0}
@@ -153,17 +155,26 @@ class GroqProvider(BaseLLMProvider):
         self, messages: list[Message], tools: list[dict[str, Any]] | None = None
     ) -> LLMResponse:
         started = time.monotonic()
-        try:
-            response = await self._breaker.call(self._call_with_retry, messages, tools)
-        except ProviderError as exc:
-            self._record_call(exc.reason, started)
-            raise
-        self._record_call("success", started)
+        # OTel GenAI attributes: model, token counts and outcome -- never the
+        # prompt or the completion, which carry patient data.
+        with tracer.start_as_current_span("llm.chat") as span:
+            span.set_attribute("gen_ai.system", _PROVIDER)
+            span.set_attribute("gen_ai.request.model", self._model)
+            try:
+                response = await self._breaker.call(self._call_with_retry, messages, tools)
+            except ProviderError as exc:
+                span.set_attribute("medagent.llm.outcome", exc.reason)
+                self._record_call(exc.reason, started)
+                raise
+            self._record_call("success", started)
 
-        choice = response.choices[0]
-        usage = response.usage
-        prompt_tokens = usage.prompt_tokens if usage else 0
-        completion_tokens = usage.completion_tokens if usage else 0
+            choice = response.choices[0]
+            usage = response.usage
+            prompt_tokens = usage.prompt_tokens if usage else 0
+            completion_tokens = usage.completion_tokens if usage else 0
+            span.set_attribute("medagent.llm.outcome", "success")
+            span.set_attribute("gen_ai.usage.input_tokens", prompt_tokens)
+            span.set_attribute("gen_ai.usage.output_tokens", completion_tokens)
         llm_tokens_total.labels(provider=_PROVIDER, kind="prompt").inc(prompt_tokens)
         llm_tokens_total.labels(provider=_PROVIDER, kind="completion").inc(completion_tokens)
         return LLMResponse(
@@ -172,6 +183,10 @@ class GroqProvider(BaseLLMProvider):
             tool_calls=_parse_tool_calls(getattr(choice.message, "tool_calls", None)),
             usage={"prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens},
         )
+
+    @property
+    def circuit_state(self) -> str:
+        return self._breaker.state.value
 
     def _record_call(self, outcome: str, started: float) -> None:
         llm_calls_total.labels(provider=_PROVIDER, outcome=outcome).inc()

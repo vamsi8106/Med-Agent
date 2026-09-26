@@ -14,6 +14,8 @@ from medagent.tools.mcp.http_base import HttpMCPClient
 
 
 class ResearchMCPClient(HttpMCPClient):
+    health_path = "/api/status"
+
     def __init__(self, settings: Settings | None = None) -> None:
         settings = settings or get_settings()
         super().__init__(

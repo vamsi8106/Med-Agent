@@ -68,6 +68,13 @@ class Settings(BaseSettings):
     chroma_host: str = "chromadb"
     chroma_port: int = 8000
 
+    # Distributed tracing (OpenTelemetry). Spans are always created -- they carry
+    # the trace_id that correlates log lines -- but only exported when an OTLP/HTTP
+    # endpoint is set (e.g. http://tempo:4318). Spans never carry patient data.
+    otel_exporter_otlp_endpoint: str | None = None
+    otel_console_exporter: bool = False
+    otel_sample_ratio: float = 1.0
+
     langchain_tracing_v2: bool = False
     langchain_api_key: str | None = None
     langchain_project: str = "medagent"

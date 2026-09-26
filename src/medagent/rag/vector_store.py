@@ -11,6 +11,11 @@ class VectorStore:
         self._client = chromadb.HttpClient(host=host, port=port)
         self._collection = self._client.get_or_create_collection(collection_name)
 
+    async def ping(self) -> bool:
+        """Readiness probe: does the ChromaDB server answer?"""
+        await asyncio.to_thread(self._client.heartbeat)
+        return True
+
     async def add(
         self,
         ids: list[str],

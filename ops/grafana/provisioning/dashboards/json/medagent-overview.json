@@ -3,7 +3,7 @@
   "uid": "medagent-overview",
   "timezone": "browser",
   "schemaVersion": 39,
-  "version": 2,
+  "version": 3,
   "refresh": "10s",
   "time": {
     "from": "now-1h",
@@ -318,6 +318,32 @@
         {
           "expr": "sum(rate(medagent_context_truncations_total[5m])) by (source)",
           "legendFormat": "{{source}}"
+        }
+      ]
+    },
+    {
+      "id": 17,
+      "title": "Recent Traces (medagent)",
+      "type": "table",
+      "datasource": {
+        "type": "tempo",
+        "uid": "tempo"
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 64
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "tempo",
+            "uid": "tempo"
+          },
+          "queryType": "traceql",
+          "query": "{ resource.service.name = \"medagent\" }",
+          "limit": 20
         }
       ]
     }

@@ -24,6 +24,7 @@ from typing import Annotated, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
+from opentelemetry import trace
 
 from medagent.agents.drug_safety_agent import DrugSafetyAgent
 from medagent.agents.evidence_agent import EvidenceAgent
@@ -37,6 +38,7 @@ from medagent.core.types import AgentRole
 from medagent.infra.agent_run import AgentRunTracker
 from medagent.infra.logging import get_logger
 from medagent.infra.metrics import agent_run_total
+from medagent.infra.tracing import traced_node
 
 logger = get_logger(__name__)
 
@@ -97,15 +99,22 @@ async def _run_specialist(
     if tracker.over_budget():
         tracker.skip(name)
         agent_run_total.labels(agent_role=role.value, outcome="skipped").inc()
+        trace.get_current_span().set_attribute("medagent.outcome", "skipped")
         return {}
     try:
         result = await call()
     except MedAgentError as exc:
         logger.warning(
-            "specialist_failed", step=name, error_type=type(exc).__name__, detail=str(exc)
+            "specialist_failed",
+            step=name,
+            error_type=type(exc).__name__,
+            reason=getattr(exc, "reason", "error"),
         )
         tracker.fail(name, type(exc).__name__)
         agent_run_total.labels(agent_role=role.value, outcome="failed").inc()
+        span = trace.get_current_span()
+        span.set_attribute("medagent.outcome", "failed")
+        span.set_attribute("medagent.failure_reason", getattr(exc, "reason", "error"))
         return {
             "failures": [
                 AgentFailure(
@@ -118,6 +127,7 @@ async def _run_specialist(
         }
     tracker.record(name, result.usage)
     agent_run_total.labels(agent_role=role.value, outcome="completed").inc()
+    trace.get_current_span().set_attribute("medagent.outcome", "completed")
     return {"results": [result]}
 
 
@@ -199,12 +209,12 @@ def _build_graph(
         return branches or ["report_node"]
 
     graph = StateGraph(AssessmentState)
-    graph.add_node("init_run_node", init_run_node)
-    graph.add_node("triage_node", triage_node)
-    graph.add_node("drug_safety_node", drug_safety_node)
-    graph.add_node("evidence_node", evidence_node)
-    graph.add_node("trial_finder_node", trial_finder_node)
-    graph.add_node("report_node", report_node)
+    graph.add_node("init_run_node", traced_node("init_run", init_run_node))
+    graph.add_node("triage_node", traced_node("triage", triage_node))
+    graph.add_node("drug_safety_node", traced_node("drug_safety", drug_safety_node))
+    graph.add_node("evidence_node", traced_node("evidence", evidence_node))
+    graph.add_node("trial_finder_node", traced_node("trial_finder", trial_finder_node))
+    graph.add_node("report_node", traced_node("report", report_node))
 
     graph.add_edge(START, "init_run_node")
     graph.add_edge("init_run_node", "triage_node")

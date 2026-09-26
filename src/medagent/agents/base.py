@@ -29,11 +29,13 @@ from medagent.infra.context_budget import approx_token_count, truncate_text
 from medagent.infra.guardrails import wrap_untrusted
 from medagent.infra.logging import get_logger
 from medagent.infra.metrics import tool_calls_total
+from medagent.infra.tracing import get_tracer
 from medagent.memory.session import SessionMemory
 from medagent.tools.base import ToolResult
 from medagent.tools.registry import ToolRegistry
 
 logger = get_logger(__name__)
+tracer = get_tracer(__name__)
 
 _FINAL_ANSWER_DIRECTIVE = (
     "You have gathered enough evidence. Write your final answer now, using only the tool "
@@ -161,9 +163,15 @@ class ReActAgent(BaseAgent):
             # one more call anyway. The directive is transient, never stored
             # in the session history.
             is_last_turn = state["iterations"] == self._max_iterations - 1
-            if (is_last_turn or state["force_answer"]) and state["executed"]:
+            forced = (is_last_turn or state["force_answer"]) and bool(state["executed"])
+            if forced:
                 history = [*history, Message(role="user", content=_FINAL_ANSWER_DIRECTIVE)]
-            response = await self._think(history)
+            # Counts and flags only -- never the prompt or the model's text.
+            with tracer.start_as_current_span("react.turn") as turn_span:
+                turn_span.set_attribute("react.iteration", state["iterations"] + 1)
+                turn_span.set_attribute("react.forced_answer", forced)
+                response = await self._think(history)
+                turn_span.set_attribute("react.tool_call_count", len(response.tool_calls))
             if response.tool_calls:
                 # The assistant turn that requested the tools must be in the
                 # history before their results, or a real provider rejects
@@ -273,11 +281,20 @@ class ReActAgent(BaseAgent):
     def _count_tool_call(self, call: ToolCall, outcome: str) -> None:
         # The model chooses the tool name, so an unregistered one must not
         # become a metric label (unbounded cardinality).
-        known = {tool.name for tool in self._tools.list_tools()}
-        name = call.tool_name if call.tool_name in known else "unknown"
-        tool_calls_total.labels(tool=name, outcome=outcome).inc()
+        tool_calls_total.labels(tool=self._tool_label(call), outcome=outcome).inc()
 
     async def _execute(self, call: ToolCall) -> str:
+        with tracer.start_as_current_span("react.tool") as span:
+            span.set_attribute("react.tool", self._tool_label(call))
+            text = await self._execute_untraced(call)
+            span.set_attribute("react.outcome", "error" if text.startswith("Error:") else "success")
+            return text
+
+    def _tool_label(self, call: ToolCall) -> str:
+        known = {tool.name for tool in self._tools.list_tools()}
+        return call.tool_name if call.tool_name in known else "unknown"
+
+    async def _execute_untraced(self, call: ToolCall) -> str:
         """Runs one tool call and returns its result as text for the model.
 
         Every failure mode -- unknown tool, bad arguments, a tool reporting

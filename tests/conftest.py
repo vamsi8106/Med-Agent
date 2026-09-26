@@ -165,3 +165,66 @@ def metric_value(name: str, **labels: str) -> float:
     from prometheus_client import REGISTRY
 
     return REGISTRY.get_sample_value(name, labels) or 0.0
+
+
+# --- telemetry test helpers ---------------------------------------------------------
+#
+# OpenTelemetry allows the global tracer provider to be set once per process, so
+# one in-memory provider is installed here for the whole session. Tests read the
+# spans it captured through the `spans` fixture. (configure_tracing() never
+# overrides an installed provider, so the app's lifespan leaves this one alone.)
+
+import sys  # noqa: E402
+from typing import Any  # noqa: E402
+
+from opentelemetry import trace  # noqa: E402
+from opentelemetry.sdk.trace import TracerProvider  # noqa: E402
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor  # noqa: E402
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import (  # noqa: E402
+    InMemorySpanExporter,
+)
+
+_SPAN_EXPORTER = InMemorySpanExporter()
+_SESSION_PROVIDER = TracerProvider()
+_SESSION_PROVIDER.add_span_processor(SimpleSpanProcessor(_SPAN_EXPORTER))
+trace.set_tracer_provider(_SESSION_PROVIDER)
+
+
+@pytest.fixture
+def spans() -> Iterator[InMemorySpanExporter]:
+    _SPAN_EXPORTER.clear()
+    yield _SPAN_EXPORTER
+    _SPAN_EXPORTER.clear()
+
+
+def span_text(span: Any) -> str:
+    """Everything a span exposes -- name, attributes, events (and their
+    attributes) -- flattened to one lowercase string, for no-PHI assertions."""
+    parts = [span.name, *(f"{k}={v}" for k, v in (span.attributes or {}).items())]
+    for event in span.events:
+        parts.append(event.name)
+        parts.extend(f"{k}={v}" for k, v in (event.attributes or {}).items())
+    return " ".join(str(p) for p in parts).lower()
+
+
+class _RecordingLogger:
+    def __init__(self, sink: list[dict[str, Any]]) -> None:
+        self._sink = sink
+
+    def _log(self, event: str, **fields: Any) -> None:
+        self._sink.append({"event": event, **fields})
+
+    info = warning = error = debug = exception = _log
+
+
+@pytest.fixture
+def recorded_logs(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+    """Every log call any medagent module makes, as dicts. Replaces each
+    module's `logger` directly, so it works however structlog has been
+    configured or cached by earlier tests."""
+    sink: list[dict[str, Any]] = []
+    recorder = _RecordingLogger(sink)
+    for name, module in list(sys.modules.items()):
+        if name.startswith("medagent.") and hasattr(module, "logger"):
+            monkeypatch.setattr(module, "logger", recorder)
+    return sink

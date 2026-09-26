@@ -35,6 +35,7 @@ from medagent.core.exceptions import PatientNotFoundError, ToolError
 from medagent.core.interfaces import BaseMemory
 from medagent.core.models import PatientContext
 from medagent.infra.logging import get_logger
+from medagent.infra.tracing import traced_node
 from medagent.workflows.patient_assessment import build_assessment_graph
 
 logger = get_logger(__name__)
@@ -112,14 +113,14 @@ def _build_graph(
         return {"decision": decision}
 
     graph = StateGraph(FollowupState)
-    graph.add_node("load_patient", load_patient)
+    graph.add_node("load_patient", traced_node("load_patient", load_patient))
     graph.add_node(
         "assess", build_assessment_graph(triage, drug_safety, evidence, trial_finder, report)
     )
     graph.add_edge(START, "load_patient")
     graph.add_edge("load_patient", "assess")
     if with_approval:
-        graph.add_node(_APPROVAL_NODE, approval_node)
+        graph.add_node(_APPROVAL_NODE, traced_node("approval", approval_node))
         graph.add_edge("assess", _APPROVAL_NODE)
         graph.add_edge(_APPROVAL_NODE, END)
     else:

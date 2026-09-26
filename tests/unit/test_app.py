@@ -47,6 +47,9 @@ class _FakeVectorStore:
     async def query(self, *args: object, **kwargs: object) -> list[dict[str, object]]:
         return []
 
+    async def ping(self) -> bool:
+        return True
+
 
 def _settings(pg_dsn: str) -> Settings:
     return Settings(
@@ -636,3 +639,54 @@ def test_the_websocket_error_frame_carries_retry_after(pg_dsn: str) -> None:
     assert frame["retry_after"] == 4.5
     assert "rate-limited" in frame["detail"]
     assert "org_01SECRET" not in frame["detail"]
+
+
+# --- /ready ------------------------------------------------------------------------------
+
+
+def _all_mcp_probes(healthy: bool):
+    from medagent.tools.mcp.http_base import HttpMCPClient
+
+    return patch.object(HttpMCPClient, "probe", AsyncMock(return_value=healthy))
+
+
+def test_ready_is_ok_when_every_dependency_answers(pg_dsn: str) -> None:
+    with _make_client(pg_dsn) as client, _all_mcp_probes(True):
+        response = client.get("/ready")  # unauthenticated, like /health
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "ok"
+    assert response.json()["checks"]["postgres"] == "ok"
+
+
+def test_ready_degrades_but_stays_200_when_an_mcp_server_is_down(pg_dsn: str) -> None:
+    with _make_client(pg_dsn) as client, _all_mcp_probes(False):
+        response = client.get("/ready")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "degraded"
+    assert body["checks"]["postgres"] == "ok"
+    assert body["checks"]["medical_mcp"] == "down"
+
+
+def test_ready_is_503_when_postgres_is_down_and_reveals_no_detail(pg_dsn: str) -> None:
+    from medagent.memory.persistent import PersistentStore
+
+    boom = AsyncMock(side_effect=RuntimeError("connection to postgres://user:pw@db:5432 refused"))
+    with (
+        _make_client(pg_dsn) as client,
+        _all_mcp_probes(True),
+        patch.object(PersistentStore, "ping", boom),
+    ):
+        response = client.get("/ready")
+
+    assert response.status_code == 503
+    assert response.json()["status"] == "down"
+    assert "postgres://" not in response.text
+    assert "refused" not in response.text
+
+
+def test_health_stays_a_cheap_liveness_check_that_touches_nothing(pg_dsn: str) -> None:
+    with _make_client(pg_dsn) as client, _all_mcp_probes(False):
+        assert client.get("/health").json() == {"status": "ok"}

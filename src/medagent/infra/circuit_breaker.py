@@ -10,6 +10,8 @@ from collections.abc import Awaitable, Callable
 from enum import StrEnum
 from typing import ParamSpec, TypeVar
 
+from opentelemetry import trace
+
 from medagent.core.exceptions import MCPError, UpstreamError
 from medagent.infra.metrics import circuit_breaker_opens_total, circuit_breaker_state
 
@@ -60,6 +62,9 @@ class CircuitBreaker:
 
     async def call(self, func: Callable[P, Awaitable[T]], *args: P.args, **kwargs: P.kwargs) -> T:
         if self.state is CircuitState.OPEN:
+            trace.get_current_span().add_event(
+                "circuit_open", {"medagent.breaker.target": self._name}
+            )
             raise self._error_type(
                 f"Circuit breaker for {self._name} is open; refusing the call to protect it",
                 reason="circuit_open",
