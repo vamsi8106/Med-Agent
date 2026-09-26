@@ -1,3 +1,6 @@
+import asyncio
+import time
+
 import pytest
 
 from medagent.agents.base import ReActAgent
@@ -125,7 +128,8 @@ async def test_unknown_tool_is_reported_to_the_model_not_raised() -> None:
     result = await agent.run(_patient(), "go")
 
     assert result == "recovered"
-    assert provider.histories[1][-1].content.startswith("Error:")
+    tool_message = next(m for m in provider.histories[1] if m.role == "tool")
+    assert tool_message.content.startswith("Error:")
 
 
 async def test_tool_failure_is_returned_to_the_model_as_an_error_result() -> None:
@@ -146,7 +150,8 @@ async def test_tool_failure_is_returned_to_the_model_as_an_error_result() -> Non
     result = await agent.run(_patient(), "go")
 
     assert result == "recovered"
-    assert provider.histories[1][-1].content.startswith("Error:")
+    tool_message = next(m for m in provider.histories[1] if m.role == "tool")
+    assert tool_message.content.startswith("Error:")
 
 
 async def test_tool_output_is_delimited_as_untrusted_and_capped() -> None:
@@ -269,3 +274,235 @@ async def test_no_final_answer_directive_when_no_tool_has_run_yet() -> None:
     await agent.run(_patient(), "go")
 
     assert not any("final answer now" in m.content for m in provider.calls[0][0])
+
+
+# --- loop engineering: deadline, duplicates, stall, parallelism -------------------
+
+
+def _calls_turn(*calls: ToolCall) -> LLMResponse:
+    return LLMResponse(content="", model="mock", tool_calls=list(calls))
+
+
+def _call(call_id: str, tool_name: str = "echo_tool", **arguments: object) -> ToolCall:
+    return ToolCall(id=call_id, tool_name=tool_name, arguments=arguments)
+
+
+class _SlowProvider(BaseLLMProvider):
+    def __init__(self, delay: float) -> None:
+        self._delay = delay
+
+    async def complete(self, messages: list[Message], tools: list | None = None) -> LLMResponse:
+        await asyncio.sleep(self._delay)
+        return LLMResponse(content="late answer", model="mock")
+
+
+async def test_whole_loop_deadline_aborts_a_hung_provider_quickly() -> None:
+    """Per-call timeouts let a hung provider (30s x 3 retries) hold the loop for
+    minutes; the loop as a whole has to answer to a deadline."""
+    agent = ReActAgent(
+        _SlowProvider(5), ToolRegistry(), SessionMemory(), system_prompt="t", timeout_seconds=0.1
+    )
+
+    started = time.monotonic()
+    with pytest.raises(ToolError, match="time limit"):
+        await agent.run(_patient(), "go")
+
+    assert time.monotonic() - started < 1.0
+
+
+async def test_no_deadline_when_none_is_set() -> None:
+    agent = ReActAgent(_SlowProvider(0.05), ToolRegistry(), SessionMemory(), system_prompt="t")
+    assert await agent.run(_patient(), "go") == "late answer"
+
+
+async def test_a_timeout_from_inside_the_loop_is_not_mistaken_for_the_deadline() -> None:
+    class _RaisesTimeout(BaseLLMProvider):
+        async def complete(self, messages: list[Message], tools: list | None = None) -> LLMResponse:
+            raise TimeoutError("some unrelated timeout")
+
+    agent = ReActAgent(
+        _RaisesTimeout(), ToolRegistry(), SessionMemory(), system_prompt="t", timeout_seconds=30
+    )
+
+    with pytest.raises(TimeoutError, match="unrelated"):
+        await agent.run(_patient(), "go")
+
+
+def _counting_registry() -> tuple[ToolRegistry, list[str]]:
+    executed: list[str] = []
+
+    @tool()
+    async def search(query: str) -> str:
+        """Runs a search."""
+        executed.append(query)
+        return f"results for {query}"
+
+    registry = ToolRegistry()
+    registry.register(search)
+    return registry, executed
+
+
+async def test_an_identical_call_is_not_executed_twice() -> None:
+    registry, executed = _counting_registry()
+    provider = _RecordingScriptedProvider(
+        [
+            _calls_turn(_call("c1", "search", query="metformin ckd")),
+            _calls_turn(_call("c2", "search", query="metformin ckd")),
+            LLMResponse(content="answer", model="mock"),
+        ]
+    )
+    agent = ReActAgent(provider, registry, SessionMemory(), system_prompt="t")
+
+    result = await agent.run_detailed(_patient(), "go")
+
+    assert executed == ["metformin ckd"]
+    assert [c.tool_name for c in result.tool_calls] == ["search"]
+    third_call_tool_messages = [m for m in provider.histories[2] if m.role == "tool"]
+    assert third_call_tool_messages[1].content.startswith("Error: you already made this exact call")
+
+
+async def test_duplicates_ignore_case_spacing_and_argument_order() -> None:
+    registry, executed = _counting_registry()
+    provider = _ScriptedProvider(
+        [
+            _calls_turn(_call("c1", "search", query="Metformin   CKD")),
+            _calls_turn(_call("c2", "search", query=" metformin ckd ")),
+            _calls_turn(_call("c3", "search", query="metformin dosing")),
+            LLMResponse(content="answer", model="mock"),
+        ]
+    )
+    agent = ReActAgent(provider, registry, SessionMemory(), system_prompt="t", max_iterations=6)
+
+    await agent.run(_patient(), "go")
+
+    assert executed == ["Metformin   CKD", "metformin dosing"]
+
+
+async def test_the_same_call_twice_in_one_turn_runs_once() -> None:
+    registry, executed = _counting_registry()
+    provider = _RecordingScriptedProvider(
+        [
+            _calls_turn(_call("c1", "search", query="same"), _call("c2", "search", query="same")),
+            LLMResponse(content="answer", model="mock"),
+        ]
+    )
+    agent = ReActAgent(provider, registry, SessionMemory(), system_prompt="t")
+
+    await agent.run(_patient(), "go")
+
+    assert executed == ["same"]
+    tool_messages = [m for m in provider.histories[1] if m.role == "tool"]
+    assert len(tool_messages) == 2
+    assert tool_messages[1].content.startswith("Error: you already made")
+
+
+async def test_a_stalled_turn_asks_for_the_answer_immediately_not_on_the_last_turn() -> None:
+    registry, _ = _counting_registry()
+    provider = _LastTurnProvider(
+        [
+            _calls_turn(_call("c1", "search", query="q")),
+            _calls_turn(_call("c2", "search", query="q")),  # a repeat: no progress
+            LLMResponse(content="answer", model="mock"),
+        ]
+    )
+    agent = ReActAgent(provider, registry, SessionMemory(), system_prompt="t", max_iterations=6)
+
+    await agent.run(_patient(), "go")
+
+    asked = [
+        any("final answer now" in m.content for m in messages) for messages, _ in provider.calls
+    ]
+    assert asked == [False, False, True]
+
+
+async def test_productive_turns_do_not_trigger_the_early_directive() -> None:
+    registry, _ = _counting_registry()
+    provider = _LastTurnProvider(
+        [
+            _calls_turn(_call("c1", "search", query="one")),
+            _calls_turn(_call("c2", "search", query="two")),
+            LLMResponse(content="answer", model="mock"),
+        ]
+    )
+    agent = ReActAgent(provider, registry, SessionMemory(), system_prompt="t", max_iterations=6)
+
+    await agent.run(_patient(), "go")
+
+    assert not any(
+        "final answer now" in m.content for messages, _ in provider.calls for m in messages
+    )
+
+
+def _timed_registry() -> ToolRegistry:
+    @tool()
+    async def wait(label: str, delay: float) -> str:
+        """Waits then returns its label."""
+        await asyncio.sleep(delay)
+        return label
+
+    @tool()
+    async def broken(label: str) -> str:
+        """Always fails."""
+        raise RuntimeError("boom")
+
+    registry = ToolRegistry()
+    registry.register(wait)
+    registry.register(broken)
+    return registry
+
+
+async def test_a_turns_tool_calls_run_concurrently() -> None:
+    provider = _RecordingScriptedProvider(
+        [
+            _calls_turn(
+                _call("c1", "wait", label="a", delay=0.3),
+                _call("c2", "wait", label="b", delay=0.3),
+                _call("c3", "wait", label="c", delay=0.3),
+            ),
+            LLMResponse(content="answer", model="mock"),
+        ]
+    )
+    agent = ReActAgent(provider, _timed_registry(), SessionMemory(), system_prompt="t")
+
+    started = time.monotonic()
+    await agent.run(_patient(), "go")
+
+    assert time.monotonic() - started < 0.7  # sequential would be >= 0.9
+
+
+async def test_results_keep_call_order_even_when_a_later_call_finishes_first() -> None:
+    provider = _RecordingScriptedProvider(
+        [
+            _calls_turn(
+                _call("slow", "wait", label="first", delay=0.2),
+                _call("fast", "wait", label="second", delay=0.01),
+            ),
+            LLMResponse(content="answer", model="mock"),
+        ]
+    )
+    agent = ReActAgent(provider, _timed_registry(), SessionMemory(), system_prompt="t")
+
+    await agent.run(_patient(), "go")
+
+    tool_messages = [m for m in provider.histories[1] if m.role == "tool"]
+    assert [m.tool_call_id for m in tool_messages] == ["slow", "fast"]
+    assert "first" in tool_messages[0].content
+    assert "second" in tool_messages[1].content
+
+
+async def test_one_failing_tool_does_not_affect_its_siblings() -> None:
+    provider = _RecordingScriptedProvider(
+        [
+            _calls_turn(
+                _call("c1", "broken", label="x"), _call("c2", "wait", label="fine", delay=0.01)
+            ),
+            LLMResponse(content="answer", model="mock"),
+        ]
+    )
+    agent = ReActAgent(provider, _timed_registry(), SessionMemory(), system_prompt="t")
+
+    await agent.run(_patient(), "go")
+
+    tool_messages = [m for m in provider.histories[1] if m.role == "tool"]
+    assert tool_messages[0].content.startswith("Error:")
+    assert "fine" in tool_messages[1].content

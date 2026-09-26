@@ -125,3 +125,77 @@ async def test_request_creates_a_trace_span() -> None:
     assert len(spans) == 1
     assert spans[0].name == "mcp_http.post./call-tool"
     assert spans[0].attributes["mcp.path"] == "/call-tool"
+
+
+# --- re-entrancy: one shared instance, overlapping users ------------------------
+
+
+def _slow_ok_handler(delay: float) -> object:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        await asyncio.sleep(delay)
+        return httpx.Response(200, json={"content": [{"text": "ok"}]})
+
+    return handler
+
+
+@pytest.fixture
+def mocked_transport(monkeypatch: pytest.MonkeyPatch):
+    """Makes every httpx.AsyncClient the client creates use a slow mock server,
+    so the real __aenter__/__aexit__ lifecycle is exercised."""
+    real = httpx.AsyncClient
+
+    def factory(*args: object, **kwargs: object) -> httpx.AsyncClient:
+        return real(*args, transport=httpx.MockTransport(_slow_ok_handler(0.05)), **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr("medagent.tools.mcp.http_base.httpx.AsyncClient", factory)
+
+
+async def _use(client: HttpMCPClient, start_delay: float, hold: float) -> str:
+    await asyncio.sleep(start_delay)
+    async with client as c:
+        await c.request("POST", "/call-tool", json={})
+        await asyncio.sleep(hold)
+        await c.request("POST", "/call-tool", json={})
+    return "ok"
+
+
+async def test_overlapping_users_of_one_shared_client_both_succeed(mocked_transport: None) -> None:
+    """Regression: AppState shares one MCP client across requests. The first
+    user to leave `async with` used to close the httpx client under the other,
+    which then failed with "HTTP client is not open" -- so two doctors hitting
+    the app at once could break each other's lookups."""
+    shared = HttpMCPClient("http://test-server")
+
+    results = await asyncio.gather(_use(shared, 0.0, 0.05), _use(shared, 0.02, 0.3))
+
+    assert results == ["ok", "ok"]
+
+
+async def test_nested_use_keeps_the_client_open_until_the_last_exit(mocked_transport: None) -> None:
+    client = HttpMCPClient("http://test-server")
+
+    async with client:
+        async with client:
+            pass
+        # the inner exit must not have closed it for the outer user
+        assert await client.request("POST", "/call-tool", json={}) == {"content": [{"text": "ok"}]}
+
+    assert client._client is None
+
+
+async def test_client_is_unusable_again_after_every_user_has_left(mocked_transport: None) -> None:
+    client = HttpMCPClient("http://test-server")
+    async with client:
+        pass
+
+    with pytest.raises(MCPError, match="not open"):
+        await client.request("POST", "/call-tool", json={})
+
+
+async def test_client_can_be_reopened_after_being_fully_closed(mocked_transport: None) -> None:
+    client = HttpMCPClient("http://test-server")
+    async with client:
+        pass
+
+    async with client:
+        assert await client.request("POST", "/call-tool", json={})

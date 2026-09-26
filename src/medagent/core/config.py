@@ -49,6 +49,12 @@ class Settings(BaseSettings):
     # decision, and survives a dropped connection so they can reconnect and
     # finish. Drafts hold patient data, so abandoned ones are purged after this.
     approval_draft_ttl_minutes: int = 30
+    # Whole-loop deadline for a ReAct agent. LLM and MCP timeouts are per call
+    # (30s each, with retries), so without this a hung provider can hold a
+    # multi-turn loop for minutes. On expiry the agent falls back to its fixed
+    # pipeline, which needs its own ~10-20s -- keep this well under the client's
+    # patience. A ReAct evidence run measured ~15-25s.
+    agent_loop_timeout_seconds: float = 40.0
 
     postgres_dsn: str = "postgresql://medagent:medagent@localhost:5432/medagent"
     # ChromaDB runs as its own server container so a persist-dir volume can be

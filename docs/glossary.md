@@ -47,7 +47,7 @@ Canonical names for every domain concept in MedAgent. Use these exact terms in c
 | **Report Agent** | Synthesizes outputs from other agents into a structured clinical report with citations. |
 | **Agent Context** | What every agent receives: the `PatientContext` and the doctor's message. (`ReActAgent` also holds a `SessionMemory` and a `ToolRegistry`.) |
 | **Agent Result** | The structured output of one specialist run (`AgentResult`): role, summary text, evidence cited, interactions found, and token `usage`. No confidence score. |
-| **ReAct Loop** | Reasoning + Acting pattern (`ReActAgent`, a LangGraph think → act graph). The model calls a tool, reads the result, and repeats until it answers. Bounded by `max_iterations`, a prompt-size ceiling, and a final-answer directive on the last turn; tool failures are returned to the model as error results, not raised. |
+| **ReAct Loop** | Reasoning + Acting pattern (`ReActAgent`, a LangGraph think → act graph). The model calls tools, reads the results, and repeats until it answers. Bounded by `max_iterations`, a whole-loop deadline, a prompt-size ceiling, duplicate-call detection, and a final-answer directive (on the last turn, or immediately after a stall). A turn's tool calls run concurrently; tool failures are returned to the model as error results, not raised. |
 
 ## Safety & Context Control
 
@@ -56,11 +56,16 @@ Canonical names for every domain concept in MedAgent. Use these exact terms in c
 | **Guardrails** | The input/output checks around every LLM call (`infra/guardrails.py`). The LLM only summarizes; safety-relevant facts are computed deterministically and never left to it. |
 | **Untrusted Text** | Any text not written by this system: the doctor's message, stored patient fields (conditions, allergies, visit history -- replayed into every later prompt), and MCP/tool output. `wrap_untrusted()` delimits it with `<<< >>>` and system prompts tell the model to treat it as data, not instructions. |
 | **Output Allergy Check** | Scans the LLM's own response for any recorded allergy and appends `ALLERGY CONFLICT` if found. Complements the input-side check, which only covers the drugs a caller explicitly asked about. |
+| **Unverified Figures** | The warning appended to an evidence answer by the Figure Check, listing figures that appear in none of the sources the model was given. |
 | **Output Validation** | Cheap sanity checks on an LLM response (empty/too short, apparent system-prompt leakage). Logged, never auto-blocked: withholding clinical content on a false positive is worse than showing an odd response. |
 | **Context Budget** | Caps on how much text enters a prompt (`infra/context_budget.py`): per external field, per visit replayed as history, and per assembled prompt. Sized with `AGENT_*_TOKENS` settings. |
 | **Token Estimate** | Tokens estimated as characters / 3.5 -- measured against real Groq usage (dense medical text is 3.9-5 chars/token). Counting whitespace words instead undercounts ~2x. |
 | **Truncation** | `truncate_text()` cuts on a word boundary, appends a marker, and logs `context_truncated`, so lost context is visible rather than silent. |
 | **Agent Run Tracker** | Per-run token budget (`AGENT_MAX_TOKENS_PER_RUN`) and step trace. Once spent, remaining specialist agents are skipped and the report says which. Best-effort: parallel agents can't see each other's spend. |
+| **Loop Deadline** | A whole-loop time limit on a ReAct run (`AGENT_LOOP_TIMEOUT_SECONDS`). LLM and MCP timeouts are per call, so without it a hung provider (30s × retries) could hold a multi-turn loop for minutes. On expiry the agent falls back to its fixed pipeline. |
+| **Duplicate Call** | A tool call identical to an earlier one in the same loop (same tool, arguments equal ignoring case/spacing/order). It is not re-run; the model is told it already has that result. |
+| **Stall** | A ReAct turn in which every call was a duplicate or an error, i.e. no progress. The next turn asks the model for its answer immediately instead of waiting for the last allowed turn. |
+| **Figure Check** | Deterministic check that every figure with a unit an evidence answer states ("850 mg", "45%") has its number in the retrieved evidence, the patient record, or the doctor's question. Unmatched figures get an advisory `UNVERIFIED FIGURES` warning; the answer is never blocked. Checks numbers only -- not units, not whether the reasoning follows. |
 | **Deterministic Fallback** | The Evidence Agent's fixed retrieve-then-summarize pipeline, used when the ReAct loop answers without retrieving anything, exhausts its turns, or the provider rejects a tool call. An unsourced answer is never returned. |
 | **Human-in-the-Loop Approval** | The WebSocket chat drafts a report but saves nothing until the doctor approves, edits, or rejects it. The pause is a LangGraph `interrupt()` in the follow-up graph. REST endpoints save immediately. |
 | **Draft** | A report awaiting the doctor's decision. Held by the checkpointer under a `user_id:patient_id` thread, resumable after a dropped connection with `?resume=1`, deleted once decided, and purged after `APPROVAL_DRAFT_TTL_MINUTES`. |

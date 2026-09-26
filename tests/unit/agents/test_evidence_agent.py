@@ -1,13 +1,17 @@
+import asyncio
+import time
 from datetime import UTC, datetime
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from medagent.agents.evidence_agent import EvidenceAgent
+from medagent.core.config import Settings
 from medagent.core.exceptions import ProviderError
 from medagent.core.interfaces import BaseLLMProvider
 from medagent.core.models import (
     ClinicalEvidence,
+    LabResult,
     LLMResponse,
     Message,
     PatientContext,
@@ -400,3 +404,147 @@ async def test_provider_outage_still_surfaces_when_the_fallback_also_fails() -> 
 
     with pytest.raises(ProviderError, match="still down"):
         await agent.gather_evidence(_patient(), "question?")
+
+
+# --- figure verification, loop deadline, parallel tools ---------------------------
+
+_SUPPORTED = "Metformin lowered HbA1c by 1.0-1.5% versus placebo. Dose up to 2,000 mg daily."
+
+
+def _agent_with_evidence(llm: BaseLLMProvider, literature: str = _SUPPORTED) -> EvidenceAgent:
+    guideline_retriever = AsyncMock()
+    guideline_retriever.run.return_value = []
+    return EvidenceAgent(
+        llm=llm,
+        medical_client=_FakeMedicalClient(literature),  # type: ignore[arg-type]
+        guideline_retriever=guideline_retriever,
+    )
+
+
+def _react_then_answer(answer: str) -> _ReActScriptedLLM:
+    return _ReActScriptedLLM([_search_turn(), LLMResponse(content=answer, model="m")])
+
+
+async def test_an_invented_dose_is_flagged_on_the_react_path() -> None:
+    llm = _react_then_answer("Metformin 850 mg twice daily cuts events by 45%.")
+
+    result = await _agent_with_evidence(llm).gather_evidence(_patient(), "metformin dosing?")
+
+    assert "UNVERIFIED FIGURES" in result.summary
+    assert "850 mg" in result.summary
+    assert "45%" in result.summary
+
+
+async def test_an_invented_dose_is_flagged_on_the_fallback_path_too() -> None:
+    """The check lives in the shared finishing step, so falling back to the
+    fixed pipeline cannot skip it."""
+    llm = MockLLMProvider(fixed_response="Give 850 mg twice daily for best effect.")
+
+    result = await _agent_with_evidence(llm).gather_evidence(_patient(), "metformin dosing?")
+
+    assert "UNVERIFIED FIGURES" in result.summary
+    assert "850 mg" in result.summary
+
+
+async def test_a_faithful_answer_is_not_flagged() -> None:
+    llm = _react_then_answer("Metformin lowers HbA1c by 1.0–1.5%, at up to 2000 mg daily.")
+
+    result = await _agent_with_evidence(llm).gather_evidence(_patient(), "metformin dosing?")
+
+    assert "UNVERIFIED" not in result.summary
+
+
+async def test_a_figure_restating_the_patient_record_counts_as_verified() -> None:
+    llm = _react_then_answer("Her HbA1c of 9.8% is well above target.")
+    patient = _patient()
+    patient.lab_results = [
+        LabResult(
+            test_name="HbA1c", value=9.8, unit="%", collected_at=datetime(2026, 1, 1, tzinfo=UTC)
+        )
+    ]
+
+    result = await _agent_with_evidence(llm).gather_evidence(patient, "how is her control?")
+
+    assert "UNVERIFIED" not in result.summary
+
+
+async def test_a_figure_from_the_doctors_own_question_is_not_flagged() -> None:
+    llm = _react_then_answer("At 500 mg twice daily the regimen you describe is standard.")
+
+    result = await _agent_with_evidence(llm).gather_evidence(
+        _patient(), "is metformin 500 mg twice daily appropriate?"
+    )
+
+    assert "UNVERIFIED" not in result.summary
+
+
+async def test_the_figure_warning_never_blocks_the_answer() -> None:
+    llm = _react_then_answer("Consider 850 mg.")
+
+    result = await _agent_with_evidence(llm).gather_evidence(_patient(), "dose?")
+
+    assert result.summary.startswith("Consider 850 mg.")
+    assert result.evidence
+
+
+class _SlowThenFast(BaseLLMProvider):
+    """First call hangs (a stuck provider); later calls answer promptly."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def complete(
+        self, messages: list[Message], tools: list[dict] | None = None
+    ) -> LLMResponse:
+        self.calls += 1
+        if self.calls == 1:
+            await asyncio.sleep(5)
+        return LLMResponse(content="fallback summary text", model="m")
+
+
+async def test_a_hung_provider_hits_the_loop_deadline_and_falls_back() -> None:
+    settings = Settings(_env_file=None, agent_loop_timeout_seconds=0.2)
+    llm = _SlowThenFast()
+    agent = _agent_with_evidence(llm)
+
+    started = time.monotonic()
+    with patch("medagent.agents.evidence_agent.get_settings", return_value=settings):
+        result = await agent.gather_evidence(_patient(), "question?")
+
+    assert "fallback summary text" in result.summary
+    assert time.monotonic() - started < 2.0
+    assert llm.calls == 2
+
+
+async def test_the_models_parallel_tool_calls_run_concurrently() -> None:
+    class _SlowMedicalClient:
+        def __init__(self) -> None:
+            self.search_medical_literature = AsyncMock(side_effect=self._search)
+
+        async def _search(self, query: str) -> list[dict]:
+            await asyncio.sleep(0.3)
+            return [{"text": _SUPPORTED}]
+
+        async def __aenter__(self) -> "_SlowMedicalClient":
+            return self
+
+        async def __aexit__(self, *exc_info: object) -> None:
+            return None
+
+    async def slow_guidelines(**kwargs: object) -> list[ClinicalEvidence]:
+        await asyncio.sleep(0.3)
+        return [ClinicalEvidence(title="ADA", summary="guideline", source="ada")]
+
+    guideline_retriever = AsyncMock()
+    guideline_retriever.run.side_effect = slow_guidelines
+    agent = EvidenceAgent(
+        llm=_react_then_answer("Metformin is first-line."),
+        medical_client=_SlowMedicalClient(),  # type: ignore[arg-type]
+        guideline_retriever=guideline_retriever,
+    )
+
+    started = time.monotonic()
+    result = await agent.gather_evidence(_patient(), "first-line therapy?")
+
+    assert time.monotonic() - started < 0.55  # sequential would be >= 0.6
+    assert {e.source for e in result.evidence} == {"PubMed", "ada"}

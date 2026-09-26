@@ -3,12 +3,18 @@
 Implemented as a LangGraph StateGraph: a "think" node calls the LLM, a
 conditional edge routes to "act" (execute tool calls, loop back to "think")
 or "finalize" (no tool calls left, return the answer). The loop is bounded
-three ways so a misbehaving model can't run away: max_iterations, an optional
-prompt-size ceiling checked before every LLM call, and a per-result cap on
-tool output. Tool failures are returned to the model as ordinary tool results
-so it can correct itself, rather than aborting the run.
+five ways so a misbehaving model can't run away: max_iterations, a whole-loop
+deadline (per-call timeouts alone let a hung provider hold a 3-turn loop for
+minutes), an optional prompt-size ceiling checked before every LLM call, a
+per-result cap on tool output, and duplicate-call detection (an identical call
+is never re-run, and a turn that achieves nothing forces the model to answer).
+Tool failures are returned to the model as ordinary tool results so it can
+correct itself, rather than aborting the run. A turn's tool calls run
+concurrently, so registered tools must be safe to call in parallel.
 """
 
+import asyncio
+import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TypedDict
@@ -32,6 +38,10 @@ _FINAL_ANSWER_DIRECTIVE = (
     "You have gathered enough evidence. Write your final answer now, using only the tool "
     "results above and citing your sources. Do not call any more tools."
 )
+_DUPLICATE_CALL_MESSAGE = (
+    "Error: you already made this exact call to {tool}; its result is above. Do not repeat "
+    "it -- refine the query or write your final answer."
+)
 
 
 class ReActState(TypedDict):
@@ -41,6 +51,8 @@ class ReActState(TypedDict):
     content: str
     final_answer: str
     usage: dict[str, int]
+    seen: list[str]
+    force_answer: bool
 
 
 @dataclass
@@ -49,6 +61,19 @@ class ReActResult:
     tool_calls: list[ToolCall]
     usage: dict[str, int]
     iterations: int
+
+
+def _normalize_argument(value: object) -> object:
+    if isinstance(value, str):
+        return " ".join(value.lower().split())
+    return value
+
+
+def _call_key(call: ToolCall) -> str:
+    """Identity of a call for duplicate detection: tool + arguments, ignoring
+    case, spacing and argument order ("Metformin  CKD" == "metformin ckd")."""
+    arguments = {name: _normalize_argument(value) for name, value in call.arguments.items()}
+    return f"{call.tool_name}:{json.dumps(arguments, sort_keys=True, default=str)}"
 
 
 def _merge_usage(total: dict[str, int], new: dict[str, int]) -> dict[str, int]:
@@ -67,6 +92,7 @@ class ReActAgent(BaseAgent):
         system_prompt: str,
         max_iterations: int = 5,
         max_prompt_tokens: int | None = None,
+        timeout_seconds: float | None = None,
     ) -> None:
         self._llm = llm
         self._tools = tools
@@ -74,6 +100,7 @@ class ReActAgent(BaseAgent):
         self._system_prompt = system_prompt
         self._max_iterations = max_iterations
         self._max_prompt_tokens = max_prompt_tokens
+        self._timeout_seconds = timeout_seconds
         self._graph = self._build_graph().compile()
 
     async def run(self, context: PatientContext, message: str) -> str:
@@ -83,16 +110,27 @@ class ReActAgent(BaseAgent):
         self._session.add_message(
             Message(role="user", content=message, timestamp=datetime.now(UTC))
         )
-        result = await self._graph.ainvoke(
-            {
-                "iterations": 0,
-                "tool_calls": [],
-                "executed": [],
-                "content": "",
-                "final_answer": "",
-                "usage": {},
-            }
-        )
+        deadline = asyncio.timeout(self._timeout_seconds)
+        try:
+            async with deadline:
+                result = await self._graph.ainvoke(
+                    {
+                        "iterations": 0,
+                        "tool_calls": [],
+                        "executed": [],
+                        "content": "",
+                        "final_answer": "",
+                        "usage": {},
+                        "seen": [],
+                        "force_answer": False,
+                    }
+                )
+        except TimeoutError as exc:
+            if not deadline.expired():
+                raise
+            raise ToolError(
+                f"ReAct loop exceeded its {self._timeout_seconds:g}s time limit"
+            ) from exc
         return ReActResult(
             answer=result["final_answer"],
             tool_calls=result["executed"],
@@ -117,7 +155,7 @@ class ReActAgent(BaseAgent):
             # one more call anyway. The directive is transient, never stored
             # in the session history.
             is_last_turn = state["iterations"] == self._max_iterations - 1
-            if is_last_turn and state["executed"]:
+            if (is_last_turn or state["force_answer"]) and state["executed"]:
                 history = [*history, Message(role="user", content=_FINAL_ANSWER_DIRECTIVE)]
             response = await self._think(history)
             if response.tool_calls:
@@ -140,8 +178,12 @@ class ReActAgent(BaseAgent):
             }
 
         async def act_node(state: ReActState) -> dict[str, object]:
-            await self._act(state["tool_calls"])
-            return {"executed": [*state["executed"], *state["tool_calls"]]}
+            ran, seen, stalled = await self._act(state["tool_calls"], state["seen"])
+            return {
+                "executed": [*state["executed"], *ran],
+                "seen": seen,
+                "force_answer": stalled,
+            }
 
         async def finalize_node(state: ReActState) -> dict[str, object]:
             self._session.add_message(
@@ -179,18 +221,47 @@ class ReActAgent(BaseAgent):
     async def _think(self, history: list[Message]) -> LLMResponse:
         return await self._llm.complete(history, tools=self._tools.schemas())
 
-    async def _act(self, tool_calls: list[ToolCall]) -> None:
-        for call in tool_calls:
-            content = await self._execute(call)
+    async def _act(
+        self, tool_calls: list[ToolCall], seen: list[str]
+    ) -> tuple[list[ToolCall], list[str], bool]:
+        """Runs one turn's tool calls. Returns (calls actually executed, updated
+        seen keys, whether the turn was a stall).
+
+        A call identical to an earlier one -- from a previous turn or earlier in
+        this same turn -- is not re-run; the model is told so instead. The rest
+        run concurrently and their results are recorded in the original call
+        order, so history is deterministic. A stall (every call a duplicate or
+        an error) means the model is making no progress, so the next turn asks
+        for its answer rather than waiting for the last allowed turn.
+        """
+        seen = list(seen)
+        results: dict[int, str] = {}
+        to_run: list[tuple[int, ToolCall]] = []
+        for index, call in enumerate(tool_calls):
+            key = _call_key(call)
+            if key in seen:
+                results[index] = _DUPLICATE_CALL_MESSAGE.format(tool=call.tool_name)
+                logger.info("react_duplicate_call_blocked", tool=call.tool_name)
+            else:
+                seen.append(key)
+                to_run.append((index, call))
+
+        outputs = await asyncio.gather(*(self._execute(call) for _, call in to_run))
+        for (index, _), text in zip(to_run, outputs, strict=True):
+            results[index] = text
+
+        for index, call in enumerate(tool_calls):
             self._session.add_message(
                 Message(
                     role="tool",
                     name=call.tool_name,
                     tool_call_id=call.id,
-                    content=content,
+                    content=results[index],
                     timestamp=datetime.now(UTC),
                 )
             )
+        stalled = all(text.startswith("Error:") for text in results.values())
+        return [call for _, call in to_run], seen, stalled
 
     async def _execute(self, call: ToolCall) -> str:
         """Runs one tool call and returns its result as text for the model.

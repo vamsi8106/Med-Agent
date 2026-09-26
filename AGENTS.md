@@ -43,6 +43,7 @@ src/medagent/
 │   ├── middleware.py            # request logging + metrics middleware
 │   ├── context_budget.py        # token estimate (3.5 chars/token) + truncate_text for prompt inputs
 │   ├── guardrails.py            # wrap_untrusted (prompt-injection delimiting), allergy output check, output sanity checks
+│   ├── verification.py          # deterministic check of an answer's numeric claims (doses, %, lab values) against its sources
 │   └── agent_run.py             # AgentRunTracker: per-run token budget + step trace
 ├── tools/                       # Phase 2
 │   ├── base.py                  # BaseTool ABC + ToolResult
@@ -51,10 +52,10 @@ src/medagent/
 │   ├── mcp/                     # HTTP clients: http_base.py (breaker/retry/rate-limit/tracing), medical.py, healthcare.py, research.py
 │   └── custom/                  # interaction_checker, patient_context, lab_interpreter, report_generator
 ├── agents/                      # Phase 3 (base + drug_safety), Phase 5 (rest)
-│   ├── base.py                  # ReActAgent: LangGraph think → act loop (bounded turns, prompt ceiling, capped/untrusted tool output, final-answer directive)
+│   ├── base.py                  # ReActAgent: LangGraph think → act loop. Bounded five ways: turn cap, whole-loop deadline, prompt ceiling, capped/untrusted tool output, duplicate-call detection (a stalled turn forces the answer). A turn's tool calls run concurrently, so tools must be concurrency-safe
 │   ├── triage_agent.py          # routes to specialists
 │   ├── drug_safety_agent.py     # interactions, adverse events
-│   ├── evidence_agent.py        # ReAct over literature + guideline tools, fixed-pipeline fallback
+│   ├── evidence_agent.py        # ReAct over literature + guideline tools, fixed-pipeline fallback, figure verification on every answer
 │   ├── trial_finder_agent.py    # ClinicalTrials.gov search
 │   └── report_agent.py          # synthesizes multi-agent output
 ├── memory/                      # Phase 4
@@ -169,6 +170,7 @@ Tools available: `search-drugs`, `get-drug-details`, `search-drug-nomenclature`,
 - Test with `MockLLMProvider`. No network in unit tests (Postgres-backed tests use a throwaway Docker container and skip if Docker is unavailable).
 - LLM prompts: wrap doctor/patient/external text with `wrap_untrusted`, and cap it with `truncate_text` (`AGENT_*_TOKENS` settings). Deterministic safety checks (allergies, interactions, lab flags) stay outside any LLM loop.
 - Anything that can only fail against the real model or real MCP responses gets a case in `tests/eval/` -- unit tests use mocks and cannot see it.
+- Anything shared across requests (`AppState` clients, models) is used concurrently -- `HttpMCPClient` is re-entrant and `EmbeddingModel` serializes encodes for this reason. A new shared resource must be safe under overlapping use, with a test that overlaps it.
 - A new type in graph state (`AssessmentState` / `FollowupState`, including nested models) must be added to `_CHECKPOINT_STATE_TYPES` in `workflows/checkpointing.py`; a test fails if one is missing. Graph nodes must not swallow non-`MedAgentError` exceptions -- those are bugs and stay loud.
 
 # Commands

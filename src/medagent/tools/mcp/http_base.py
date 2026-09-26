@@ -8,6 +8,7 @@ before -- circuit breaker, retry with backoff, per-instance rate limiting,
 tracing -- just over httpx instead of a stdio ClientSession.
 """
 
+import asyncio
 from typing import Any, Self
 
 import httpx
@@ -35,6 +36,11 @@ class HttpMCPClient:
         self._base_url = base_url.rstrip("/")
         self._timeout_seconds = timeout_seconds
         self._client: httpx.AsyncClient | None = None
+        # One instance is shared by every request the app serves, so several
+        # users can be inside `async with` at once. Count them: the httpx
+        # client opens with the first and closes only when the last leaves.
+        self._open_users = 0
+        self._lifecycle = asyncio.Lock()
         self._breaker = circuit_breaker or CircuitBreaker(
             failure_threshold=5, recovery_timeout=30.0
         )
@@ -43,13 +49,20 @@ class HttpMCPClient:
     async def __aenter__(self) -> Self:
         # Self, not HttpMCPClient -- callers using `async with SubclassClient()`
         # need the subclass's own extra methods visible on the bound name.
-        self._client = httpx.AsyncClient(base_url=self._base_url, timeout=self._timeout_seconds)
+        async with self._lifecycle:
+            if self._open_users == 0:
+                self._client = httpx.AsyncClient(
+                    base_url=self._base_url, timeout=self._timeout_seconds
+                )
+            self._open_users += 1
         return self
 
     async def __aexit__(self, *exc_info: object) -> None:
-        if self._client is not None:
-            await self._client.aclose()
-        self._client = None
+        async with self._lifecycle:
+            self._open_users -= 1
+            if self._open_users == 0 and self._client is not None:
+                await self._client.aclose()
+                self._client = None
 
     async def request(self, method: str, path: str, **kwargs: Any) -> Any:
         with tracer.start_as_current_span(f"mcp_http.{method.lower()}.{path}") as span:
