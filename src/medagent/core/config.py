@@ -37,7 +37,11 @@ class Settings(BaseSettings):
     # Final safety net on the fully-assembled synthesis prompt sent to the
     # LLM, in case several individually-capped fields still add up to too
     # much (e.g. many guideline hits concatenated into one citations block).
-    agent_prompt_max_tokens: int = 6000
+    agent_prompt_max_tokens: int = 4000
+    # Each stored visit's assessment is the full markdown report it produced;
+    # replaying five of those verbatim into every prompt is unbounded and
+    # self-amplifying (each new report embeds the previous ones' evidence).
+    agent_visit_summary_max_tokens: int = 250
 
     postgres_dsn: str = "postgresql://medagent:medagent@localhost:5432/medagent"
     # ChromaDB runs as its own server container so a persist-dir volume can be

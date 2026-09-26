@@ -125,6 +125,41 @@ async def test_synthesis_prompt_includes_actual_evidence_text_not_just_titles() 
     assert "Metformin reduces HbA1c by 1-2% in RCTs." in user_message.content
 
 
+async def test_prompt_stays_bounded_when_prior_visits_hold_huge_reports() -> None:
+    """Regression for a real Groq 413 (9,644 tokens vs an 8,000 limit): each
+    /assess and /followup saves its full markdown report as the visit's
+    assessment, and the last five were replayed verbatim into every later
+    prompt -- unbounded and self-amplifying."""
+    guideline_retriever = AsyncMock()
+    guideline_retriever.run.return_value = []
+    llm = _RecordingLLMProvider(fixed_response="n/a")
+    agent = EvidenceAgent(
+        llm=llm,
+        medical_client=_FakeMedicalClient("n/a"),  # type: ignore[arg-type]
+        guideline_retriever=guideline_retriever,
+    )
+    huge_report = (
+        "# Clinical Report\n" + " ".join(f"finding{i}" for i in range(3000)) + " TAILMARKER"
+    )
+    patient = PatientContext(
+        id="P-TEST-005",
+        name="Patient Epsilon",
+        age=60,
+        sex="F",
+        visits=[
+            Visit(visit_date=datetime.now(UTC), chief_complaint="follow-up", assessment=huge_report)
+            for _ in range(5)
+        ],
+    )
+
+    await agent.gather_evidence(patient, "any updates?")
+
+    user_message = next(m for m in llm.received_messages if m.role == "user")
+    assert "TAILMARKER" not in user_message.content
+    assert "truncated" in user_message.content
+    assert len(user_message.content) < 10_000
+
+
 async def test_flags_allergy_mentioned_only_in_llm_response() -> None:
     guideline_retriever = AsyncMock()
     guideline_retriever.run.return_value = []

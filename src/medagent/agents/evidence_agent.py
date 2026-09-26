@@ -34,9 +34,10 @@ def _format_visit_history(context: PatientContext) -> str | None:
         return None
     # context.visits is newest-first (see PatientStore.get_patient); present
     # oldest-first so the narrative reads chronologically.
+    max_tokens = get_settings().agent_visit_summary_max_tokens
     lines = [
         f"- {visit.visit_date.date()}: complaint={visit.chief_complaint!r}, "
-        f"assessment={visit.assessment!r}"
+        f"assessment={truncate_text(visit.assessment or '', max_tokens, source='visit_history')!r}"
         for visit in reversed(context.visits)
     ]
     return "Recent visit history (oldest first):\n" + "\n".join(lines)
