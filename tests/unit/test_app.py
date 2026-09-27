@@ -705,3 +705,38 @@ def test_ready_is_503_when_postgres_is_down_and_reveals_no_detail(pg_dsn: str) -
 def test_health_stays_a_cheap_liveness_check_that_touches_nothing(pg_dsn: str) -> None:
     with _make_client(pg_dsn) as client, _all_mcp_probes(False):
         assert client.get("/health").json() == {"status": "ok"}
+
+
+def test_posting_another_doctors_patient_id_is_refused_and_changes_nothing(pg_dsn: str) -> None:
+    with _make_client(pg_dsn) as client:
+        owner = _auth_headers(client, "dr.alpha")
+        intruder = _auth_headers(client, "dr.intruder")
+        client.post(
+            "/patients",
+            json={
+                "id": "P-TEST-OWN",
+                "name": "Patient Alpha",
+                "age": 70,
+                "sex": "M",
+                "medications": [{"name": "Metformin"}],
+            },
+            headers=owner,
+        )
+
+        response = client.post(
+            "/patients",
+            json={
+                "id": "P-TEST-OWN",
+                "name": "Overwritten",
+                "age": 1,
+                "sex": "F",
+                "medications": [{"name": "Warfarin"}],
+            },
+            headers=intruder,
+        )
+
+        assert response.status_code == 409
+        assert response.json() == {"detail": "This patient ID cannot be used."}
+        record = client.get("/patients/P-TEST-OWN", headers=owner).json()
+        assert record["name"] == "Patient Alpha"
+        assert [m["name"] for m in record["medications"]] == ["Metformin"]

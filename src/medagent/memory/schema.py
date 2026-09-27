@@ -154,6 +154,28 @@ REMOVE_DOCTOR_ID_STATEMENTS: list[str] = [
     "ALTER TABLE patients DROP COLUMN IF EXISTS doctor_id",
 ]
 
+# Migration 0004: record history. Medications and labs become append-only
+# (PatientStore reconciles instead of delete+insert), so a re-save must not
+# duplicate a lab result: one row per (patient, test, collection time). Each
+# visit stores a snapshot of the record, the baseline for "what changed".
+ADD_RECORD_HISTORY_STATEMENTS: list[str] = [
+    "ALTER TABLE visits ADD COLUMN IF NOT EXISTS record_snapshot JSONB",
+    """
+    DELETE FROM lab_results a USING lab_results b
+    WHERE a.patient_id = b.patient_id AND a.test_name = b.test_name
+      AND a.collected_at = b.collected_at AND a.id > b.id
+    """,
+    """
+    CREATE UNIQUE INDEX IF NOT EXISTS ux_lab_results_patient_test_time
+    ON lab_results(patient_id, test_name, collected_at)
+    """,
+]
+
+REMOVE_RECORD_HISTORY_STATEMENTS: list[str] = [
+    "DROP INDEX IF EXISTS ux_lab_results_patient_test_time",
+    "ALTER TABLE visits DROP COLUMN IF EXISTS record_snapshot",
+]
+
 TABLES_IN_DEPENDENCY_ORDER: list[str] = [
     "audit_log",
     "interactions_log",

@@ -26,7 +26,7 @@ src/medagent/
 ├── core/                        # Phase 1 — shared kernel, zero external deps beyond pydantic
 │   ├── interfaces.py            # ABCs: BaseLLMProvider, BaseTool, BaseAgent, BaseMemory
 │   ├── models.py                # PatientContext, Medication, LabResult, Visit, DrugInteraction, Message, ToolCall, LLMResponse
-│   ├── exceptions.py            # MedAgentError → UpstreamError (→ ProviderError, MCPError; carries `reason`, `retryable`, `retry_after`), ToolError, MemoryError, AuthError, PatientNotFoundError, AgentBudgetExceededError, AllAgentsFailedError (each carries its HTTP status_code)
+│   ├── exceptions.py            # MedAgentError → UpstreamError (→ ProviderError, MCPError; carries `reason`, `retryable`, `retry_after`), ToolError, MemoryError, AuthError, PatientNotFoundError, PatientOwnershipError, AgentBudgetExceededError, AllAgentsFailedError (each carries its HTTP status_code)
 │   ├── config.py                # Settings (pydantic-settings)
 │   └── types.py                 # Enums: EvidenceGrade, InteractionSeverity, CKDStage, TrialPhase, AgentRole
 ├── llm/                         # Phase 1 — provider layer
@@ -59,7 +59,8 @@ src/medagent/
 │   ├── trial_finder_agent.py    # ClinicalTrials.gov search
 │   └── report_agent.py          # synthesizes multi-agent output
 ├── memory/                      # Phase 4
-│   ├── patient_store.py         # Postgres CRUD for patient records (per-doctor isolation via doctor_id)
+│   ├── patient_store.py         # Postgres CRUD for patient records (per-doctor isolation via doctor_id; saving another doctor's id → PatientOwnershipError 409). Medications/labs are append-only history: reconciled, never deleted; get_patient returns active meds + latest lab per test + changes_since_last_visit
+│   ├── record_changes.py        # visit snapshot + deterministic diff (meds started/stopped/changed, conditions, allergies, newer labs) -- facts only, no clinical interpretation
 │   ├── audit_log.py             # durable record of every patient-data access
 │   ├── session.py               # sliding-window conversation buffer (used by ReActAgent)
 │   ├── schema.py                # table DDL + doctor_id statements
@@ -129,11 +130,16 @@ Never import upward. `core/` never imports from `llm/`. `tools/` never imports f
 server-side from the creating doctor's JWT at patient creation, immutable
 afterward. See `src/medagent/memory/schema.py`'s `ADD_DOCTOR_ID_STATEMENTS`.
 
+Medications and lab results are append-only: a stopped medication keeps its
+row (`status='stopped'`, `end_date`), a dose change closes the old row and
+opens a new one, labs are unique per (patient, test, collected_at). Each visit
+stores `record_snapshot`, the baseline for "Changes Since Last Visit".
+
 ```sql
 patients    (id, name, age, sex, doctor_id, weight_kg, height_cm, conditions JSON, allergies JSON, created_at, updated_at)
 medications (id, patient_id FK, doctor_id, name, brand_name, dose, frequency, route, start_date, end_date, status, created_at)
 lab_results (id, patient_id FK, doctor_id, test_name, value, unit, reference_low, reference_high, is_abnormal, collected_at)
-visits      (id, patient_id FK, doctor_id, visit_date, chief_complaint, assessment, plan, agent_session_id, created_at)
+visits      (id, patient_id FK, doctor_id, visit_date, chief_complaint, assessment, plan, agent_session_id, record_snapshot JSONB, created_at)
 interactions_log (id, patient_id FK, doctor_id, drug_a, drug_b, severity, description, source, checked_at)
 ```
 

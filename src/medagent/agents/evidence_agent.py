@@ -20,6 +20,7 @@ from medagent.infra.metrics import evidence_react_total, guardrail_flags_total
 from medagent.infra.verification import find_unverified_figures, unverified_figures_warning
 from medagent.memory.session import SessionMemory
 from medagent.rag.retriever import GuidelineRetrieverTool
+from medagent.tools.custom.report_generator import format_changes
 from medagent.tools.decorators import tool
 from medagent.tools.mcp.medical import MedicalMCPClient
 from medagent.tools.registry import ToolRegistry
@@ -50,9 +51,27 @@ def _format_visit_history(context: PatientContext) -> str | None:
     return "Recent visit history (oldest first):\n" + "\n".join(lines)
 
 
+def _format_record_changes(context: PatientContext) -> str | None:
+    changes = context.changes_since_last_visit
+    if changes is None or changes.is_empty:
+        return None
+    text = "\n".join(format_changes(changes))
+    max_tokens = get_settings().agent_context_field_max_tokens
+    return (
+        f"Changes to the record since the last visit ({changes.since.date()}):\n"
+        + truncate_text(text, max_tokens, source="record_changes")
+    )
+
+
 def _patient_context_preamble(context: PatientContext) -> str | None:
     visit_history = _format_visit_history(context)
-    if not context.conditions and not context.allergies and not visit_history:
+    record_changes = _format_record_changes(context)
+    if (
+        not context.conditions
+        and not context.allergies
+        and not visit_history
+        and not record_changes
+    ):
         return None
     parts = []
     if context.conditions:
@@ -65,7 +84,7 @@ def _patient_context_preamble(context: PatientContext) -> str | None:
         if parts
         else ""
     )
-    return "\n".join(part for part in [preamble, visit_history] if part)
+    return "\n".join(part for part in [preamble, record_changes, visit_history] if part)
 
 
 _REACT_SYSTEM_PROMPT = (

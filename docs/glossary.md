@@ -125,4 +125,7 @@ Canonical names for every domain concept in MedAgent. Use these exact terms in c
 | **No-PHI rule** | Traces, logs and metric labels contain no patient identifiers or clinical text; enforced by a test. |
 | **Import check** | `make import-check` runs import-linter over the layer table in AGENTS.md (one contract per layer, direct imports only). A new upward or sideways import fails `pre-commit` and CI. |
 | **API layer** | `src/medagent/api/`: `AppState`, error mapping, schemas and the route modules. `app.py` only builds the app (lifespan, middleware, routers). |
+| **Append-only record** | Medications and lab results are never deleted or overwritten. Stopping a medication marks its row stopped with an end date; a dose change closes the old row and opens a new one; each lab result is its own row. The API shows the current view (active medications, latest result per test). |
+| **Record snapshot** | A copy of the record (conditions, allergies, active medications, latest labs) stored on each visit. It is the baseline the next visit is compared against. |
+| **Changes Since Last Visit** | The deterministic difference between the current record and the last visit's snapshot, computed in code. Shown as a report section and given to the evidence agent. Values only, no clinical interpretation. |
 | **Settings** | The `Settings` singleton from pydantic-settings. Reads from env vars → `.env` → defaults. Single source of truth for all config. |

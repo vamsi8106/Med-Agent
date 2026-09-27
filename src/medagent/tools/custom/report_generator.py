@@ -1,6 +1,6 @@
 """Synthesizes multiple agents' findings into a structured markdown report."""
 
-from medagent.core.models import AgentResult, LabFlag, PatientContext
+from medagent.core.models import AgentResult, LabFlag, PatientContext, RecordChanges
 from medagent.tools.base import BaseTool, ToolResult
 from medagent.tools.custom.lab_interpreter import LabInterpreterTool
 
@@ -47,6 +47,38 @@ def _format_lab_flags_section(flags: list[LabFlag]) -> str | None:
     return "\n".join(lines)
 
 
+def format_changes(changes: RecordChanges) -> list[str]:
+    """One line per change, values only. Shared with the evidence agent's prompt."""
+    lines = [f"- Started: {name}" for name in changes.medications_started]
+    lines += [f"- Stopped: {name}" for name in changes.medications_stopped]
+    lines += [f"- Changed: {c.name}: {c.before} -> {c.after}" for c in changes.medications_changed]
+    lines += [f"- New condition: {c}" for c in changes.conditions_added]
+    lines += [f"- Condition removed: {c}" for c in changes.conditions_removed]
+    lines += [f"- New allergy: {a}" for a in changes.allergies_added]
+    lines += [f"- Allergy removed: {a}" for a in changes.allergies_removed]
+    for lab in changes.lab_changes:
+        before = f"{lab.previous_value} -> " if lab.previous_value is not None else "new: "
+        reference = (
+            f" (reference {lab.reference_low}-{lab.reference_high})"
+            if lab.reference_low is not None and lab.reference_high is not None
+            else ""
+        )
+        lines.append(
+            f"- {lab.test_name}: {before}{lab.current_value} {lab.unit}{reference}, "
+            f"collected {lab.collected_at.date()}"
+        )
+    return lines
+
+
+def _format_changes_section(changes: RecordChanges | None) -> str | None:
+    if changes is None:
+        return None
+    header = f"## Changes Since Last Visit ({changes.since.date()})"
+    if changes.is_empty:
+        return f"{header}\n\nNo recorded changes to medications, conditions, allergies or labs."
+    return "\n".join([header, "", *format_changes(changes)])
+
+
 class ReportGeneratorTool(BaseTool):
     name = "report_generator"
     description = "Synthesizes multi-agent findings into a structured markdown report."
@@ -64,6 +96,10 @@ class ReportGeneratorTool(BaseTool):
 
         # Deterministic, always-shown facts from the patient's own record --
         # not gated on whether an LLM-driven agent happened to mention them.
+        changes_section = _format_changes_section(patient.changes_since_last_visit)
+        if changes_section:
+            sections.append(changes_section)
+
         allergies_section = _format_allergies_section(patient)
         if allergies_section:
             sections.append(allergies_section)

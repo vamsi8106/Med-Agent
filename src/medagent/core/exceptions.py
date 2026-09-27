@@ -113,6 +113,16 @@ class PatientNotFoundError(MedAgentError):
     status_code = 404
 
 
+class PatientOwnershipError(MedAgentError):
+    """Raised when a save targets a patient id owned by another doctor. The
+    message is fixed and says nothing about the other record."""
+
+    status_code = 409
+
+    def __init__(self, message: str = "This patient ID cannot be used.") -> None:
+        super().__init__(message)
+
+
 class AllAgentsFailedError(MedAgentError):
     """Raised when every specialist agent routed for a request failed, so there
     is nothing clinical to report -- an upstream dependency problem, so 502, or

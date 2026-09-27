@@ -62,8 +62,62 @@ class PatientContext(BaseModel):
     medications: list[Medication] = Field(default_factory=list)
     lab_results: list[LabResult] = Field(default_factory=list)
     visits: list[Visit] = Field(default_factory=list)
+    # What changed in the record since the newest visit, computed in code by
+    # PatientStore.get_patient. None when there is no earlier visit to compare with.
+    changes_since_last_visit: "RecordChanges | None" = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
+
+
+class MedicationChange(BaseModel):
+    """A medication whose dose, frequency or route differs from the last visit."""
+
+    name: str
+    before: str
+    after: str
+
+
+class LabChange(BaseModel):
+    """A test with a newer result than the one on record at the last visit.
+    previous_value is None for a test that had no result then."""
+
+    test_name: str
+    unit: str
+    previous_value: float | None = None
+    current_value: float
+    reference_low: float | None = None
+    reference_high: float | None = None
+    collected_at: datetime
+
+
+class RecordChanges(BaseModel):
+    """Facts that changed since the last visit. Values only -- no clinical
+    interpretation (abnormal flags come from the lab interpreter)."""
+
+    since: datetime
+    medications_started: list[str] = Field(default_factory=list)
+    medications_stopped: list[str] = Field(default_factory=list)
+    medications_changed: list[MedicationChange] = Field(default_factory=list)
+    conditions_added: list[str] = Field(default_factory=list)
+    conditions_removed: list[str] = Field(default_factory=list)
+    allergies_added: list[str] = Field(default_factory=list)
+    allergies_removed: list[str] = Field(default_factory=list)
+    lab_changes: list[LabChange] = Field(default_factory=list)
+
+    @property
+    def is_empty(self) -> bool:
+        return not any(
+            [
+                self.medications_started,
+                self.medications_stopped,
+                self.medications_changed,
+                self.conditions_added,
+                self.conditions_removed,
+                self.allergies_added,
+                self.allergies_removed,
+                self.lab_changes,
+            ]
+        )
 
 
 class DrugInteraction(BaseModel):
@@ -146,3 +200,6 @@ class User(BaseModel):
     username: str
     role: str = "doctor"
     created_at: datetime | None = None
+
+
+PatientContext.model_rebuild()

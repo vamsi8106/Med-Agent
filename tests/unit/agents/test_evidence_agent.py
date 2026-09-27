@@ -606,3 +606,33 @@ async def test_unverified_figures_are_counted_as_a_guardrail_flag() -> None:
         _patient(), "dose?"
     )
     assert metric_value("medagent_guardrail_flags_total", kind="unverified_figures") - before == 1
+
+
+async def test_prompt_includes_changes_since_last_visit() -> None:
+    from datetime import UTC, datetime
+
+    from medagent.core.models import RecordChanges
+
+    llm = _RecordingLLMProvider(fixed_response="n/a")
+    guideline_retriever = AsyncMock()
+    guideline_retriever.run.return_value = []
+    agent = EvidenceAgent(
+        llm=llm,
+        medical_client=_FakeMedicalClient("n/a"),  # type: ignore[arg-type]
+        guideline_retriever=guideline_retriever,
+    )
+    patient = PatientContext(
+        id="P-TEST-003",
+        name="Patient Gamma",
+        age=60,
+        sex="F",
+        changes_since_last_visit=RecordChanges(
+            since=datetime(2026, 1, 15, tzinfo=UTC), medications_stopped=["Glimepiride"]
+        ),
+    )
+
+    await agent.gather_evidence(patient, "next steps?")
+
+    user_message = next(m for m in llm.received_messages if m.role == "user")
+    assert "Changes to the record since the last visit (2026-01-15)" in user_message.content
+    assert "Stopped: Glimepiride" in user_message.content
