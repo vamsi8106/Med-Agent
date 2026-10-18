@@ -1,3 +1,6 @@
+# Every published port is bound to 127.0.0.1: reachable from this machine for
+# development, not from the network. Containers talk to each other on the
+# compose network. In production only a TLS reverse proxy should be public.
 services:
   postgres:
     image: postgres:16-alpine
@@ -6,7 +9,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-medagent}
       POSTGRES_DB: medagent
     ports:
-      - "${POSTGRES_HOST_PORT:-5432}:5432"
+      - "127.0.0.1:${POSTGRES_HOST_PORT:-5432}:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
@@ -22,7 +25,7 @@ services:
     # collection creation).
     image: chromadb/chroma:1.5.9
     ports:
-      - "8001:8000"
+      - "127.0.0.1:8001:8000"
     volumes:
       - chroma-data:/data
     healthcheck:
@@ -45,7 +48,7 @@ services:
     # container) reach this service too -- see .env.example's "bare local
     # dev" section.
     ports:
-      - "3001:3000"
+      - "127.0.0.1:3001:3000"
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:3000/health"]
       interval: 10s
@@ -58,7 +61,7 @@ services:
       context: ./vendor/med-research-mcp-suite
       dockerfile: ../../docker/med-research-mcp-suite/Dockerfile
     ports:
-      - "3002:3000"
+      - "127.0.0.1:3002:3000"
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:3000/api/status"]
       interval: 10s
@@ -69,7 +72,7 @@ services:
   medical-mcp-bridge:
     build: ./docker/medical-mcp-bridge
     ports:
-      - "8081:8080"
+      - "127.0.0.1:8081:8080"
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
       interval: 10s
@@ -81,7 +84,7 @@ services:
     build: .
     command: sh -c "alembic upgrade head && uvicorn medagent.app:app --host 0.0.0.0 --port 8000 --no-access-log"
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     environment:
       LLM_PROVIDER: ${LLM_PROVIDER:-groq}
       GROQ_API_KEY: ${GROQ_API_KEY:-}
@@ -103,6 +106,10 @@ services:
       MCP_TIMEOUT_SECONDS: ${MCP_TIMEOUT_SECONDS:-30}
       MCP_RATE_LIMIT_PER_SECOND: ${MCP_RATE_LIMIT_PER_SECOND:-5}
       MCP_RATE_LIMIT_CAPACITY: ${MCP_RATE_LIMIT_CAPACITY:-10}
+      APP_ENV: ${APP_ENV:-development}
+      LOGIN_ATTEMPTS_PER_MINUTE: ${LOGIN_ATTEMPTS_PER_MINUTE:-5}
+      AGENT_RUNS_PER_MINUTE: ${AGENT_RUNS_PER_MINUTE:-6}
+      MAX_REQUEST_BODY_BYTES: ${MAX_REQUEST_BODY_BYTES:-1000000}
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://tempo:4318}
       OTEL_SAMPLE_RATIO: ${OTEL_SAMPLE_RATIO:-1.0}
       OTEL_CONSOLE_EXPORTER: ${OTEL_CONSOLE_EXPORTER:-false}
@@ -137,7 +144,7 @@ services:
     # write a fresh root-owned volume).
     user: "0"
     ports:
-      - "3200:3200"
+      - "127.0.0.1:3200:3200"
     volumes:
       - ./ops/tempo/tempo.yaml:/etc/tempo/tempo.yaml:ro
       - tempo-data:/var/tempo
@@ -145,7 +152,7 @@ services:
   prometheus:
     image: prom/prometheus:v3.0.1
     ports:
-      - "9090:9090"
+      - "127.0.0.1:9090:9090"
     volumes:
       - ./ops/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus-data:/prometheus
@@ -156,7 +163,7 @@ services:
   grafana:
     image: grafana/grafana:11.4.0
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     environment:
       GF_SECURITY_ADMIN_USER: admin
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}

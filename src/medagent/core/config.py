@@ -1,10 +1,23 @@
 """Application settings, loaded from environment variables / .env."""
 
+from typing import Literal, Self
+
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# The placeholder shipped in .env.example and docker-compose.yml. Anyone who has
+# read either file can sign tokens with it, so production refuses to start on it.
+INSECURE_JWT_SECRET = "dev-insecure-secret-change-me-in-prod-please"
+MIN_JWT_SECRET_LENGTH = 32
+MIN_PASSWORD_LENGTH = 12
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+    # "production" turns misconfiguration into a startup error (weak JWT secret,
+    # short bootstrap password), hides the interactive API docs and adds HSTS.
+    app_env: Literal["development", "production"] = "development"
 
     llm_provider: str = "groq"
     groq_api_key: str | None = None
@@ -79,7 +92,7 @@ class Settings(BaseSettings):
     langchain_api_key: str | None = None
     langchain_project: str = "medagent"
 
-    jwt_secret_key: str = "dev-insecure-secret-change-me-in-prod-please"
+    jwt_secret_key: str = INSECURE_JWT_SECRET
     jwt_algorithm: str = "HS256"
     jwt_expire_minutes: int = 60
 
@@ -88,6 +101,42 @@ class Settings(BaseSettings):
     # created by an admin via POST /admin/users.
     admin_bootstrap_username: str | None = None
     admin_bootstrap_password: str | None = None
+
+    # Abuse limits, per process (like the circuit breakers). Login attempts are
+    # limited per username and per client IP; agent runs (assess, follow-up,
+    # drug check, WebSocket drafts) per user, because each one spends LLM quota.
+    login_attempts_per_minute: float = 5.0
+    login_attempts_burst: int = 5
+    login_attempts_per_ip_per_minute: float = 20.0
+    login_attempts_per_ip_burst: int = 20
+    agent_runs_per_minute: float = 6.0
+    agent_runs_burst: int = 3
+    # Requests with a larger body are refused with 413 before they are parsed.
+    max_request_body_bytes: int = 1_000_000
+
+    @model_validator(mode="after")
+    def _refuse_insecure_production_config(self) -> Self:
+        if self.app_env != "production":
+            return self
+        problems = []
+        if (
+            self.jwt_secret_key == INSECURE_JWT_SECRET
+            or len(self.jwt_secret_key) < MIN_JWT_SECRET_LENGTH
+        ):
+            problems.append(
+                f"JWT_SECRET_KEY must be a unique secret of at least {MIN_JWT_SECRET_LENGTH} "
+                "characters (e.g. `openssl rand -hex 32`)"
+            )
+        if (
+            self.admin_bootstrap_password is not None
+            and len(self.admin_bootstrap_password) < MIN_PASSWORD_LENGTH
+        ):
+            problems.append(
+                f"ADMIN_BOOTSTRAP_PASSWORD must be at least {MIN_PASSWORD_LENGTH} characters"
+            )
+        if problems:
+            raise ValueError("Refusing to start with APP_ENV=production: " + "; ".join(problems))
+        return self
 
 
 _settings: Settings | None = None

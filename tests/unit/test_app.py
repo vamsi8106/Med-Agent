@@ -1,12 +1,17 @@
 import asyncio
+import json
 from collections.abc import Iterator
 from contextlib import contextmanager
+from typing import Any
 from unittest.mock import AsyncMock, patch
 
+import pytest
+from fastapi import WebSocketDisconnect
 from fastapi.testclient import TestClient
 from starlette.testclient import WebSocketTestSession
 
 from medagent.app import create_app
+from medagent.auth.security import verify_password
 from medagent.core.config import Settings
 from medagent.core.exceptions import (
     AllAgentsFailedError,
@@ -21,7 +26,8 @@ from medagent.memory.patient_store import PatientStore
 from medagent.memory.persistent import PersistentStore
 
 _ADMIN_USERNAME = "admin"
-_ADMIN_PASSWORD = "admin-pass!"
+_ADMIN_PASSWORD = "admin-pass-1234"
+_PASSWORD = "s3cret-password-1"
 
 
 class _FakeEmbeddingModel:
@@ -51,18 +57,24 @@ class _FakeVectorStore:
         return True
 
 
-def _settings(pg_dsn: str) -> Settings:
-    return Settings(
-        _env_file=None,
-        llm_provider="mock",
-        postgres_dsn=pg_dsn,
-        admin_bootstrap_username=_ADMIN_USERNAME,
-        admin_bootstrap_password=_ADMIN_PASSWORD,
-    )
+def _settings(pg_dsn: str, **overrides: Any) -> Settings:
+    # Abuse limits are generous by default so tests that log in or assess many
+    # times are not throttled; the limit tests pass their own values.
+    fields: dict[str, Any] = {
+        "llm_provider": "mock",
+        "postgres_dsn": pg_dsn,
+        "admin_bootstrap_username": _ADMIN_USERNAME,
+        "admin_bootstrap_password": _ADMIN_PASSWORD,
+        "login_attempts_burst": 1000,
+        "login_attempts_per_ip_burst": 1000,
+        "agent_runs_burst": 1000,
+    }
+    fields.update(overrides)
+    return Settings(_env_file=None, **fields)
 
 
 @contextmanager
-def _make_client(pg_dsn: str) -> Iterator[TestClient]:
+def _make_client(pg_dsn: str, **overrides: Any) -> Iterator[TestClient]:
     # AppState (and therefore VectorStore/EmbeddingModel construction) only
     # happens inside FastAPI's lifespan, which TestClient triggers on
     # __enter__ -- so these patches must still be active at that point, not
@@ -71,7 +83,7 @@ def _make_client(pg_dsn: str) -> Iterator[TestClient]:
         patch("medagent.api.state.EmbeddingModel", _FakeEmbeddingModel),
         patch("medagent.api.state.VectorStore", _FakeVectorStore),
         patch("medagent.api.state.EvidenceAgent", _FakeEvidenceAgent),
-        TestClient(create_app(_settings(pg_dsn))) as client,
+        TestClient(create_app(_settings(pg_dsn, **overrides))) as client,
     ):
         yield client
 
@@ -93,10 +105,10 @@ def _auth_headers(client: TestClient, username: str = "dr.alpha") -> dict[str, s
     """Log in as the bootstrapped admin, create a doctor account, log in as them."""
     client.post(
         "/admin/users",
-        json={"username": username, "password": "s3cret!"},
+        json={"username": username, "password": _PASSWORD},
         headers=_admin_headers(client),
     )
-    token = _login(client, username, "s3cret!")
+    token = _login(client, username, _PASSWORD)
     return {"Authorization": f"Bearer {token}"}
 
 
@@ -128,7 +140,7 @@ def test_admin_endpoint_requires_admin_role(pg_dsn: str) -> None:
         doctor_headers = _auth_headers(client, username="dr.notadmin")
         response = client.post(
             "/admin/users",
-            json={"username": "dr.other", "password": "s3cret!"},
+            json={"username": "dr.other", "password": _PASSWORD},
             headers=doctor_headers,
         )
     assert response.status_code == 403
@@ -136,7 +148,7 @@ def test_admin_endpoint_requires_admin_role(pg_dsn: str) -> None:
 
 def test_admin_endpoint_rejects_unauthenticated(pg_dsn: str) -> None:
     with _make_client(pg_dsn) as client:
-        response = client.post("/admin/users", json={"username": "dr.new", "password": "s3cret!"})
+        response = client.post("/admin/users", json={"username": "dr.new", "password": _PASSWORD})
     assert response.status_code == 401
 
 
@@ -144,14 +156,14 @@ def test_admin_creates_user_and_they_can_log_in(pg_dsn: str) -> None:
     with _make_client(pg_dsn) as client:
         create_resp = client.post(
             "/admin/users",
-            json={"username": "dr.beta", "password": "s3cret!"},
+            json={"username": "dr.beta", "password": _PASSWORD},
             headers=_admin_headers(client),
         )
         assert create_resp.status_code == 200
         assert create_resp.json()["username"] == "dr.beta"
         assert create_resp.json()["role"] == "doctor"
 
-        login_resp = client.post("/auth/token", data={"username": "dr.beta", "password": "s3cret!"})
+        login_resp = client.post("/auth/token", data={"username": "dr.beta", "password": _PASSWORD})
     assert login_resp.status_code == 200
 
 
@@ -159,7 +171,7 @@ def test_login_with_wrong_password_returns_401(pg_dsn: str) -> None:
     with _make_client(pg_dsn) as client:
         client.post(
             "/admin/users",
-            json={"username": "dr.gamma", "password": "s3cret!"},
+            json={"username": "dr.gamma", "password": _PASSWORD},
             headers=_admin_headers(client),
         )
         response = client.post("/auth/token", data={"username": "dr.gamma", "password": "wrong"})
@@ -170,10 +182,14 @@ def test_duplicate_username_returns_409(pg_dsn: str) -> None:
     with _make_client(pg_dsn) as client:
         headers = _admin_headers(client)
         client.post(
-            "/admin/users", json={"username": "dr.delta", "password": "s3cret!"}, headers=headers
+            "/admin/users",
+            json={"username": "dr.delta", "password": _PASSWORD},
+            headers=headers,
         )
         response = client.post(
-            "/admin/users", json={"username": "dr.delta", "password": "other"}, headers=headers
+            "/admin/users",
+            json={"username": "dr.delta", "password": "other-password-2"},
+            headers=headers,
         )
     assert response.status_code == 409
 
@@ -387,15 +403,43 @@ def test_patient_not_found_error_maps_to_404(pg_dsn: str) -> None:
     assert response.json() == {"detail": "no such patient"}
 
 
-def test_websocket_without_token_is_rejected(pg_dsn: str) -> None:
+def _assert_closed_for_policy(websocket: WebSocketTestSession) -> None:
+    with pytest.raises(WebSocketDisconnect) as closed:
+        websocket.receive_json()
+    assert closed.value.code == 1008
+
+
+@pytest.mark.parametrize(
+    "first_message",
+    [
+        "any updates?",  # not an auth frame
+        json.dumps({"type": "auth"}),  # no token
+        json.dumps({"type": "auth", "token": "not-a-jwt"}),
+    ],
+)
+def test_websocket_without_valid_auth_message_is_closed(pg_dsn: str, first_message: str) -> None:
+    with _make_client(pg_dsn) as client, client.websocket_connect("/ws/P-TEST-999") as websocket:
+        websocket.send_text(first_message)
+        _assert_closed_for_policy(websocket)
+
+
+def test_websocket_token_in_url_is_not_accepted(pg_dsn: str) -> None:
     with _make_client(pg_dsn) as client:
-        try:
-            with client.websocket_connect("/ws/P-TEST-999"):
-                pass
-        except Exception:
-            pass
-        else:
-            raise AssertionError("expected the connection to be rejected")
+        token = _admin_token(client)
+        with client.websocket_connect(f"/ws/P-TEST-999?token={token}") as websocket:
+            websocket.send_text("any updates?")
+            _assert_closed_for_policy(websocket)
+
+
+def test_websocket_rejects_oversized_message(pg_dsn: str) -> None:
+    with _make_client(pg_dsn) as client:
+        token = _admin_token(client)
+        _create_patient(client, token, "P-TEST-809", "Patient Iota")
+        with _ws(client, "P-TEST-809", token) as websocket:
+            websocket.send_text("x" * 4001)
+            frame = websocket.receive_json()
+            assert frame["type"] == "error"
+            assert "1-4000" in frame["detail"]
 
 
 def _create_patient(client: TestClient, token: str, patient_id: str, name: str) -> None:
@@ -407,8 +451,15 @@ def _create_patient(client: TestClient, token: str, patient_id: str, name: str) 
     assert response.status_code == 200
 
 
-def _ws_url(patient_id: str, token: str, resume: bool = False) -> str:
-    return f"/ws/{patient_id}?token={token}" + ("&resume=1" if resume else "")
+@contextmanager
+def _ws(
+    client: TestClient, patient_id: str, token: str, resume: bool = False
+) -> Iterator[WebSocketTestSession]:
+    """Connects and authenticates with the first message, as real clients must."""
+    url = f"/ws/{patient_id}" + ("?resume=1" if resume else "")
+    with client.websocket_connect(url) as websocket:
+        websocket.send_json({"type": "auth", "token": token})
+        yield websocket
 
 
 def _draft(websocket: WebSocketTestSession, message: str) -> tuple[list[dict], dict]:
@@ -435,7 +486,7 @@ def test_websocket_chat_streams_progress_then_requires_approval_before_saving(
     with _make_client(pg_dsn) as client:
         token = _admin_token(client)
         _create_patient(client, token, "P-TEST-803", "Patient Gamma")
-        with client.websocket_connect(_ws_url("P-TEST-803", token)) as websocket:
+        with _ws(client, "P-TEST-803", token) as websocket:
             progress, pending = _draft(websocket, "any updates?")
             assert [(f["step"], f["status"]) for f in progress] == [
                 ("triage", "completed"),
@@ -460,7 +511,7 @@ def test_websocket_chat_reject_does_not_save(pg_dsn: str) -> None:
     with _make_client(pg_dsn) as client:
         token = _admin_token(client)
         _create_patient(client, token, "P-TEST-804", "Patient Delta")
-        with client.websocket_connect(_ws_url("P-TEST-804", token)) as websocket:
+        with _ws(client, "P-TEST-804", token) as websocket:
             _draft(websocket, "any updates?")
             websocket.send_text("reject")
             assert websocket.receive_json() == {"type": "rejected"}
@@ -472,7 +523,7 @@ def test_websocket_chat_edited_text_is_saved_instead(pg_dsn: str) -> None:
     with _make_client(pg_dsn) as client:
         token = _admin_token(client)
         _create_patient(client, token, "P-TEST-805", "Patient Epsilon")
-        with client.websocket_connect(_ws_url("P-TEST-805", token)) as websocket:
+        with _ws(client, "P-TEST-805", token) as websocket:
             _draft(websocket, "any updates?")
             websocket.send_text("Edited: monitor renal function closely.")
             saved = websocket.receive_json()
@@ -486,12 +537,12 @@ def test_websocket_draft_survives_a_dropped_connection_and_resumes(pg_dsn: str) 
     with _make_client(pg_dsn) as client:
         token = _admin_token(client)
         _create_patient(client, token, "P-TEST-806", "Patient Zeta")
-        with client.websocket_connect(_ws_url("P-TEST-806", token)) as websocket:
+        with _ws(client, "P-TEST-806", token) as websocket:
             _, pending = _draft(websocket, "how is she doing?")
         # connection dropped with the draft still awaiting a decision
         assert _visits(pg_dsn, "P-TEST-806") == []
 
-        with client.websocket_connect(_ws_url("P-TEST-806", token, resume=True)) as websocket:
+        with _ws(client, "P-TEST-806", token, resume=True) as websocket:
             resumed = websocket.receive_json()
             assert resumed == {
                 "type": "pending_approval",
@@ -513,10 +564,10 @@ def test_reconnecting_without_resume_discards_the_draft_so_a_new_question_is_not
     with _make_client(pg_dsn) as client:
         token = _admin_token(client)
         _create_patient(client, token, "P-TEST-807", "Patient Eta")
-        with client.websocket_connect(_ws_url("P-TEST-807", token)) as websocket:
+        with _ws(client, "P-TEST-807", token) as websocket:
             _draft(websocket, "first question")
 
-        with client.websocket_connect(_ws_url("P-TEST-807", token)) as websocket:
+        with _ws(client, "P-TEST-807", token) as websocket:
             # Without resume=1 this is a fresh question, NOT the reply to the
             # stale draft -- it must not be saved as an "edited" report.
             _, pending = _draft(websocket, "a brand new question")
@@ -531,14 +582,12 @@ def test_another_user_cannot_resume_someone_elses_draft(pg_dsn: str) -> None:
     with _make_client(pg_dsn) as client:
         admin_token = _admin_token(client)
         _create_patient(client, admin_token, "P-TEST-808", "Patient Theta")
-        with client.websocket_connect(_ws_url("P-TEST-808", admin_token)) as websocket:
+        with _ws(client, "P-TEST-808", admin_token) as websocket:
             _draft(websocket, "any updates?")
 
         headers = _auth_headers(client, "dr.intruder")
         intruder_token = headers["Authorization"].removeprefix("Bearer ")
-        with client.websocket_connect(
-            _ws_url("P-TEST-808", intruder_token, resume=True)
-        ) as websocket:
+        with _ws(client, "P-TEST-808", intruder_token, resume=True) as websocket:
             websocket.send_text("any updates?")
             frame = websocket.receive_json()
             # no draft handed over, and the patient isn't theirs to draft for
@@ -645,7 +694,7 @@ def test_the_websocket_error_frame_carries_retry_after(pg_dsn: str) -> None:
     ):
         token = _admin_token(client)
         _create_patient(client, token, "P-TEST-822", "Patient Lambda")
-        with client.websocket_connect(_ws_url("P-TEST-822", token)) as websocket:
+        with _ws(client, "P-TEST-822", token) as websocket:
             websocket.send_text("any updates?")
             while (frame := websocket.receive_json())["type"] == "progress":
                 pass
@@ -740,3 +789,164 @@ def test_posting_another_doctors_patient_id_is_refused_and_changes_nothing(pg_ds
         record = client.get("/patients/P-TEST-OWN", headers=owner).json()
         assert record["name"] == "Patient Alpha"
         assert [m["name"] for m in record["medications"]] == ["Metformin"]
+
+
+# --- abuse limits, input bounds, headers (security hardening) ---
+
+
+def test_login_is_limited_per_username_even_with_the_right_password(pg_dsn: str) -> None:
+    with _make_client(pg_dsn, login_attempts_burst=3, login_attempts_per_minute=1) as client:
+        statuses = [
+            client.post(
+                "/auth/token", data={"username": _ADMIN_USERNAME, "password": "wrong-guess-123"}
+            ).status_code
+            for _ in range(3)
+        ]
+        limited = client.post(
+            "/auth/token", data={"username": _ADMIN_USERNAME, "password": _ADMIN_PASSWORD}
+        )
+        other_user = client.post(
+            "/auth/token", data={"username": "dr.unknown", "password": "whatever-123"}
+        )
+
+    assert statuses == [401, 401, 401]
+    assert limited.status_code == 429
+    assert int(limited.headers["Retry-After"]) >= 1
+    assert other_user.status_code == 401  # a different account is not locked out
+
+
+def test_login_is_limited_per_client_ip(pg_dsn: str) -> None:
+    with _make_client(pg_dsn, login_attempts_per_ip_burst=2) as client:
+        codes = [
+            client.post(
+                "/auth/token", data={"username": f"dr.user{i}", "password": "wrong-guess-123"}
+            ).status_code
+            for i in range(3)
+        ]
+    assert codes == [401, 401, 429]
+
+
+def test_unknown_username_still_checks_a_password_hash(pg_dsn: str) -> None:
+    with (
+        _make_client(pg_dsn) as client,
+        patch("medagent.api.routes.auth.verify_password", wraps=verify_password) as spy,
+    ):
+        response = client.post(
+            "/auth/token", data={"username": "dr.nobody", "password": "whatever-123"}
+        )
+    assert response.status_code == 401
+    spy.assert_called_once()
+
+
+def test_agent_runs_are_limited_per_user(pg_dsn: str) -> None:
+    with _make_client(pg_dsn, agent_runs_burst=2, agent_runs_per_minute=1) as client:
+        alice = _auth_headers(client, "dr.alice")
+        bob = _auth_headers(client, "dr.bob")
+        _create_patient(client, alice["Authorization"].removeprefix("Bearer "), "P-TEST-950", "A")
+        with patch("medagent.api.routes.patients.run_drug_check", AsyncMock(return_value="ok")):
+            body = {"patient_id": "P-TEST-950", "new_drug": "Ibuprofen"}
+            codes = [
+                client.post("/drug-check", json=body, headers=alice).status_code for _ in range(3)
+            ]
+            bob_code = client.post("/drug-check", json=body, headers=bob).status_code
+
+    assert codes == [200, 200, 429]
+    assert bob_code != 429  # (bob gets 404 or similar: not his patient, but not throttled)
+
+
+@pytest.mark.parametrize(
+    ("path", "body"),
+    [
+        ("/patients/P-TEST-951/assess", {"message": "x" * 4001}),
+        ("/patients/P-TEST-951/assess", {"message": ""}),
+        ("/patients", {"id": "P TEST/../1", "name": "Patient Alpha", "age": 70, "sex": "M"}),
+        ("/patients", {"id": "P-TEST-952", "name": "Patient Alpha", "age": 400, "sex": "M"}),
+        (
+            "/patients",
+            {
+                "id": "P-TEST-953",
+                "name": "Patient Alpha",
+                "age": 70,
+                "sex": "M",
+                "medications": [{"name": f"Drug{i}"} for i in range(101)],
+            },
+        ),
+        ("/drug-check", {"patient_id": "P-TEST-951", "new_drug": "x" * 201}),
+    ],
+)
+def test_out_of_bounds_input_is_rejected(pg_dsn: str, path: str, body: dict) -> None:
+    with _make_client(pg_dsn) as client:
+        response = client.post(path, json=body, headers=_admin_headers(client))
+    assert response.status_code == 422
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"username": "dr.short", "password": "short"},
+        {"username": "dr.role", "password": _PASSWORD, "role": "Admin"},
+        {"username": "bad name!", "password": _PASSWORD},
+    ],
+)
+def test_account_creation_validates_password_role_and_username(pg_dsn: str, body: dict) -> None:
+    with _make_client(pg_dsn) as client:
+        response = client.post("/admin/users", json=body, headers=_admin_headers(client))
+    assert response.status_code == 422
+
+
+def test_oversized_body_is_refused_before_parsing(pg_dsn: str) -> None:
+    with _make_client(pg_dsn, max_request_body_bytes=1000) as client:
+        response = client.post(
+            "/patients",
+            content=b"{" + b" " * 2000 + b"}",
+            headers={**_admin_headers(client), "Content-Type": "application/json"},
+        )
+    assert response.status_code == 413
+    assert response.headers["X-Content-Type-Options"] == "nosniff"
+
+
+def test_oversized_streamed_body_without_content_length_is_refused(pg_dsn: str) -> None:
+    def chunks() -> Iterator[bytes]:
+        for _ in range(5):
+            yield b" " * 500
+
+    with _make_client(pg_dsn, max_request_body_bytes=1000) as client:
+        response = client.post(
+            "/patients",
+            content=chunks(),
+            headers={**_admin_headers(client), "Content-Type": "application/json"},
+        )
+    assert response.status_code == 413
+
+
+def test_security_headers_on_every_response(pg_dsn: str) -> None:
+    with _make_client(pg_dsn) as client:
+        response = client.get("/health")
+    assert response.headers["X-Content-Type-Options"] == "nosniff"
+    assert response.headers["X-Frame-Options"] == "DENY"
+    assert response.headers["Referrer-Policy"] == "no-referrer"
+    assert response.headers["Cache-Control"] == "no-store"
+    assert "Strict-Transport-Security" not in response.headers
+    assert client.get("/docs").status_code == 200  # development keeps the docs
+
+
+def test_production_hides_docs_and_adds_hsts(pg_dsn: str) -> None:
+    with _make_client(pg_dsn, app_env="production", jwt_secret_key="x" * 40) as client:
+        assert client.get("/docs").status_code == 404
+        assert client.get("/openapi.json").status_code == 404
+        response = client.get("/health")
+    assert response.headers["Strict-Transport-Security"].startswith("max-age=")
+
+
+def test_audit_log_honours_limit_and_rejects_huge_pages(pg_dsn: str) -> None:
+    with _make_client(pg_dsn) as client:
+        headers = _admin_headers(client)
+        _create_patient(client, headers["Authorization"].removeprefix("Bearer "), "P-TEST-954", "A")
+        for _ in range(4):
+            client.get("/patients/P-TEST-954", headers=headers)
+
+        page = client.get("/patients/P-TEST-954/audit-log?limit=2", headers=headers)
+        too_big = client.get("/patients/P-TEST-954/audit-log?limit=501", headers=headers)
+
+    assert len(page.json()) == 2
+    assert too_big.status_code == 422

@@ -35,6 +35,9 @@ jobs:
       - name: Run format check, lint, type check, and unit tests
         run: make ci-check
 
+      - name: Scan dependencies for known vulnerabilities
+        run: make deps-audit
+
   eval:
     runs-on: ubuntu-latest
     # PRs into main only, not every push -- this hits real Groq (costs money)

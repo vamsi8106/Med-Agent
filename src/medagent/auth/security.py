@@ -45,7 +45,9 @@ def decode_access_token(token: str, secret_key: str, algorithm: str) -> str:
     except jwt.ExpiredSignatureError as exc:
         raise AuthError("Access token has expired") from exc
     except jwt.InvalidTokenError as exc:
-        raise AuthError(f"Invalid access token: {exc}") from exc
+        # The library's message describes what was wrong with the token; the
+        # client only needs to know it was refused.
+        raise AuthError("Invalid access token") from exc
 
     subject = payload.get("sub")
     if not subject:

@@ -128,4 +128,7 @@ Canonical names for every domain concept in MedAgent. Use these exact terms in c
 | **Append-only record** | Medications and lab results are never deleted or overwritten. Stopping a medication marks its row stopped with an end date; a dose change closes the old row and opens a new one; each lab result is its own row. The API shows the current view (active medications, latest result per test). |
 | **Record snapshot** | A copy of the record (conditions, allergies, active medications, latest labs) stored on each visit. It is the baseline the next visit is compared against. |
 | **Changes Since Last Visit** | The deterministic difference between the current record and the last visit's snapshot, computed in code. Shown as a report section and given to the evidence agent. Values only, no clinical interpretation. |
+| **Abuse limits** | Per-process token buckets on login attempts (per username and per client IP) and agent runs (per user). Over the limit the API answers 429 with `Retry-After`. Settings `LOGIN_ATTEMPTS_*`, `AGENT_RUNS_*`. |
+| **APP_ENV** | `development` (default) or `production`. Production refuses to start with a weak JWT secret or short bootstrap password, hides `/docs`, and adds HSTS. |
+| **WebSocket auth message** | The first message on `/ws/{patient_id}` must be `{"type":"auth","token":"<JWT>"}` within 10 s; tokens are never accepted in the URL. |
 | **Settings** | The `Settings` singleton from pydantic-settings. Reads from env vars → `.env` → defaults. Single source of truth for all config. |

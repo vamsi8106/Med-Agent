@@ -1,4 +1,5 @@
-"""FastAPI auth dependencies: Bearer JWT for HTTP routes, query-token for WebSocket."""
+"""FastAPI auth dependencies: Bearer JWT for HTTP routes; a token check for the
+WebSocket handshake (the token arrives in its first message, see api/routes/ws.py)."""
 
 from fastapi import Depends, HTTPException, Request, WebSocket
 from fastapi.security import OAuth2PasswordBearer
@@ -39,10 +40,7 @@ async def require_admin(user: User = Depends(get_current_user)) -> User:
     return user
 
 
-async def get_current_user_ws(websocket: WebSocket) -> User | None:
-    token = websocket.query_params.get("token")
-    if token is None:
-        return None
+async def user_for_ws_token(websocket: WebSocket, token: str) -> User | None:
     try:
         return await _resolve_user(websocket.app.state.medagent, token)
     except HTTPException:

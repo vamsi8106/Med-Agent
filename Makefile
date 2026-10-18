@@ -1,4 +1,4 @@
-.PHONY: import-check install test unit-tests eval lint-check lint-fix format-fix format-check type-check pre-commit ci-check serve docker-up-deps docker-up docker-down docker-logs db-upgrade db-downgrade db-revision ingest-guideline
+.PHONY: deps-audit import-check install test unit-tests eval lint-check lint-fix format-fix format-check type-check pre-commit ci-check serve docker-up-deps docker-up docker-down docker-logs db-upgrade db-downgrade db-revision ingest-guideline
 
 install:
 	uv sync
@@ -29,6 +29,17 @@ type-check:
 
 import-check:
 	uv run lint-imports
+
+# Known-vulnerability scan of the locked runtime dependencies. torch is skipped
+# by pip-audit (the CPU wheel is not on PyPI). The ignored chromadb advisories
+# have no fixed release yet and concern the Chroma *server* (we use the package
+# as an HTTP client); the server container is reachable only on the compose
+# network / localhost. Remove each ignore as soon as a fix ships.
+CHROMADB_UNFIXED := PYSEC-2026-311 PYSEC-2026-3813 PYSEC-2026-3814 PYSEC-2026-3815
+deps-audit:
+	uv export --frozen --no-dev --no-hashes --no-emit-project --quiet \
+	  | uv run pip-audit --disable-pip --no-deps --progress-spinner off -r /dev/stdin \
+	    $(foreach id,$(CHROMADB_UNFIXED),--ignore-vuln $(id))
 
 pre-commit: format-fix lint-fix lint-check type-check import-check unit-tests
 

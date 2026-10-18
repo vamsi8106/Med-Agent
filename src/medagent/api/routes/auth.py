@@ -1,16 +1,22 @@
 """Accounts and login."""
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.security import OAuth2PasswordRequestForm
 
 from medagent.api.schemas import CreateUserRequest, Token
-from medagent.api.state import AppState, get_state
+from medagent.api.state import AppState, enforce_limit, get_state
 from medagent.auth.dependencies import require_admin
 from medagent.auth.security import create_access_token, hash_password, verify_password
 from medagent.core.exceptions import AuthError
 from medagent.core.models import User
 
 router = APIRouter()
+
+# Checked when the username does not exist, so a login for an unknown user takes
+# as long as one with a wrong password and timing does not reveal which
+# usernames exist.
+_DUMMY_PASSWORD_HASH = hash_password("timing-equaliser-not-a-real-password")
+_LOGIN_LIMITED = "Too many login attempts; try again later"
 
 
 @router.post("/admin/users", response_model=User)
@@ -32,10 +38,25 @@ async def create_user(
 
 @router.post("/auth/token", response_model=Token)
 async def login(
-    form: OAuth2PasswordRequestForm = Depends(), state: AppState = Depends(get_state)
+    request: Request,
+    form: OAuth2PasswordRequestForm = Depends(),
+    state: AppState = Depends(get_state),
 ) -> Token:
+    # Limited before the password is checked, and counted even when it is right,
+    # so guessing is capped per account and per source. Behind a reverse proxy,
+    # run uvicorn with --proxy-headers so client.host is the real client.
+    client_ip = request.client.host if request.client else "unknown"
+    enforce_limit(state.login_by_ip, client_ip, limit="login_ip", message=_LOGIN_LIMITED)
+    enforce_limit(
+        state.login_by_username,
+        form.username.lower(),
+        limit="login_username",
+        message=_LOGIN_LIMITED,
+    )
+
     record = await state.user_store.get_by_username(form.username)
-    if record is None or not verify_password(form.password, record[1]):
+    password_ok = verify_password(form.password, record[1] if record else _DUMMY_PASSWORD_HASH)
+    if record is None or not password_ok:
         raise HTTPException(status_code=401, detail="Incorrect username or password")
     token = create_access_token(
         form.username,

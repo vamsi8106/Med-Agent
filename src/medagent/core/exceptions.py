@@ -113,6 +113,17 @@ class PatientNotFoundError(MedAgentError):
     status_code = 404
 
 
+class RateLimitedError(MedAgentError):
+    """Our own abuse limit (login attempts, agent runs per user) was hit.
+    429 with Retry-After, like an upstream rate limit."""
+
+    status_code = 429
+
+    def __init__(self, message: str, retry_after: float) -> None:
+        super().__init__(message)
+        self.retry_after = retry_after
+
+
 class PatientOwnershipError(MedAgentError):
     """Raised when a save targets a patient id owned by another doctor. The
     message is fixed and says nothing about the other record."""

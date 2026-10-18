@@ -1,5 +1,7 @@
 """Interactive chat over WebSocket with a human-in-the-loop approval gate."""
 
+import asyncio
+import json
 import uuid
 from datetime import timedelta
 
@@ -7,8 +9,9 @@ import structlog
 from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
 
 from medagent.api.errors import doctor_scope, error_payload, require_doctor_id
-from medagent.api.state import AppState, get_state
-from medagent.auth.dependencies import get_current_user_ws
+from medagent.api.schemas import MAX_MESSAGE_CHARS
+from medagent.api.state import AppState, enforce_limit, get_state
+from medagent.auth.dependencies import user_for_ws_token
 from medagent.core.exceptions import MedAgentError
 from medagent.core.models import User
 from medagent.infra.logging import get_logger
@@ -27,6 +30,25 @@ tracer = get_tracer(__name__)
 
 router = APIRouter()
 
+AUTH_TIMEOUT_SECONDS = 10.0
+_POLICY_VIOLATION = 1008
+
+
+async def _authenticate(websocket: WebSocket, state: AppState) -> User | None:
+    """The token comes in the first message, {"type": "auth", "token": "..."},
+    not in the URL: URLs end up in proxy and load-balancer logs."""
+    try:
+        raw = await asyncio.wait_for(websocket.receive_text(), timeout=AUTH_TIMEOUT_SECONDS)
+        frame = json.loads(raw)
+    except (TimeoutError, json.JSONDecodeError, WebSocketDisconnect):
+        return None
+    if not isinstance(frame, dict) or frame.get("type") != "auth":
+        return None
+    token = frame.get("token")
+    if not isinstance(token, str) or not token:
+        return None
+    return await user_for_ws_token(websocket, token)
+
 
 @router.websocket("/ws/{patient_id}")
 async def chat(websocket: WebSocket, patient_id: str, state: AppState = Depends(get_state)) -> None:
@@ -42,15 +64,18 @@ async def chat(websocket: WebSocket, patient_id: str, state: AppState = Depends(
     A draft survives a dropped connection. Reconnect with ?resume=1 to get
     it back ("resumed": true) and decide; connecting without it discards
     any stale draft, so a fresh question is never mistaken for an edit.
+
+    The first message must authenticate: {"type": "auth", "token": "<JWT>"},
+    within AUTH_TIMEOUT_SECONDS; otherwise the socket is closed with 1008.
     """
-    user = await get_current_user_ws(websocket)
+    await websocket.accept()
+    user = await _authenticate(websocket, state)
     if user is None:
-        await websocket.close(code=1008, reason="Not authenticated")
+        await websocket.close(code=_POLICY_VIOLATION, reason="Not authenticated")
         return
 
     graph = state.followup_graph
     thread_id = f"{user.id}:{patient_id}"
-    await websocket.accept()
     # The HTTP middleware doesn't see WebSockets: correlate this session's
     # log lines with an id of its own.
     structlog.contextvars.clear_contextvars()
@@ -73,7 +98,21 @@ async def chat(websocket: WebSocket, patient_id: str, state: AppState = Depends(
 
         while True:
             message = await websocket.receive_text()
+            if not message.strip() or len(message) > MAX_MESSAGE_CHARS:
+                await websocket.send_json(
+                    {
+                        "type": "error",
+                        "detail": f"Message must be 1-{MAX_MESSAGE_CHARS} characters",
+                    }
+                )
+                continue
             try:
+                enforce_limit(
+                    state.agent_runs,
+                    user.id,
+                    limit="agent_runs",
+                    message="Too many agent runs; try again later",
+                )
                 with tracer.start_as_current_span("ws.draft"):
                     draft = await draft_followup(
                         graph,

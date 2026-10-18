@@ -10,7 +10,10 @@ from medagent.agents.trial_finder_agent import TrialFinderAgent
 from medagent.auth.security import hash_password
 from medagent.auth.store import UserStore
 from medagent.core.config import Settings
+from medagent.core.exceptions import RateLimitedError
 from medagent.infra.logging import get_logger
+from medagent.infra.metrics import abuse_limit_hits_total
+from medagent.infra.rate_limiter import KeyedRateLimiter
 from medagent.llm.registry import ProviderRegistry
 from medagent.memory.audit_log import AuditLogStore
 from medagent.memory.patient_store import PatientStore
@@ -36,6 +39,17 @@ class AppState:
         self.patient_store = PatientStore(self.persistent_store)
         self.user_store = UserStore(self.persistent_store)
         self.audit_log = AuditLogStore(self.persistent_store)
+
+        # Abuse limits (per process). See Settings for the numbers.
+        self.login_by_username = KeyedRateLimiter(
+            settings.login_attempts_per_minute / 60, settings.login_attempts_burst
+        )
+        self.login_by_ip = KeyedRateLimiter(
+            settings.login_attempts_per_ip_per_minute / 60, settings.login_attempts_per_ip_burst
+        )
+        self.agent_runs = KeyedRateLimiter(
+            settings.agent_runs_per_minute / 60, settings.agent_runs_burst
+        )
 
         self.llm = ProviderRegistry.get_provider(settings.llm_provider, settings)
         embeddings = EmbeddingModel()
@@ -96,6 +110,15 @@ class AppState:
 
     async def close(self) -> None:
         await self.persistent_store.close()
+
+
+def enforce_limit(limiter: KeyedRateLimiter, key: str, *, limit: str, message: str) -> None:
+    """Raises RateLimitedError (429 + Retry-After) when key is over its limit.
+    `limit` names the limit for the metric; the key itself is never recorded."""
+    wait = limiter.try_acquire(key)
+    if wait is not None:
+        abuse_limit_hits_total.labels(limit=limit).inc()
+        raise RateLimitedError(message, retry_after=wait)
 
 
 def get_state(conn: HTTPConnection) -> AppState:

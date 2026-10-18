@@ -18,6 +18,11 @@ RUN uv sync --frozen --no-dev
 
 ENV PATH="/app/.venv/bin:$PATH"
 
+# Run as an unprivileged user. /app stays root-owned and read-only to it; the
+# only thing written at runtime is the embedding model cache under $HOME.
+RUN useradd --create-home --uid 10001 app
+USER app
+
 EXPOSE 8000
 
 CMD ["uvicorn", "medagent.app:app", "--host", "0.0.0.0", "--port", "8000", "--no-access-log"]

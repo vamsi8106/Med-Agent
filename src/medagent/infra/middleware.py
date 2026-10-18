@@ -1,4 +1,5 @@
-"""ASGI middleware: request ids, structured request logging, metrics, and tracing.
+"""ASGI middleware: request ids, structured request logging, metrics, tracing, and
+request-size / security-header protection.
 
 Telemetry never carries the raw request path: /patients/P-123/assess would put a
 patient identifier into Prometheus labels, span names and log lines (and one
@@ -13,9 +14,11 @@ import uuid
 from collections.abc import Awaitable, Callable
 
 import structlog
+from starlette.datastructures import Headers
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from medagent.infra.logging import get_logger
 from medagent.infra.metrics import http_request_duration_seconds, http_requests_total
@@ -80,3 +83,83 @@ class ObservabilityMiddleware(BaseHTTPMiddleware):
         )
         response.headers[REQUEST_ID_HEADER] = request_id
         return response
+
+
+_SECURITY_HEADERS = [
+    (b"x-content-type-options", b"nosniff"),
+    (b"x-frame-options", b"DENY"),
+    (b"referrer-policy", b"no-referrer"),
+    # Responses carry patient data: no browser or proxy may cache them.
+    (b"cache-control", b"no-store"),
+]
+_HSTS = (b"strict-transport-security", b"max-age=31536000; includeSubDomains")
+
+
+class SecurityMiddleware:
+    """Pure ASGI (so it sees the raw byte stream): refuses request bodies over
+    max_body_bytes with 413 -- by Content-Length up front, and by counting
+    streamed chunks for requests without one -- and adds security headers to
+    every HTTP response. HSTS only when TLS is in front (production)."""
+
+    def __init__(self, app: ASGIApp, *, max_body_bytes: int, hsts: bool) -> None:
+        self.app = app
+        self.max_body_bytes = max_body_bytes
+        self.headers = [*_SECURITY_HEADERS, *([_HSTS] if hsts else [])]
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        declared = Headers(scope=scope).get("content-length")
+        if declared is not None and declared.isdigit() and int(declared) > self.max_body_bytes:
+            await self._too_large(send)
+            return
+
+        received = 0
+        started = False
+        refused = False
+
+        async def send_with_headers(message: Message) -> None:
+            nonlocal started
+            if refused:
+                return  # we already answered 413; drop whatever the app sends
+            if message["type"] == "http.response.start":
+                started = True
+                existing = {name.lower() for name, _ in message.get("headers", [])}
+                message["headers"] = [
+                    *message.get("headers", []),
+                    *((name, value) for name, value in self.headers if name not in existing),
+                ]
+            await send(message)
+
+        async def counting_receive() -> Message:
+            # Raising here would surface as FastAPI's generic 400 ("error parsing
+            # the body"), so answer 413 directly and tell the app the client left.
+            nonlocal received, refused
+            message = await receive()
+            if message["type"] == "http.request":
+                received += len(message.get("body", b""))
+                if received > self.max_body_bytes:
+                    if not started and not refused:
+                        await self._too_large(send)
+                    refused = True
+                    return {"type": "http.disconnect"}
+            return message
+
+        await self.app(scope, counting_receive, send_with_headers)
+
+    async def _too_large(self, send: Send) -> None:
+        body = b'{"detail":"Request body too large"}'
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 413,
+                "headers": [
+                    (b"content-type", b"application/json"),
+                    (b"content-length", str(len(body)).encode()),
+                    *self.headers,
+                ],
+            }
+        )
+        await send({"type": "http.response.body", "body": body})

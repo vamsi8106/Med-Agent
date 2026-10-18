@@ -26,7 +26,7 @@ src/medagent/
 ├── core/                        # Phase 1 — shared kernel, zero external deps beyond pydantic
 │   ├── interfaces.py            # ABCs: BaseLLMProvider, BaseTool, BaseAgent, BaseMemory
 │   ├── models.py                # PatientContext, Medication, LabResult, Visit, DrugInteraction, Message, ToolCall, LLMResponse
-│   ├── exceptions.py            # MedAgentError → UpstreamError (→ ProviderError, MCPError; carries `reason`, `retryable`, `retry_after`), ToolError, MemoryError, AuthError, PatientNotFoundError, PatientOwnershipError, AgentBudgetExceededError, AllAgentsFailedError (each carries its HTTP status_code)
+│   ├── exceptions.py            # MedAgentError → UpstreamError (→ ProviderError, MCPError; carries `reason`, `retryable`, `retry_after`), ToolError, MemoryError, AuthError, PatientNotFoundError, PatientOwnershipError, RateLimitedError, AgentBudgetExceededError, AllAgentsFailedError (each carries its HTTP status_code)
 │   ├── config.py                # Settings (pydantic-settings)
 │   └── types.py                 # Enums: EvidenceGrade, InteractionSeverity, CKDStage, TrialPhase, AgentRole
 ├── llm/                         # Phase 1 — provider layer
@@ -36,11 +36,11 @@ src/medagent/
 ├── infra/                       # Phase 1+ — cross-cutting
 │   ├── logging.py               # structlog JSON setup
 │   ├── retry.py                 # @retry: retries only `retryable` UpstreamErrors, honours Retry-After (fails fast past `max_wait`), bounded by a total `budget`
-│   ├── rate_limiter.py          # token-bucket per API source
+│   ├── rate_limiter.py          # token-bucket per API source (outbound, waits); KeyedRateLimiter per user/IP (inbound abuse limits, never waits)
 │   ├── circuit_breaker.py       # fail fast when a dependency (an MCP server, the LLM) is down; only timeouts/connection/5xx count, never 4xx or rate limits
 │   ├── tracing.py               # OpenTelemetry setup (OTLP to Tempo iff OTEL_EXPORTER_OTLP_ENDPOINT), traced_node helper
 │   ├── metrics.py               # Prometheus catalogue: HTTP, LLM calls/latency/tokens, retries, breaker state, MCP, tool calls, ReAct paths, guardrail flags, truncations
-│   ├── middleware.py            # request id, request logging, metrics + HTTP span (route templates only)
+│   ├── middleware.py            # request id, request logging, metrics + HTTP span (route templates only); SecurityMiddleware: body-size cap (413) + security headers
 │   ├── context_budget.py        # token estimate (3.5 chars/token) + truncate_text for prompt inputs
 │   ├── guardrails.py            # wrap_untrusted (prompt-injection delimiting), allergy output check, output sanity checks
 │   ├── verification.py          # deterministic check of an answer's numeric claims (doses, %, lab values) against its sources
@@ -185,6 +185,10 @@ Tools available: `search-drugs`, `get-drug-details`, `search-drug-nomenclature`,
 - Anything that can only fail against the real model or real MCP responses gets a case in `tests/eval/` -- unit tests use mocks and cannot see it.
 - A client for anything we don't control (LLM, MCP, a future API) must raise `UpstreamError` subclasses with a `reason` and `retryable`, own its retries in one place (turn any SDK's built-in retries off -- they stacked under ours, up to 9 HTTP calls per LLM call), put a circuit breaker in front, and emit metrics. A 4xx is never retryable and never trips the breaker; a rate limit is retried only if the requested wait is short. Add a fault-injection test for each new failure mode (`tests/unit/infra/test_fault_injection.py` shows the pattern with the `clock` fixture).
 - Telemetry (traces, logs, metric labels) carries NO patient data: no patient id, name, medication, allergy, prompt or response text, no raw URL paths (use route templates). Correlate by `request_id` / `trace_id` / `run_id`. `tests/unit/infra/test_no_phi_in_telemetry.py` enforces it -- a new log field or span attribute must pass it. uvicorn runs with `--no-access-log` because its access log prints raw paths.
+- API input is bounded: request-facing model fields carry max lengths / list sizes (`core/models.py`, `api/schemas.py`), bodies over `MAX_REQUEST_BODY_BYTES` get 413 (`SecurityMiddleware`). A new request field needs a bound.
+- Abuse limits: login per username and per IP, agent runs per user (`KeyedRateLimiter`, `enforce_limit` in `api/state.py`), 429 + Retry-After. A new endpoint that spends LLM quota must use `agent_run_user` (or `enforce_limit`).
+- `APP_ENV=production` refuses weak secrets at startup, hides the API docs and adds HSTS. The WebSocket authenticates with its first message (`{"type":"auth","token":...}`), never a URL token.
+- `make deps-audit` (pip-audit) must stay clean; an ignored advisory needs a reason in the Makefile and is removed when a fix ships.
 - `/health` is liveness (Docker uses it; must not flap on dependencies). `/ready` is readiness: Postgres down -> 503, other dependencies -> `degraded`; it never exposes hostnames or error text and never calls the LLM.
 - Metric labels must come from a small fixed set -- never a patient id, query text, error message, or a name the model chose.
 - Anything shared across requests (`AppState` clients, models) is used concurrently -- `HttpMCPClient` is re-entrant and `EmbeddingModel` serializes encodes for this reason. A new shared resource must be safe under overlapping use, with a test that overlaps it.
@@ -203,6 +207,7 @@ make format-fix      # uv run ruff format .
 make format-check    # uv run ruff format --check .
 make type-check      # uv run mypy
 make import-check    # import-linter: the layer rules above
+make deps-audit      # pip-audit over the locked runtime dependencies (also in CI)
 make pre-commit      # format-fix + lint-fix + lint-check + type-check + import-check + unit-tests
 make ci-check        # format-check + lint-check + type-check + import-check + unit-tests (what CI runs; no auto-fix)
 make serve           # uv run uvicorn medagent.app:app --reload

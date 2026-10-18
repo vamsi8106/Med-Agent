@@ -63,3 +63,17 @@ async def test_entries_ordered_most_recent_first(pg_dsn: str) -> None:
     entries = await store.for_patient("P-TEST-903")
 
     assert [e["action"] for e in entries] == ["assessment_run", "patient_viewed"]
+
+
+async def test_for_patient_pages_newest_first(pg_dsn: str) -> None:
+    await _seed_patient(pg_dsn, "P-TEST-910")
+    store = _store(pg_dsn)
+    user = User(id="U-1", username="dr.alpha", role="doctor")
+    for i in range(5):
+        await store.record(user, "P-TEST-910", f"action_{i}")
+
+    first = await store.for_patient("P-TEST-910", limit=2)
+    rest = await store.for_patient("P-TEST-910", limit=10, offset=2)
+
+    assert [e["action"] for e in first] == ["action_4", "action_3"]
+    assert [e["action"] for e in rest] == ["action_2", "action_1", "action_0"]

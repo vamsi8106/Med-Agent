@@ -2,11 +2,11 @@
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from medagent.api.errors import doctor_scope, require_doctor_id
 from medagent.api.schemas import AssessRequest, DrugCheckRequest
-from medagent.api.state import AppState, get_state
+from medagent.api.state import AppState, enforce_limit, get_state
 from medagent.auth.dependencies import get_current_user
 from medagent.core.models import PatientContext, User
 from medagent.workflows.drug_check import run_drug_check
@@ -14,6 +14,20 @@ from medagent.workflows.followup import run_followup
 from medagent.workflows.patient_assessment import run_patient_assessment
 
 router = APIRouter()
+
+
+async def agent_run_user(
+    user: User = Depends(get_current_user), state: AppState = Depends(get_state)
+) -> User:
+    """The current user, once they are within their agent-run limit. Each run
+    spends LLM quota, so one account cannot exhaust it for everyone."""
+    enforce_limit(
+        state.agent_runs,
+        user.id,
+        limit="agent_runs",
+        message="Too many agent runs; try again later",
+    )
+    return user
 
 
 @router.post("/patients", response_model=PatientContext)
@@ -47,6 +61,8 @@ async def get_patient(
 @router.get("/patients/{patient_id}/audit-log")
 async def get_patient_audit_log(
     patient_id: str,
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
     user: User = Depends(get_current_user),
     state: AppState = Depends(get_state),
 ) -> list[dict[str, Any]]:
@@ -56,14 +72,14 @@ async def get_patient_audit_log(
     if patient is None:
         raise HTTPException(status_code=404, detail=f"Unknown patient: {patient_id}")
     await state.audit_log.record(user, patient_id, "audit_log_viewed")
-    return await state.audit_log.for_patient(patient_id)
+    return await state.audit_log.for_patient(patient_id, limit=limit, offset=offset)
 
 
 @router.post("/patients/{patient_id}/assess")
 async def assess_patient(
     patient_id: str,
     body: AssessRequest,
-    user: User = Depends(get_current_user),
+    user: User = Depends(agent_run_user),
     state: AppState = Depends(get_state),
 ) -> dict[str, str]:
     # REST has no interactive approval channel, so it auto-saves. The
@@ -92,7 +108,7 @@ async def assess_patient(
 async def followup_visit(
     patient_id: str,
     body: AssessRequest,
-    user: User = Depends(get_current_user),
+    user: User = Depends(agent_run_user),
     state: AppState = Depends(get_state),
 ) -> dict[str, str]:
     report, patient = await run_followup(
@@ -117,7 +133,7 @@ async def followup_visit(
 @router.post("/drug-check")
 async def drug_check(
     body: DrugCheckRequest,
-    user: User = Depends(get_current_user),
+    user: User = Depends(agent_run_user),
     state: AppState = Depends(get_state),
 ) -> dict[str, str]:
     answer = await run_drug_check(

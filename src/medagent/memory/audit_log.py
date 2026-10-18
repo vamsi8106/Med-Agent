@@ -39,11 +39,17 @@ class AuditLogStore:
                 datetime.now(UTC),
             )
 
-    async def for_patient(self, patient_id: str) -> list[dict[str, Any]]:
+    async def for_patient(
+        self, patient_id: str, *, limit: int = 100, offset: int = 0
+    ) -> list[dict[str, Any]]:
+        """Newest first, one page at a time."""
         async with self._store.connect() as conn:
             rows = await conn.fetch(
-                "SELECT * FROM audit_log WHERE patient_id = $1 ORDER BY created_at DESC",
+                """SELECT * FROM audit_log WHERE patient_id = $1
+                ORDER BY created_at DESC, id LIMIT $2 OFFSET $3""",
                 patient_id,
+                limit,
+                offset,
             )
         return [
             {

@@ -93,6 +93,15 @@ The provisioned **MedAgent Overview** dashboard shows, from `/metrics`: HTTP rat
 
 **Traces.** With the Docker stack, spans go to Grafana Tempo. In Grafana (`http://localhost:3000`) open *Explore* -> *Tempo* and run `{ resource.service.name = "medagent" }` (or use the *Recent Traces* panel). One trace shows the request, each graph node, ReAct turns, LLM calls, tool calls and MCP calls, with retries as events. Every log line carries `trace_id` and `request_id` (also returned as the `X-Request-ID` header). Traces, logs and metrics contain no patient data. Set `OTEL_CONSOLE_EXPORTER=true` for local span printing, or `OTEL_SAMPLE_RATIO` to sample.
 
+**Security defaults.**
+- Login is limited per username (5/min) and per client IP (20/min); agent runs (`/assess`, `/followup`, `/drug-check`, WebSocket drafts) are limited per user (6/min, burst 3). Over the limit: `429` with `Retry-After`. Limits are per process (`LOGIN_ATTEMPTS_*`, `AGENT_RUNS_*`).
+- Request bodies over 1 MB get `413`; text fields and lists have maximum sizes (messages up to 4000 characters, patient ids `[A-Za-z0-9_-]{1,64}`); passwords need 12+ characters; roles are `doctor` or `admin`.
+- Every response has `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy` and `Cache-Control: no-store`.
+- `APP_ENV=production` refuses to start with the placeholder or a short `JWT_SECRET_KEY` (32+ chars, e.g. `openssl rand -hex 32`) or a short bootstrap password, hides `/docs`, and adds HSTS. In development the app logs a warning when the placeholder secret is used.
+- Docker Compose publishes every port on `127.0.0.1` only, and the app container runs as a non-root user.
+- `make deps-audit` scans the locked dependencies for known vulnerabilities (also in CI).
+- Still required for real deployments: TLS at a reverse proxy (run uvicorn with `--proxy-headers` behind it so rate limits see real client IPs), only the proxy exposed, encryption at rest, and a model provider you are allowed to send patient data to.
+
 **Privacy note:** `LANGCHAIN_TRACING_V2=true` (LangSmith) sends prompts, which contain patient data, to a third-party service; keep it off for real data.
 
 **Readiness.** `GET /ready` (no auth) reports `ok` / `degraded` / `down` per dependency; 503 only when Postgres is down. `/health` is liveness only.
@@ -125,11 +134,11 @@ There's no self-registration — every account after the bootstrapped admin is c
 ```bash
 curl -s -X POST "$BASE/admin/users" \
   -H "Authorization: Bearer $ADMIN_TOKEN" -H "Content-Type: application/json" \
-  -d '{"username": "dr.alice", "password": "alicepass1", "role": "doctor"}'
+  -d '{"username": "dr.alice", "password": "alice-pass-2026", "role": "doctor"}'
 
 ALICE_TOKEN=$(curl -s -X POST "$BASE/auth/token" \
   -H "Content-Type: application/x-www-form-urlencoded" \
-  -d "username=dr.alice&password=alicepass1" \
+  -d "username=dr.alice&password=alice-pass-2026" \
   | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
 ```
 
@@ -209,11 +218,11 @@ A second doctor gets a plain 404 for a patient they don't own — not 403, so pa
 ```bash
 curl -s -X POST "$BASE/admin/users" \
   -H "Authorization: Bearer $ADMIN_TOKEN" -H "Content-Type: application/json" \
-  -d '{"username": "dr.bob", "password": "bobpass123", "role": "doctor"}'
+  -d '{"username": "dr.bob", "password": "bob-pass-2026-x", "role": "doctor"}'
 
 BOB_TOKEN=$(curl -s -X POST "$BASE/auth/token" \
   -H "Content-Type: application/x-www-form-urlencoded" \
-  -d "username=dr.bob&password=bobpass123" \
+  -d "username=dr.bob&password=bob-pass-2026-x" \
   | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
 
 echo "Bob fetching Alice's patient (expect 404):"
@@ -236,7 +245,10 @@ curl -s "$BASE/metrics" | grep medagent
 `curl` can't speak WebSocket — use `websocat` or `wscat` (`npm i -g wscat`):
 
 ```bash
-wscat -c "ws://localhost:8000/ws/P-TEST-001?token=$ALICE_TOKEN"
+wscat -c "ws://localhost:8000/ws/P-TEST-001"
+# first message must authenticate (the token is never put in the URL, where
+# proxies and load balancers log it; the socket closes after 10 s without it):
+#   {"type":"auth","token":"<paste $ALICE_TOKEN>"}
 # type a message, e.g.: Any changes given her latest labs?
 # server streams progress as it works:
 #   {"type":"progress","step":"triage","status":"completed"}
@@ -250,7 +262,8 @@ A drafted report survives a dropped connection. Reconnect with `?resume=1` to ge
 (`"resumed": true`) and finish deciding:
 
 ```bash
-wscat -c "ws://localhost:8000/ws/P-TEST-001?token=$ALICE_TOKEN&resume=1"
+wscat -c "ws://localhost:8000/ws/P-TEST-001?resume=1"
+# then authenticate as above: {"type":"auth","token":"<paste $ALICE_TOKEN>"}
 # server replies: {"type":"pending_approval","report":"...","resumed":true}
 ```
 

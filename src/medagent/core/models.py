@@ -1,20 +1,27 @@
 """Core pydantic data models shared across MedAgent modules."""
 
 from datetime import datetime
-from typing import Any
+from typing import Annotated, Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StringConstraints
 
 from medagent.core.types import AgentRole, EvidenceGrade, InteractionSeverity
+
+# Bounds on fields a client can send (PatientContext is also the POST /patients
+# body). They stop oversized payloads from reaching the database and prompts;
+# internal text that holds generated reports (Visit.assessment) stays unbounded.
+PATIENT_ID_PATTERN = r"^[A-Za-z0-9_-]{1,64}$"
+ShortText = Annotated[str, StringConstraints(max_length=100)]
+Label = Annotated[str, StringConstraints(min_length=1, max_length=200)]
 
 
 class Medication(BaseModel):
     id: str | None = None
-    name: str
-    brand_name: str | None = None
-    dose: str | None = None
-    frequency: str | None = None
-    route: str | None = None
+    name: Label
+    brand_name: Label | None = None
+    dose: ShortText | None = None
+    frequency: ShortText | None = None
+    route: ShortText | None = None
     start_date: datetime | None = None
     end_date: datetime | None = None
     status: str = "active"
@@ -22,9 +29,9 @@ class Medication(BaseModel):
 
 class LabResult(BaseModel):
     id: str | None = None
-    test_name: str
+    test_name: Annotated[str, StringConstraints(min_length=1, max_length=100)]
     value: float
-    unit: str
+    unit: ShortText
     reference_low: float | None = None
     reference_high: float | None = None
     is_abnormal: bool = False
@@ -47,21 +54,21 @@ class Visit(BaseModel):
 
 
 class PatientContext(BaseModel):
-    id: str
-    name: str
-    age: int
-    sex: str
+    id: str = Field(pattern=PATIENT_ID_PATTERN)
+    name: Label
+    age: int = Field(ge=0, le=150)
+    sex: Annotated[str, StringConstraints(max_length=32)]
     # Owning doctor for per-doctor data isolation. Stamped server-side from
     # the creating doctor's JWT (never client-supplied) and immutable after
     # creation -- see PatientStore.save_patient.
     doctor_id: str | None = None
     weight_kg: float | None = None
     height_cm: float | None = None
-    conditions: list[str] = Field(default_factory=list)
-    allergies: list[str] = Field(default_factory=list)
-    medications: list[Medication] = Field(default_factory=list)
-    lab_results: list[LabResult] = Field(default_factory=list)
-    visits: list[Visit] = Field(default_factory=list)
+    conditions: list[Label] = Field(default_factory=list, max_length=100)
+    allergies: list[Label] = Field(default_factory=list, max_length=100)
+    medications: list[Medication] = Field(default_factory=list, max_length=100)
+    lab_results: list[LabResult] = Field(default_factory=list, max_length=500)
+    visits: list[Visit] = Field(default_factory=list, max_length=50)
     # What changed in the record since the newest visit, computed in code by
     # PatientStore.get_patient. None when there is no earlier visit to compare with.
     changes_since_last_visit: "RecordChanges | None" = None

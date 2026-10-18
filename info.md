@@ -282,6 +282,7 @@ Doctor replies:
    → server resumes the graph and sends {"type":"saved"} or {"type":"rejected"}
 ```
 
+- **Authentication.** The first message must be `{"type":"auth","token":"<JWT>"}`, sent within 10 seconds, or the socket is closed (code 1008). The token never goes in the URL, because proxies and load balancers log URLs. Each draft counts against the user's agent-run limit, and messages are limited to 4000 characters.
 - **A draft survives a dropped connection.** Reconnect with `?resume=1` to get it back (`"resumed": true`) and decide. Connecting without it discards any stale draft, so a new question is never mistaken for the reply to an old one.
 - Drafts live only in server memory (they contain patient data), are private to the doctor who made them, and expire after `APPROVAL_DRAFT_TTL_MINUTES` (default 30). A server restart loses pending drafts.
 - Every step (drafted, approved, edited, rejected, resumed, discarded) is written to the audit log.
@@ -381,7 +382,14 @@ The schema change is migration `5b1e7c2d9a40` (adds `visits.record_snapshot` and
 - **Error hygiene.** Clients see fixed wording for upstream failures, not raw upstream text.
 - **Local data.** Patient data stays in your Postgres and ChromaDB. The uvicorn access log is disabled (`--no-access-log`) because it prints raw URL paths.
 - **LangSmith warning.** LangChain's tracing (`LANGCHAIN_TRACING_V2`) is **off by default** because it would send prompts, which contain patient data, to a third party. If turned on, the app logs a warning at startup.
-- **Before real use:** change `JWT_SECRET_KEY` (the default is an insecure placeholder), set strong admin credentials, and put the API behind TLS.
+- **Abuse limits.** Login is limited per username (5 per minute) and per client IP (20 per minute), counted even when the password is right, so guessing is capped. Agent runs (`/assess`, `/followup`, `/drug-check`, WebSocket drafts) are limited per user (6 per minute, burst 3) because each one spends LLM quota. Over a limit: 429 with `Retry-After`. Limits are per process, like the circuit breakers.
+- **Login timing.** An unknown username still checks a password hash, so response time does not reveal which usernames exist. Token errors say only "Invalid access token".
+- **Input bounds.** Request bodies over 1 MB are refused with 413 (by `Content-Length` and by counting streamed bytes). Text fields and lists have maximum sizes: patient ids match `[A-Za-z0-9_-]{1,64}`, messages are 1–4000 characters, a patient has at most 100 medications and 500 lab results. Passwords need 12+ characters; roles are `doctor` or `admin`; the audit log is paged (`limit` up to 500).
+- **Security headers.** Every response carries `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer` and `Cache-Control: no-store` (responses contain patient data). HSTS is added in production.
+- **Production mode.** `APP_ENV=production` refuses to start with the placeholder or a short `JWT_SECRET_KEY` (32+ characters) or a bootstrap password under 12 characters, and hides `/docs` and `/openapi.json`. In development the app logs a warning when the placeholder secret is in use.
+- **Container and network.** The app container runs as a non-root user. Docker Compose publishes every port on `127.0.0.1` only.
+- **Dependencies.** `make deps-audit` scans the locked dependencies (pip-audit), locally and in CI. Four ChromaDB advisories have no fixed release yet; they concern the Chroma server, which is reachable only on the compose network, and are ignored with that reason in the Makefile until a fix ships.
+- **Still required before real use:** TLS at a reverse proxy (with uvicorn's `--proxy-headers` so limits see real client IPs) and only the proxy exposed; strong, unique secrets and passwords for Postgres and Grafana; encryption at rest; a model provider you are allowed to send patient data to (Groq is a third-party cloud); user management (disable, reset, revoke) and a retention policy.
 
 ## 16. Observability: logging, metrics, tracing, health
 
@@ -442,7 +450,7 @@ POST /patients/{patient_id}/assess          (HTTP span)
 
 | Kind | What | Where |
 |---|---|---|
-| **Unit** | ~438 tests. Mock LLM (`MockLLMProvider`), no network. Postgres-backed tests use a throwaway Docker container and skip if Docker is unavailable. | `tests/unit/` (mirrors `src/`) |
+| **Unit** | ~470 tests. Mock LLM (`MockLLMProvider`), no network. Postgres-backed tests use a throwaway Docker container and skip if Docker is unavailable. | `tests/unit/` (mirrors `src/`) |
 | **Fault injection** | Each failure mode (timeout, 5xx, 4xx, rate limit, breaker open) is simulated with a fake clock, so retries and breakers are tested without waiting. | `tests/unit/infra/test_fault_injection.py` |
 | **Telemetry** | Span coverage, tracing setup, middleware labels, and the no-PHI check. | `tests/unit/infra/` |
 | **Live evals** | Golden datasets against the **real** Groq model and real MCP servers, because mocks cannot catch real-model regressions. | `tests/eval/`, `make eval` |
@@ -504,6 +512,11 @@ All settings come from environment variables or `.env` through `Settings`. New s
 | `LANGCHAIN_TRACING_V2` | false | LangSmith; sends patient data off-box, keep off |
 | `JWT_SECRET_KEY`, `JWT_ALGORITHM`, `JWT_EXPIRE_MINUTES` | placeholder, HS256, 60 | **change the secret** |
 | `ADMIN_BOOTSTRAP_USERNAME`, `ADMIN_BOOTSTRAP_PASSWORD` | unset | seeds the first admin |
+| `APP_ENV` | development | `production` enforces strong secrets, hides docs, adds HSTS |
+| `LOGIN_ATTEMPTS_PER_MINUTE`, `LOGIN_ATTEMPTS_BURST` | 5, 5 | login limit per username |
+| `LOGIN_ATTEMPTS_PER_IP_PER_MINUTE`, `LOGIN_ATTEMPTS_PER_IP_BURST` | 20, 20 | login limit per client IP |
+| `AGENT_RUNS_PER_MINUTE`, `AGENT_RUNS_BURST` | 6, 3 | agent-run limit per user |
+| `MAX_REQUEST_BODY_BYTES` | 1000000 | larger bodies get 413 |
 | `LOG_LEVEL` | INFO | logging level |
 
 ## 20. Known limitations

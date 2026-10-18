@@ -87,6 +87,12 @@ guardrail_flags_total = Counter(
     labelnames=("kind",),
 )
 
+abuse_limit_hits_total = Counter(
+    "medagent_abuse_limit_hits_total",
+    "Requests refused by our own abuse limits (login_username, login_ip, agent_runs)",
+    labelnames=("limit",),
+)
+
 context_truncations_total = Counter(
     "medagent_context_truncations_total",
     "Times text was cut to fit a context budget",
