@@ -14,7 +14,7 @@ Both are exercised with the same `curl` walkthrough below.
 - Python 3.12+ and [uv](https://docs.astral.sh/uv/)
 - Docker + Docker Compose
 - Node.js/npm (only needed once, to vendor the two MCP servers built from source)
-- A [Groq API key](https://console.groq.com/keys) (free tier works) — `LLM_PROVIDER=groq` is the default
+- A [Groq API key](https://console.groq.com/keys) (free tier works) — `LLM_PROVIDER=groq` is the default. For real patient data use a self-hosted model instead (`LLM_PROVIDER=openai_compatible`, see [docs/deployment.md](docs/deployment.md#4-the-model-keep-patient-data-on-your-machines-decision-required)).
 
 ## One-time setup
 
@@ -75,7 +75,7 @@ Everything — Postgres, ChromaDB, all 3 MCP servers, and the app — runs in co
 make docker-up
 ```
 
-This builds and starts 8 services: `postgres`, `chromadb`, `healthcare-mcp`, `research-mcp`, `medical-mcp-bridge`, `medagent`, `prometheus`, `grafana`. The app runs its own `alembic upgrade head` on startup. Give it a minute — `medagent`'s healthcheck has a 120s start period since it loads a local sentence-transformers model on boot.
+This builds and starts 9 services: `postgres`, `chromadb`, `healthcare-mcp`, `research-mcp`, `medical-mcp-bridge`, `medagent`, `prometheus`, `grafana`, `tempo`. The app runs its own `alembic upgrade head` on startup. Give it a minute — `medagent`'s healthcheck has a 120s start period since it loads a local sentence-transformers model on boot.
 
 ```bash
 docker compose ps        # check all services are "healthy"
@@ -147,7 +147,7 @@ ALICE_TOKEN=$(curl -s -X POST "$BASE/auth/token" \
 
 ### 3. Create a synthetic patient
 
-`doctor_id` is stamped server-side from the JWT — never something you pass in the body. Conditions, allergies, and lab results all feed into the agents' reasoning, not just the medications (see [step 5b](#5b-confirm-allergy-conflict-detection)) — include them to see the full effect.
+`doctor_id` is stamped server-side from the JWT — never something you pass in the body. Posting the same id again updates the record; if the id belongs to another doctor's patient the request gets a generic `409` (the record is never overwritten, and its existence is not revealed). Conditions, allergies, and lab results all feed into the agents' reasoning, not just the medications (see [step 5b](#5b-confirm-allergy-conflict-detection)) — include them to see the full effect.
 
 ```bash
 curl -s -X POST "$BASE/patients" \
@@ -201,6 +201,25 @@ curl -s -X POST "$BASE/drug-check" \
 
 ### 6. Follow-up visit (recalls the patient, re-runs relevant agents)
 
+History is kept, not overwritten: a stopped medication keeps its row (`status: stopped`), a dose change closes the old row and opens a new one, and lab results accumulate (the record shows the latest per test). Each assessment saves a visit with a snapshot of the record, so the next report gets a deterministic **Changes Since Last Visit** section (medications started/stopped/changed, new conditions or allergies, newer labs). To see it, change the record after step 4 — here Glimepiride is stopped, Empagliflozin started, and a newer HbA1c added:
+
+```bash
+curl -s -X POST "$BASE/patients" \
+  -H "Authorization: Bearer $ALICE_TOKEN" -H "Content-Type: application/json" \
+  -d '{
+    "id": "P-TEST-001", "name": "Patient Alpha", "age": 68, "sex": "F",
+    "conditions": ["type 2 diabetes", "hypertension"], "allergies": ["Sulfa"],
+    "medications": [{"name": "Metformin"}, {"name": "Empagliflozin"}],
+    "lab_results": [{
+      "test_name": "HbA1c", "value": 8.4, "unit": "%",
+      "reference_low": 4.0, "reference_high": 5.7,
+      "collected_at": "2026-04-01T00:00:00Z"
+    }]
+  }' > /dev/null
+```
+
+Then run the follow-up:
+
 ```bash
 curl -s -X POST "$BASE/patients/P-TEST-001/followup" \
   -H "Authorization: Bearer $ALICE_TOKEN" -H "Content-Type: application/json" \
@@ -211,8 +230,10 @@ curl -s -X POST "$BASE/patients/P-TEST-001/followup" \
 ### 7. Audit log for a patient
 
 ```bash
-curl -s "$BASE/patients/P-TEST-001/audit-log" -H "Authorization: Bearer $ALICE_TOKEN" | python3 -m json.tool
+curl -s "$BASE/patients/P-TEST-001/audit-log?limit=50&offset=0" -H "Authorization: Bearer $ALICE_TOKEN" | python3 -m json.tool
 ```
+
+Newest first, paged with `limit` (1–500, default 100) and `offset`.
 
 ### 8. Confirm per-doctor data isolation
 
@@ -272,6 +293,16 @@ wscat -c "ws://localhost:8000/ws/P-TEST-001?resume=1"
 
 Connecting *without* `resume=1` discards any stale draft, so a fresh question is never mistaken for the reply to an old one. Drafts are held in server memory only (they contain patient data), are private to the doctor who drafted them, and are purged after `APPROVAL_DRAFT_TTL_MINUTES` (default 30). A server restart loses pending drafts.
 
+### Guideline RAG (optional)
+
+The evidence agent's `search_guidelines` tool searches guidelines you ingest into ChromaDB (`.pdf` or `.txt`). The chunker splits on section headers (markdown, numbered like `3.1.2 Title`, or all-caps multi-word lines) before sizing chunks. A synthetic demo guideline is included:
+
+```bash
+make ingest-guideline file=docs/demo/synthetic-t2dm-guideline.txt source=synthetic-t2dm
+```
+
+With the full Docker stack, run it inside the container instead: `docker compose exec medagent python -m medagent.cli ingest-guideline --file ... --source ...`. Only ingest documents you are licensed to use.
+
 ---
 
 ## Safety and context controls
@@ -294,14 +325,16 @@ The LLM only ever summarizes; safety-relevant facts are computed deterministical
 make unit-tests    # network-free, requires Docker for Postgres-backed tests (auto-skips if unavailable)
 make type-check    # mypy over src/medagent
 make eval          # golden-dataset eval against real Groq + real MCP servers (needs GROQ_API_KEY)
-make pre-commit    # format + lint + type-check + unit-tests, run this before committing
+make import-check  # layer rules (import-linter, contracts in pyproject.toml)
+make deps-audit    # known-vulnerability scan of the locked dependencies (pip-audit)
+make pre-commit    # format + lint + type-check + import-check + unit-tests, run this before committing
 ```
 
 `make eval` is the only check that exercises real model output and real MCP response shapes; the unit tests use mocks. It has caught bugs the unit tests could not (a severity parser that silently returned "none" on real data).
 
 ### CI
 
-- **Every push, any branch**: format check, lint, mypy, unit tests (`make ci-check`).
+- **Every push, any branch**: format check, lint, mypy, import-check, unit tests (`make ci-check`), and the dependency audit (`make deps-audit`).
 - **Pull requests into `main` only**: additionally the golden-dataset eval against live MCP containers and a Docker build of every image. These are gated to PRs because they call the real Groq API and build several images. The eval job needs a `GROQ_API_KEY` repository secret (Settings → Secrets and variables → Actions).
 
 ## Docker image
@@ -310,4 +343,7 @@ make pre-commit    # format + lint + type-check + unit-tests, run this before co
 
 ## More detail
 
-See `AGENTS.md` for architecture, phase breakdown, dependency rules, and the MCP server contracts.
+- [`info.md`](info.md): complete guide to the concepts and flows (workflow, agents, MCP, harness, observability, memory, security).
+- [`docs/deployment.md`](docs/deployment.md): production runbook.
+- [`AGENTS.md`](AGENTS.md): architecture, phase breakdown, dependency rules, and the MCP server contracts.
+- [`docs/glossary.md`](docs/glossary.md): canonical terms.
