@@ -89,6 +89,12 @@ services:
       LLM_PROVIDER: ${LLM_PROVIDER:-groq}
       GROQ_API_KEY: ${GROQ_API_KEY:-}
       GROQ_MODEL: ${GROQ_MODEL:-openai/gpt-oss-20b}
+      LLM_BASE_URL: ${LLM_BASE_URL:-}
+      LLM_MODEL: ${LLM_MODEL:-}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      ALLOW_EXTERNAL_LLM_WITH_PHI: ${ALLOW_EXTERNAL_LLM_WITH_PHI:-false}
+      RETENTION_DAYS: ${RETENTION_DAYS:-}
+      AUDIT_RETENTION_DAYS: ${AUDIT_RETENTION_DAYS:-}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       POSTGRES_DSN: postgresql://medagent:${POSTGRES_PASSWORD:-medagent}@postgres:5432/medagent
       CHROMA_HOST: chromadb

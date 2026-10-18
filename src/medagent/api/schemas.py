@@ -27,6 +27,18 @@ class CreateUserRequest(BaseModel):
     role: Literal["doctor", "admin"] = "doctor"
 
 
+Password = Annotated[str, StringConstraints(min_length=MIN_PASSWORD_LENGTH, max_length=256)]
+
+
+class ResetPasswordRequest(BaseModel):
+    new_password: Password
+
+
+class ChangePasswordRequest(BaseModel):
+    current_password: Annotated[str, StringConstraints(max_length=256)]
+    new_password: Password
+
+
 class Token(BaseModel):
     access_token: str
     token_type: str = "bearer"

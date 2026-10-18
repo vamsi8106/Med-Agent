@@ -1,0 +1,19 @@
+# Public entry point in production (docker-compose.prod.yml).
+#
+# DOMAIN set (e.g. medagent.example.org, with DNS pointing here): Caddy gets and
+# renews a Let's Encrypt certificate automatically. DOMAIN unset: "localhost"
+# with a certificate from Caddy's own local CA, for trying the setup out.
+# HTTP redirects to HTTPS; HSTS and the other security headers come from the app.
+# (The address starts with https:// so Caddy doesn't read a leading "{" as its
+# global-options block.)
+https://{$DOMAIN} {
+	encode gzip
+
+	# Prometheus scrapes /metrics inside the compose network; never serve it publicly.
+	@metrics path /metrics
+	respond @metrics 404
+
+	# WebSockets (/ws/...) are proxied as-is. The app trusts X-Forwarded-For
+	# from here, so rate limits see the real client address.
+	reverse_proxy medagent:8000
+}

@@ -3,7 +3,7 @@
 Clinical decision support agent for doctors. Checks drug interactions, retrieves treatment evidence, finds clinical trials, tracks patient history across sessions. All medical data from free open APIs via MCP servers. Patient data stays local (Postgres + ChromaDB). Synthetic data only for demos.
 
 **Stack:** Python 3.12+, uv, ruff, mypy, pytest, pydantic v2, structlog, httpx, FastAPI, LangGraph, asyncpg + Alembic.
-**LLM:** Groq (initial) → swappable via `LLM_PROVIDER` env var. No Groq imports outside `llm/groq_provider.py`.
+**LLM:** `LLM_PROVIDER`: `groq` (cloud; demos with synthetic data), `openai_compatible` (a self-hosted model via an OpenAI-style API: Ollama, vLLM, LM Studio), `mock` (tests). Production refuses a third-party model unless `ALLOW_EXTERNAL_LLM_WITH_PHI=true`. No Groq imports outside `llm/groq_provider.py`.
 **MCP:** medical-mcp (FDA/WHO/RxNorm/PubMed), healthcare-mcp (ICD-10/trials/calculator), med-research-mcp-suite (cross-DB analysis). All run locally, no API keys.
 **Storage:** Postgres (patients, meds, labs, visits, users, audit log; schema owned by Alembic in `migrations/`), ChromaDB (guideline embeddings, its own container), sentence-transformers `all-MiniLM-L6-v2` (local, CPU-only torch).
 
@@ -31,7 +31,9 @@ src/medagent/
 │   └── types.py                 # Enums: EvidenceGrade, InteractionSeverity, CKDStage, TrialPhase, AgentRole
 ├── llm/                         # Phase 1 — provider layer
 │   ├── registry.py              # ProviderRegistry: get_provider(name) → BaseLLMProvider
+│   ├── chat_base.py             # ChatCompletionProvider: breaker, retry, llm.chat span, metrics shared by every provider; OpenAI-format message helpers
 │   ├── groq_provider.py         # Groq implementation
+│   ├── openai_compatible_provider.py  # self-hosted models over an OpenAI-style /chat/completions API (httpx)
 │   └── mock_provider.py         # deterministic, for tests
 ├── infra/                       # Phase 1+ — cross-cutting
 │   ├── logging.py               # structlog JSON setup
@@ -61,7 +63,8 @@ src/medagent/
 ├── memory/                      # Phase 4
 │   ├── patient_store.py         # Postgres CRUD for patient records (per-doctor isolation via doctor_id; saving another doctor's id → PatientOwnershipError 409). Medications/labs are append-only history: reconciled, never deleted; get_patient returns active meds + latest lab per test + changes_since_last_visit
 │   ├── record_changes.py        # visit snapshot + deterministic diff (meds started/stopped/changed, conditions, allergies, newer labs) -- facts only, no clinical interpretation
-│   ├── audit_log.py             # durable record of every patient-data access
+│   ├── audit_log.py             # durable record of every patient-data access and every account change
+│   ├── retention.py             # opt-in purge of whole inactive patient records and old audit entries (RETENTION_DAYS / AUDIT_RETENTION_DAYS)
 │   ├── session.py               # sliding-window conversation buffer (used by ReActAgent)
 │   ├── schema.py                # table DDL + doctor_id statements
 │   └── persistent.py            # asyncpg pool + connection handling
@@ -71,13 +74,13 @@ src/medagent/
 │   ├── chunker.py               # section-header-aware, 512 tokens, 64 overlap
 │   ├── pipeline.py              # PDF → chunk → embed → store
 │   └── retriever.py             # GuidelineRetrieverTool (BaseTool): RAG over ingested guidelines
-├── auth/                        # JWT auth: security.py (hashing, tokens), store.py (users), dependencies.py (FastAPI deps)
+├── auth/                        # JWT auth: security.py (hashing, tokens with a version claim), store.py (users: disable, password, revoke), dependencies.py (FastAPI deps; rejects disabled users and revoked tokens)
 ├── workflows/                   # Phase 5
 │   ├── patient_assessment.py    # LangGraph: init_run → triage → parallel specialists → report. A specialist's MedAgentError becomes a recorded failure (degraded report), not an abort; all failing raises AllAgentsFailedError. Embeddable as a subgraph
 │   ├── followup.py              # load patient → assessment subgraph → optional approval node (interrupt()); draft_followup / resolve_followup / pending_draft, progress streaming
 │   ├── checkpointing.py         # in-memory checkpointer (PHI stays in process memory) with a msgpack type allowlist; purge_expired_drafts
 │   └── drug_check.py            # enumerate pairs → check → aggregate
-├── cli.py                       # `medagent ingest-guideline` (RAG ingestion), separate process from the server
+├── cli.py                       # `medagent ingest-guideline` (RAG ingestion), `medagent purge-expired` (retention); separate process from the server
 ├── health.py                    # readiness aggregation for /ready (ok/degraded/down)
 ├── api/                         # HTTP + WebSocket layer
 │   ├── state.py                 # AppState (all clients/agents, built once) + get_state dependency
@@ -87,7 +90,7 @@ src/medagent/
 └── app.py                       # Phase 6 — create_app(): lifespan, middleware, routers
 ```
 
-Outside `src/`: `migrations/` (Alembic), `docker/` (MCP server images), `ops/` (Prometheus/Grafana config), `tests/eval/` (live golden-dataset evals).
+Outside `src/`: `migrations/` (Alembic), `docker/` (MCP server images), `ops/` (Prometheus/Grafana/Tempo/Caddy config), `docker-compose.prod.yml` (production overlay: Caddy TLS, no other public ports, required secrets, optional Ollama), `docs/deployment.md` (production runbook), `tests/eval/` (live golden-dataset evals).
 
 `tests/` mirrors `src/` 1:1. `docs/glossary.md` for canonical terms. Architecture decisions and their rationale live in commit messages and the README.
 
@@ -188,6 +191,8 @@ Tools available: `search-drugs`, `get-drug-details`, `search-drug-nomenclature`,
 - API input is bounded: request-facing model fields carry max lengths / list sizes (`core/models.py`, `api/schemas.py`), bodies over `MAX_REQUEST_BODY_BYTES` get 413 (`SecurityMiddleware`). A new request field needs a bound.
 - Abuse limits: login per username and per IP, agent runs per user (`KeyedRateLimiter`, `enforce_limit` in `api/state.py`), 429 + Retry-After. A new endpoint that spends LLM quota must use `agent_run_user` (or `enforce_limit`).
 - `APP_ENV=production` refuses weak secrets at startup, hides the API docs and adds HSTS. The WebSocket authenticates with its first message (`{"type":"auth","token":...}`), never a URL token.
+- Account changes (disable, password reset/change, revoke) bump the user's `token_version`; every token carries the version it was issued with, so old tokens stop working at once. All account changes are audited.
+- Retention deletes only when configured, whole records only, and audits itself. Never add another code path that deletes patient data.
 - `make deps-audit` (pip-audit) must stay clean; an ignored advisory needs a reason in the Makefile and is removed when a fix ships.
 - `/health` is liveness (Docker uses it; must not flap on dependencies). `/ready` is readiness: Postgres down -> 503, other dependencies -> `degraded`; it never exposes hostnames or error text and never calls the LLM.
 - Metric labels must come from a small fixed set -- never a patient id, query text, error message, or a name the model chose.
@@ -215,6 +220,8 @@ make docker-up-deps  # backing services only (postgres, chromadb, 3 MCP servers)
 make docker-up       # full stack incl. the app; make docker-down / docker-logs
 make db-upgrade      # alembic upgrade head (db-downgrade, db-revision name=... also exist)
 make ingest-guideline file=... source=...   # RAG ingestion via the CLI
+make purge-expired   # retention dry run (counts only); --execute via the CLI deletes
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d   # production (see docs/deployment.md)
 ```
 
 CI: `ci-check` on every push; the live eval and Docker builds on PRs into `main` only.

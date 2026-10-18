@@ -131,4 +131,9 @@ Canonical names for every domain concept in MedAgent. Use these exact terms in c
 | **Abuse limits** | Per-process token buckets on login attempts (per username and per client IP) and agent runs (per user). Over the limit the API answers 429 with `Retry-After`. Settings `LOGIN_ATTEMPTS_*`, `AGENT_RUNS_*`. |
 | **APP_ENV** | `development` (default) or `production`. Production refuses to start with a weak JWT secret or short bootstrap password, hides `/docs`, and adds HSTS. |
 | **WebSocket auth message** | The first message on `/ws/{patient_id}` must be `{"type":"auth","token":"<JWT>"}` within 10 s; tokens are never accepted in the URL. |
+| **Self-hosted model** | `LLM_PROVIDER=openai_compatible`: a model you run (Ollama, vLLM, LM Studio) behind an OpenAI-style API, so prompts with patient data stay on your infrastructure. |
+| **ALLOW_EXTERNAL_LLM_WITH_PHI** | Production refuses Groq or a public-host model unless this is `true`, i.e. you assert a data-processing agreement covering patient data. |
+| **Token version** | Each user's counter, embedded in their tokens. Disabling, password reset/change and revoke-tokens bump it, so existing tokens are rejected at once. |
+| **Retention purge** | `medagent purge-expired`: deletes whole patient records inactive for `RETENTION_DAYS` and audit entries older than `AUDIT_RETENTION_DAYS`. Opt-in, dry run by default, minimum 365 days, audited. |
+| **Production overlay** | `docker-compose.prod.yml`: Caddy with automatic HTTPS as the only public service, required secrets, `APP_ENV=production`, optional Ollama. |
 | **Settings** | The `Settings` singleton from pydantic-settings. Reads from env vars → `.env` → defaults. Single source of truth for all config. |

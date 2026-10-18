@@ -100,7 +100,10 @@ The provisioned **MedAgent Overview** dashboard shows, from `/metrics`: HTTP rat
 - `APP_ENV=production` refuses to start with the placeholder or a short `JWT_SECRET_KEY` (32+ chars, e.g. `openssl rand -hex 32`) or a short bootstrap password, hides `/docs`, and adds HSTS. In development the app logs a warning when the placeholder secret is used.
 - Docker Compose publishes every port on `127.0.0.1` only, and the app container runs as a non-root user.
 - `make deps-audit` scans the locked dependencies for known vulnerabilities (also in CI).
-- Still required for real deployments: TLS at a reverse proxy (run uvicorn with `--proxy-headers` behind it so rate limits see real client IPs), only the proxy exposed, encryption at rest, and a model provider you are allowed to send patient data to.
+- **Patient data and the model:** `LLM_PROVIDER=openai_compatible` with `LLM_BASE_URL`/`LLM_MODEL` uses a model you host (Ollama, vLLM, LM Studio), so prompts never leave your machines. Production refuses Groq or a public-host model unless `ALLOW_EXTERNAL_LLM_WITH_PHI=true` (you have a data agreement).
+- **Accounts:** `GET /admin/users`, `POST /admin/users/{username}/disable|enable|reset-password|revoke-tokens`, `POST /auth/change-password`. Each of these except enable ends that user's existing sessions immediately. All are audited.
+- **Retention:** `make purge-expired` (dry run) / `python -m medagent.cli purge-expired --execute`, only when `RETENTION_DAYS` / `AUDIT_RETENTION_DAYS` are set.
+- **Production:** `docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build` — Caddy with automatic HTTPS as the only public service, required secrets, optional Ollama. Full runbook (secrets, model choice, encrypted disks and backups, upgrades, retention schedule, accounts): [docs/deployment.md](docs/deployment.md).
 
 **Privacy note:** `LANGCHAIN_TRACING_V2=true` (LangSmith) sends prompts, which contain patient data, to a third-party service; keep it off for real data.
 

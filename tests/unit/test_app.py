@@ -950,3 +950,151 @@ def test_audit_log_honours_limit_and_rejects_huge_pages(pg_dsn: str) -> None:
 
     assert len(page.json()) == 2
     assert too_big.status_code == 422
+
+
+# --- user management ---
+
+
+def _bearer(headers: dict[str, str]) -> str:
+    return headers["Authorization"].removeprefix("Bearer ")
+
+
+def _audit_actions(pg_dsn: str) -> list[str]:
+    async def fetch() -> list[str]:
+        store = PersistentStore(pg_dsn)
+        async with store.connect() as conn:
+            rows = await conn.fetch("SELECT action FROM audit_log WHERE patient_id IS NULL")
+        await store.close()
+        return [row["action"] for row in rows]
+
+    return asyncio.run(fetch())
+
+
+def test_admin_lists_users_without_password_hashes(pg_dsn: str) -> None:
+    with _make_client(pg_dsn) as client:
+        _auth_headers(client, "dr.listed")
+        response = client.get("/admin/users", headers=_admin_headers(client))
+    assert response.status_code == 200
+    users = {u["username"]: u for u in response.json()}
+    assert users["dr.listed"]["disabled"] is False
+    assert all(
+        set(u) == {"id", "username", "role", "disabled", "created_at"} for u in users.values()
+    )
+
+
+def test_disabling_a_user_blocks_their_token_and_login(pg_dsn: str) -> None:
+    with _make_client(pg_dsn) as client:
+        doctor = _auth_headers(client, "dr.leaving")
+        admin = _admin_headers(client)
+
+        assert client.post("/admin/users/dr.leaving/disable", headers=admin).status_code == 204
+        token_after = client.get("/patients/P-TEST-999", headers=doctor)
+        login_after = client.post(
+            "/auth/token", data={"username": "dr.leaving", "password": _PASSWORD}
+        )
+
+        assert client.post("/admin/users/dr.leaving/enable", headers=admin).status_code == 204
+        login_enabled = client.post(
+            "/auth/token", data={"username": "dr.leaving", "password": _PASSWORD}
+        )
+
+    assert token_after.status_code == 401
+    assert login_after.status_code == 401
+    assert login_after.json()["detail"] == "Incorrect username or password"  # same as wrong pw
+    assert login_enabled.status_code == 200
+    assert "user_disabled" in _audit_actions(pg_dsn)
+
+
+def test_admin_cannot_disable_themselves(pg_dsn: str) -> None:
+    with _make_client(pg_dsn) as client:
+        response = client.post(
+            f"/admin/users/{_ADMIN_USERNAME}/disable", headers=_admin_headers(client)
+        )
+    assert response.status_code == 409
+
+
+def test_reset_password_revokes_old_tokens(pg_dsn: str) -> None:
+    with _make_client(pg_dsn) as client:
+        doctor = _auth_headers(client, "dr.forgot")
+        response = client.post(
+            "/admin/users/dr.forgot/reset-password",
+            json={"new_password": "brand-new-password-1"},
+            headers=_admin_headers(client),
+        )
+        old_token = client.get("/patients/P-TEST-999", headers=doctor)
+        old_password = client.post(
+            "/auth/token", data={"username": "dr.forgot", "password": _PASSWORD}
+        )
+        new_password = client.post(
+            "/auth/token", data={"username": "dr.forgot", "password": "brand-new-password-1"}
+        )
+    assert response.status_code == 204
+    assert old_token.status_code == 401
+    assert old_password.status_code == 401
+    assert new_password.status_code == 200
+
+
+def test_revoke_tokens_ends_sessions_but_keeps_the_password(pg_dsn: str) -> None:
+    with _make_client(pg_dsn) as client:
+        doctor = _auth_headers(client, "dr.lostphone")
+        assert (
+            client.post(
+                "/admin/users/dr.lostphone/revoke-tokens", headers=_admin_headers(client)
+            ).status_code
+            == 204
+        )
+        old_token = client.get("/patients/P-TEST-999", headers=doctor)
+        relogin = client.post(
+            "/auth/token", data={"username": "dr.lostphone", "password": _PASSWORD}
+        )
+        fresh = client.get(
+            "/patients/P-TEST-999",
+            headers={"Authorization": f"Bearer {relogin.json()['access_token']}"},
+        )
+    assert old_token.status_code == 401
+    assert fresh.status_code == 404  # authenticated again; the patient just doesn't exist
+
+
+def test_change_password(pg_dsn: str) -> None:
+    with _make_client(pg_dsn) as client:
+        doctor = _auth_headers(client, "dr.rotate")
+        wrong = client.post(
+            "/auth/change-password",
+            json={"current_password": "not-my-password", "new_password": "rotated-password-1"},
+            headers=doctor,
+        )
+        ok = client.post(
+            "/auth/change-password",
+            json={"current_password": _PASSWORD, "new_password": "rotated-password-1"},
+            headers=doctor,
+        )
+        old_token = client.get("/patients/P-TEST-999", headers=doctor)
+        relogin = client.post(
+            "/auth/token", data={"username": "dr.rotate", "password": "rotated-password-1"}
+        )
+    assert wrong.status_code == 401
+    assert ok.status_code == 204
+    assert old_token.status_code == 401
+    assert relogin.status_code == 200
+    assert "password_changed" in _audit_actions(pg_dsn)
+
+
+@pytest.mark.parametrize(
+    ("method", "path"),
+    [
+        ("get", "/admin/users"),
+        ("post", "/admin/users/dr.someone/disable"),
+        ("post", "/admin/users/dr.someone/revoke-tokens"),
+    ],
+)
+def test_user_management_requires_admin(pg_dsn: str, method: str, path: str) -> None:
+    with _make_client(pg_dsn) as client:
+        doctor = _auth_headers(client, "dr.notadmin")
+        response = getattr(client, method)(path, headers=doctor)
+    assert response.status_code == 403
+
+
+def test_unknown_user_is_404(pg_dsn: str) -> None:
+    with _make_client(pg_dsn) as client:
+        response = client.post("/admin/users/dr.ghost/disable", headers=_admin_headers(client))
+    assert response.status_code == 404

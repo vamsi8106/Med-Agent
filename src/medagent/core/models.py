@@ -206,6 +206,9 @@ class User(BaseModel):
     id: str
     username: str
     role: str = "doctor"
+    disabled: bool = False
+    # Internal: tokens carrying an older version are rejected. Never serialised.
+    token_version: int = Field(default=0, exclude=True)
     created_at: datetime | None = None
 
 

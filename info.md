@@ -41,7 +41,7 @@ Medical data comes from free, open APIs, reached through three MCP servers (see 
 
 It is a decision-*support* tool: it drafts reports for a doctor to review, and the WebSocket flow requires the doctor to approve before anything is saved.
 
-**Stack:** Python 3.12, FastAPI, LangGraph, pydantic v2, structlog, httpx, asyncpg + Alembic, ChromaDB, sentence-transformers (`all-MiniLM-L6-v2`, CPU-only), Prometheus, Grafana, OpenTelemetry, Tempo. The LLM is Groq by default, swappable through `LLM_PROVIDER`.
+**Stack:** Python 3.12, FastAPI, LangGraph, pydantic v2, structlog, httpx, asyncpg + Alembic, ChromaDB, sentence-transformers (`all-MiniLM-L6-v2`, CPU-only), Prometheus, Grafana, OpenTelemetry, Tempo. The LLM is chosen with `LLM_PROVIDER`: Groq (cloud, for synthetic demos) or any self-hosted model behind an OpenAI-style API (Ollama, vLLM, LM Studio), so patient data can stay on your machines.
 
 ## 2. The big picture
 
@@ -389,7 +389,11 @@ The schema change is migration `5b1e7c2d9a40` (adds `visits.record_snapshot` and
 - **Production mode.** `APP_ENV=production` refuses to start with the placeholder or a short `JWT_SECRET_KEY` (32+ characters) or a bootstrap password under 12 characters, and hides `/docs` and `/openapi.json`. In development the app logs a warning when the placeholder secret is in use.
 - **Container and network.** The app container runs as a non-root user. Docker Compose publishes every port on `127.0.0.1` only.
 - **Dependencies.** `make deps-audit` scans the locked dependencies (pip-audit), locally and in CI. Four ChromaDB advisories have no fixed release yet; they concern the Chroma server, which is reachable only on the compose network, and are ignored with that reason in the Makefile until a fix ships.
-- **Still required before real use:** TLS at a reverse proxy (with uvicorn's `--proxy-headers` so limits see real client IPs) and only the proxy exposed; strong, unique secrets and passwords for Postgres and Grafana; encryption at rest; a model provider you are allowed to send patient data to (Groq is a third-party cloud); user management (disable, reset, revoke) and a retention policy.
+- **Where prompts go.** Prompts contain patient data. `LLM_PROVIDER=openai_compatible` points the app at a model you host (Ollama, vLLM, LM Studio) through an OpenAI-style API, so nothing leaves your infrastructure. In production, the app refuses to start with Groq, or with an `openai_compatible` endpoint on a public host, unless `ALLOW_EXTERNAL_LLM_WITH_PHI=true` asserts a data-processing agreement. "Local" means localhost, a private or loopback IP, or a single-label compose service name such as `ollama`.
+- **Accounts.** Admins can list users, disable or enable them, reset passwords and revoke all of a user's sessions; any user can change their own password. Each token carries the user's *token version*; disabling, password reset or change, and revoke-tokens bump it, so existing tokens stop working immediately. A disabled user's login gets the same answer as a wrong password. An admin cannot disable their own account. Every account change is audited.
+- **Retention.** `medagent purge-expired` deletes whole patient records whose last activity is older than `RETENTION_DAYS`, and audit entries older than `AUDIT_RETENTION_DAYS`. Nothing is deleted unless these are set; values under 365 days are refused; it is a dry run unless `--execute` is passed; and each purge writes its own audit entry.
+- **Production deployment.** `docker-compose.prod.yml` puts Caddy in front with automatic HTTPS (Let's Encrypt for `DOMAIN`, a local certificate for `localhost`) as the only public service, removes every other published port (Grafana stays on localhost for SSH tunnelling), requires the secrets (`JWT_SECRET_KEY`, `POSTGRES_PASSWORD`, `GRAFANA_ADMIN_PASSWORD`, `ADMIN_BOOTSTRAP_PASSWORD`) with no defaults, sets `APP_ENV=production`, and passes client IPs through for rate limiting. It has an optional Ollama service. `docs/deployment.md` is the step-by-step runbook, including encrypted disks and backups, Postgres TLS, upgrades and scheduling the retention purge.
+- **What the code cannot do for you:** encrypting the disk or volume Postgres lives on (and the backups), signing a data agreement if you use an external model, and the organisational side (access policy, incident response, HIPAA/GDPR review). The runbook covers how to do each.
 
 ## 16. Observability: logging, metrics, tracing, health
 
@@ -482,6 +486,8 @@ make docker-up-deps       # only backing services, for running the app on the ho
 make serve                # app on the host with reload
 make db-upgrade           # migrations
 make ingest-guideline file=guidelines_pdf/x.pdf source=my-source
+make purge-expired        # retention dry run
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build   # production
 ```
 
 Ports and URLs: API `:8000`, Grafana `:3000`, Prometheus `:9090`, Tempo `:3200`. If port 5432 is taken on your host, set `POSTGRES_HOST_PORT=5433`. When running tools on the host (not in Docker), use the host-mapped service ports rather than the Docker hostnames in `.env`.
@@ -494,7 +500,10 @@ All settings come from environment variables or `.env` through `Settings`. New s
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `LLM_PROVIDER` | `groq` | which provider to use |
+| `LLM_PROVIDER` | `groq` | `groq`, `openai_compatible` (self-hosted) or `mock` |
+| `LLM_BASE_URL`, `LLM_MODEL`, `LLM_API_KEY` | unset | self-hosted model endpoint, e.g. `http://localhost:11434/v1` |
+| `ALLOW_EXTERNAL_LLM_WITH_PHI` | false | required in production for Groq or a public-host model |
+| `RETENTION_DAYS`, `AUDIT_RETENTION_DAYS` | unset | retention purge; unset = never delete; minimum 365 |
 | `GROQ_API_KEY`, `GROQ_MODEL` | none, `openai/gpt-oss-20b` | model must support tool calling |
 | `LLM_TIMEOUT_SECONDS`, `MCP_TIMEOUT_SECONDS` | 30, 30 | per-call timeouts |
 | `RETRY_MAX_WAIT_SECONDS`, `RETRY_BUDGET_SECONDS` | 10, 45 | retry policy |
@@ -531,6 +540,7 @@ Stated plainly so they are not a surprise:
 - **Approval drafts are in memory.** A restart loses pending drafts, and the approval step exists only over the WebSocket.
 - **Circuit-breaker state is per process**, not shared across replicas.
 - **The Groq quota is a hard external limit.** When it is exhausted the API returns 429 with `Retry-After`, and reports degrade or fail accordingly.
+- **Self-hosted model quality depends on the model.** The evals were tuned on Groq's `openai/gpt-oss-20b`; small local models (3B and under) are much weaker. Run `make eval` against the model you choose before relying on it.
 - **Not built:** LLM prompt/response tracing (would need a self-hosted tool such as Langfuse or Phoenix because of PHI), log aggregation, alert rules, and database-query spans.
 
 ## 21. Glossary

@@ -1,4 +1,4 @@
-.PHONY: deps-audit import-check install test unit-tests eval lint-check lint-fix format-fix format-check type-check pre-commit ci-check serve docker-up-deps docker-up docker-down docker-logs db-upgrade db-downgrade db-revision ingest-guideline
+.PHONY: purge-expired deps-audit import-check install test unit-tests eval lint-check lint-fix format-fix format-check type-check pre-commit ci-check serve docker-up-deps docker-up docker-down docker-logs db-upgrade db-downgrade db-revision ingest-guideline
 
 install:
 	uv sync
@@ -73,6 +73,11 @@ db-downgrade:
 
 db-revision:
 	uv run alembic revision -m "$(name)"
+
+# Retention: dry run (counts only). Deleting needs RETENTION_DAYS /
+# AUDIT_RETENTION_DAYS set and `uv run python -m medagent.cli purge-expired --execute`.
+purge-expired:
+	uv run python -m medagent.cli purge-expired
 
 ingest-guideline:
 	uv run python -m medagent.cli ingest-guideline --file "$(file)" --source "$(source)"

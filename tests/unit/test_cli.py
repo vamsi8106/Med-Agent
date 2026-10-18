@@ -71,3 +71,16 @@ def test_main_dispatches_to_ingest_guideline(tmp_path: Path) -> None:
 
     assert result == 0
     fake_run.assert_called_once()
+
+
+def test_build_arg_parser_parses_purge_expired() -> None:
+    parser = build_arg_parser()
+    assert parser.parse_args(["purge-expired"]).execute is False
+    assert parser.parse_args(["purge-expired", "--execute"]).execute is True
+
+
+def test_purge_without_retention_configured_is_a_noop(capsys: object) -> None:
+    from medagent.core.config import Settings
+
+    with patch("medagent.cli.get_settings", return_value=Settings(_env_file=None)):
+        assert main(["purge-expired", "--execute"]) == 0

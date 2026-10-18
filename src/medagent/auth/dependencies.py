@@ -4,7 +4,7 @@ WebSocket handshake (the token arrives in its first message, see api/routes/ws.p
 from fastapi import Depends, HTTPException, Request, WebSocket
 from fastapi.security import OAuth2PasswordBearer
 
-from medagent.auth.security import decode_access_token
+from medagent.auth.security import decode_token_claims
 from medagent.core.exceptions import AuthError
 from medagent.core.models import User
 
@@ -15,7 +15,7 @@ async def _resolve_user(app_state: object, token: str) -> User:
     # app_state is really app.py's AppState, typed as `object` here to avoid
     # auth/ importing upward from the top-level app.py glue module.
     try:
-        username = decode_access_token(
+        username, version = decode_token_claims(
             token,
             app_state.settings.jwt_secret_key,  # type: ignore[attr-defined]
             app_state.settings.jwt_algorithm,  # type: ignore[attr-defined]
@@ -24,8 +24,10 @@ async def _resolve_user(app_state: object, token: str) -> User:
         raise HTTPException(status_code=401, detail=str(exc)) from exc
 
     record = await app_state.user_store.get_by_username(username)  # type: ignore[attr-defined]
-    if record is None:
-        raise HTTPException(status_code=401, detail="User not found")
+    # Unknown, disabled, or revoked (password changed / reset / revoke-tokens):
+    # one answer for all, so the response doesn't say which.
+    if record is None or record[0].disabled or record[0].token_version != version:
+        raise HTTPException(status_code=401, detail="Invalid access token")
     user, _hashed_password = record
     return user
 

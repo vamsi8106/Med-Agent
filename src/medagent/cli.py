@@ -3,6 +3,8 @@
 Usage:
     uv run python -m medagent.cli ingest-guideline --file path/to/guideline.pdf --source ada-2024
     uv run python -m medagent.cli ingest-guideline --file path/to/notes.txt --source internal-notes
+    uv run python -m medagent.cli purge-expired            # dry run: counts only
+    uv run python -m medagent.cli purge-expired --execute  # delete past retention
 """
 
 import argparse
@@ -12,6 +14,8 @@ from pathlib import Path
 
 from medagent.core.config import get_settings
 from medagent.infra.logging import configure_logging, get_logger
+from medagent.memory.persistent import PersistentStore
+from medagent.memory.retention import purge_expired
 from medagent.rag.embeddings import EmbeddingModel
 from medagent.rag.pipeline import IngestionPipeline
 from medagent.rag.vector_store import VectorStore
@@ -31,7 +35,45 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--source", required=True, help="Source label stored with each chunk, e.g. 'ada-2024'"
     )
 
+    purge = subparsers.add_parser(
+        "purge-expired",
+        help="Delete patient records and audit entries past RETENTION_DAYS / "
+        "AUDIT_RETENTION_DAYS (dry run unless --execute).",
+    )
+    purge.add_argument(
+        "--execute", action="store_true", help="Actually delete (default: only count)"
+    )
+
     return parser
+
+
+async def purge_expired_records(execute: bool) -> int:
+    settings = get_settings()
+    if settings.retention_days is None and settings.audit_retention_days is None:
+        print("Retention is not configured (RETENTION_DAYS / AUDIT_RETENTION_DAYS); nothing to do.")
+        return 0
+    store = PersistentStore(settings.postgres_dsn)
+    try:
+        result = await purge_expired(
+            store,
+            retention_days=settings.retention_days,
+            audit_retention_days=settings.audit_retention_days,
+            execute=execute,
+        )
+    finally:
+        await store.close()
+    logger.info(
+        "retention_purge",
+        executed=result.executed,
+        patients=result.patients,
+        audit_entries=result.audit_entries,
+    )
+    verb = "Deleted" if execute else "Would delete (dry run, pass --execute)"
+    print(
+        f"{verb}: {result.patients if result.patients is not None else 'n/a'} patient records, "
+        f"{result.audit_entries if result.audit_entries is not None else 'n/a'} audit entries"
+    )
+    return 0
 
 
 async def ingest_guideline(file_path: Path, source_name: str) -> int:
@@ -73,6 +115,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "ingest-guideline":
         return asyncio.run(ingest_guideline(args.file, args.source))
+    if args.command == "purge-expired":
+        return asyncio.run(purge_expired_records(args.execute))
 
     parser.print_help()
     return 1

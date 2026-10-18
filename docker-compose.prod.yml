@@ -1,0 +1,95 @@
+# Production overlay. Use together with the base file:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+#
+# Differences from development:
+# - Caddy terminates TLS and is the only service with public ports (80/443).
+# - Every other service loses its published ports; Grafana stays on
+#   127.0.0.1:3000 for access through an SSH tunnel.
+# - APP_ENV=production: the app refuses weak secrets and external LLMs without
+#   ALLOW_EXTERNAL_LLM_WITH_PHI (see core/config.py).
+# - Secrets have no defaults: compose refuses to start until they are set.
+# See docs/deployment.md for the full runbook.
+
+services:
+  caddy:
+    image: caddy:2.8.4-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      DOMAIN: ${DOMAIN:-localhost}
+    volumes:
+      - ./ops/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      medagent:
+        condition: service_healthy
+
+  medagent:
+    restart: unless-stopped
+    ports: !reset []
+    # --proxy-headers: client IPs from Caddy's X-Forwarded-For (rate limits).
+    # '*' is safe here only because nothing but Caddy can reach this port.
+    command: >-
+      sh -c "alembic upgrade head && uvicorn medagent.app:app --host 0.0.0.0 --port 8000
+      --no-access-log --proxy-headers --forwarded-allow-ips '*'"
+    environment:
+      APP_ENV: production
+      POSTGRES_DSN: postgresql://medagent:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/medagent
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:?set JWT_SECRET_KEY (openssl rand -hex 32)}
+      ADMIN_BOOTSTRAP_PASSWORD: ${ADMIN_BOOTSTRAP_PASSWORD:?set ADMIN_BOOTSTRAP_PASSWORD (12+ characters)}
+
+  postgres:
+    restart: unless-stopped
+    ports: !reset []
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+
+  chromadb:
+    restart: unless-stopped
+    ports: !reset []
+
+  healthcare-mcp:
+    restart: unless-stopped
+    ports: !reset []
+
+  research-mcp:
+    restart: unless-stopped
+    ports: !reset []
+
+  medical-mcp-bridge:
+    restart: unless-stopped
+    ports: !reset []
+
+  tempo:
+    restart: unless-stopped
+    ports: !reset []
+
+  prometheus:
+    restart: unless-stopped
+    ports: !reset []
+
+  grafana:
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?set GRAFANA_ADMIN_PASSWORD}
+
+  # Optional self-hosted model, so prompts (which carry patient data) stay on
+  # this machine. Start with `--profile local-llm`, pull a tool-calling model
+  # (docker compose exec ollama ollama pull qwen2.5:7b), and set
+  # LLM_PROVIDER=openai_compatible LLM_BASE_URL=http://ollama:11434/v1 LLM_MODEL=qwen2.5:7b
+  ollama:
+    image: ollama/ollama:0.12.6
+    restart: unless-stopped
+    profiles: ["local-llm"]
+    volumes:
+      - ollama-models:/root/.ollama
+
+volumes:
+  caddy-data:
+  caddy-config:
+  ollama-models:

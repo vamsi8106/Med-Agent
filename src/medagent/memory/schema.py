@@ -176,6 +176,19 @@ REMOVE_RECORD_HISTORY_STATEMENTS: list[str] = [
     "ALTER TABLE visits DROP COLUMN IF EXISTS record_snapshot",
 ]
 
+# Migration 0005: user management. `disabled` blocks login and every token;
+# bumping `token_version` revokes all tokens issued before (each token carries
+# the version it was issued with, see auth/security.py).
+ADD_USER_MANAGEMENT_STATEMENTS: list[str] = [
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS disabled BOOLEAN NOT NULL DEFAULT FALSE",
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS token_version INTEGER NOT NULL DEFAULT 0",
+]
+
+REMOVE_USER_MANAGEMENT_STATEMENTS: list[str] = [
+    "ALTER TABLE users DROP COLUMN IF EXISTS token_version",
+    "ALTER TABLE users DROP COLUMN IF EXISTS disabled",
+]
+
 TABLES_IN_DEPENDENCY_ORDER: list[str] = [
     "audit_log",
     "interactions_log",

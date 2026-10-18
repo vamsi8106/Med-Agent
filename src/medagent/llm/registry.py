@@ -30,4 +30,18 @@ class ProviderRegistry:
                 retry_budget_seconds=settings.retry_budget_seconds,
             )
 
+        if name == "openai_compatible":
+            from medagent.llm.openai_compatible_provider import OpenAICompatibleProvider
+
+            if not settings.llm_base_url or not settings.llm_model:
+                raise ProviderError("LLM_BASE_URL and LLM_MODEL must be set for openai_compatible")
+            return OpenAICompatibleProvider(
+                base_url=settings.llm_base_url,
+                model=settings.llm_model,
+                api_key=settings.llm_api_key,
+                timeout_seconds=settings.llm_timeout_seconds,
+                retry_max_wait_seconds=settings.retry_max_wait_seconds,
+                retry_budget_seconds=settings.retry_budget_seconds,
+            )
+
         raise ProviderError(f"Unknown LLM provider: {name}")

@@ -33,13 +33,26 @@ def verify_password(password: str, hashed: str) -> bool:
     return hmac.compare_digest(actual, expected)
 
 
-def create_access_token(subject: str, secret_key: str, algorithm: str, expire_minutes: int) -> str:
+def create_access_token(
+    subject: str, secret_key: str, algorithm: str, expire_minutes: int, version: int = 0
+) -> str:
+    """`ver` is the user's token_version at issue time; bumping it revokes the token."""
     now = datetime.now(UTC)
-    payload = {"sub": subject, "iat": now, "exp": now + timedelta(minutes=expire_minutes)}
+    payload = {
+        "sub": subject,
+        "ver": version,
+        "iat": now,
+        "exp": now + timedelta(minutes=expire_minutes),
+    }
     return jwt.encode(payload, secret_key, algorithm=algorithm)
 
 
 def decode_access_token(token: str, secret_key: str, algorithm: str) -> str:
+    return decode_token_claims(token, secret_key, algorithm)[0]
+
+
+def decode_token_claims(token: str, secret_key: str, algorithm: str) -> tuple[str, int]:
+    """(subject, token version). Tokens issued before versions existed count as 0."""
     try:
         payload = jwt.decode(token, secret_key, algorithms=[algorithm])
     except jwt.ExpiredSignatureError as exc:
@@ -52,4 +65,5 @@ def decode_access_token(token: str, secret_key: str, algorithm: str) -> str:
     subject = payload.get("sub")
     if not subject:
         raise AuthError("Access token missing subject")
-    return subject
+    version = payload.get("ver", 0)
+    return subject, version if isinstance(version, int) else -1

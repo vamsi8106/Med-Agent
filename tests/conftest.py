@@ -19,6 +19,7 @@ import pytest
 from medagent.memory.schema import (
     ADD_DOCTOR_ID_STATEMENTS,
     ADD_RECORD_HISTORY_STATEMENTS,
+    ADD_USER_MANAGEMENT_STATEMENTS,
     AUDIT_LOG_CREATE_STATEMENTS,
     CREATE_STATEMENTS,
     TABLES_IN_DEPENDENCY_ORDER,
@@ -66,6 +67,7 @@ async def _wait_until_ready_and_apply_schema(dsn: str) -> None:
             *AUDIT_LOG_CREATE_STATEMENTS,
             *ADD_DOCTOR_ID_STATEMENTS,
             *ADD_RECORD_HISTORY_STATEMENTS,
+            *ADD_USER_MANAGEMENT_STATEMENTS,
         ]:
             await conn.execute(statement)
     finally:

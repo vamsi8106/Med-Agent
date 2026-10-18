@@ -1,8 +1,10 @@
 """Application settings, loaded from environment variables / .env."""
 
+import ipaddress
 from typing import Literal, Self
+from urllib.parse import urlsplit
 
-from pydantic import model_validator
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # The placeholder shipped in .env.example and docker-compose.yml. Anyone who has
@@ -12,8 +14,30 @@ MIN_JWT_SECRET_LENGTH = 32
 MIN_PASSWORD_LENGTH = 12
 
 
+# Suffixes reserved for private networks: never resolvable on the public
+# internet (`.internal` is reserved by ICANN; host.docker.internal is the Docker
+# host itself; `.local` is mDNS; `.localhost` is loopback).
+_PRIVATE_SUFFIXES = (".internal", ".local", ".localhost")
+
+
+def is_local_host(url: str) -> bool:
+    """True for localhost, loopback/private IPs, single-label names (a compose
+    service such as `ollama`) and reserved private suffixes: places where
+    patient data stays on infrastructure you run."""
+    host = urlsplit(url).hostname or ""
+    if host == "localhost" or ("." not in host and host) or host.endswith(_PRIVATE_SUFFIXES):
+        return True
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return address.is_private or address.is_loopback
+
+
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    # env_ignore_empty: docker-compose passes unset variables as "" (e.g.
+    # RETENTION_DAYS: ${RETENTION_DAYS:-}); treat that as "not set", not as a value.
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore", env_ignore_empty=True)
 
     # "production" turns misconfiguration into a startup error (weak JWT secret,
     # short bootstrap password), hides the interactive API docs and adds HSTS.
@@ -25,6 +49,17 @@ class Settings(BaseSettings):
     # the Groq org cannot access fails every fresh checkout and CI run with a 404, so
     # this is the model actually verified end to end, not a guess.
     groq_model: str = "openai/gpt-oss-20b"
+
+    # LLM_PROVIDER=openai_compatible: a model you host (Ollama, vLLM, LM Studio)
+    # behind an OpenAI-style /chat/completions API, e.g. http://localhost:11434/v1.
+    # The model must support tool calling (the evidence agent is a ReAct agent).
+    llm_base_url: str | None = None
+    llm_model: str | None = None
+    llm_api_key: str | None = None
+    # Prompts contain patient data. Production refuses a third-party model
+    # (Groq, or an openai_compatible endpoint on a public host) unless this
+    # asserts you have a data-processing agreement covering patient data.
+    allow_external_llm_with_phi: bool = False
 
     log_level: str = "INFO"
 
@@ -114,6 +149,12 @@ class Settings(BaseSettings):
     # Requests with a larger body are refused with 413 before they are parsed.
     max_request_body_bytes: int = 1_000_000
 
+    # Retention for `medagent purge-expired`. Unset = nothing is ever deleted.
+    # How long medical records and access logs must be kept is a legal decision
+    # (often 7-10+ years); values under a year are refused as a likely mistake.
+    retention_days: int | None = Field(default=None, ge=365)
+    audit_retention_days: int | None = Field(default=None, ge=365)
+
     @model_validator(mode="after")
     def _refuse_insecure_production_config(self) -> Self:
         if self.app_env != "production":
@@ -133,6 +174,17 @@ class Settings(BaseSettings):
         ):
             problems.append(
                 f"ADMIN_BOOTSTRAP_PASSWORD must be at least {MIN_PASSWORD_LENGTH} characters"
+            )
+        external_llm = self.llm_provider == "groq" or (
+            self.llm_provider == "openai_compatible"
+            and self.llm_base_url is not None
+            and not is_local_host(self.llm_base_url)
+        )
+        if external_llm and not self.allow_external_llm_with_phi:
+            problems.append(
+                f"LLM_PROVIDER={self.llm_provider} sends patient data to a third party; use a "
+                "self-hosted model (LLM_PROVIDER=openai_compatible with a local LLM_BASE_URL) "
+                "or set ALLOW_EXTERNAL_LLM_WITH_PHI=true if you have a data agreement"
             )
         if problems:
             raise ValueError("Refusing to start with APP_ENV=production: " + "; ".join(problems))
