@@ -38,6 +38,22 @@ jobs:
       - name: Scan dependencies for known vulnerabilities
         run: make deps-audit
 
+  mcp-audit:
+    # The three MCP servers' npm dependencies (their committed lockfiles), on
+    # every push like deps-audit: new advisories appear without any change here.
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Audit MCP server dependencies
+        run: make mcp-audit
+
   eval:
     runs-on: ubuntu-latest
     # PRs into main only, not every push -- this hits real Groq (costs money)

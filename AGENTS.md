@@ -44,7 +44,7 @@ src/medagent/
 │   ├── metrics.py               # Prometheus catalogue: HTTP, LLM calls/latency/tokens, retries, breaker state, MCP, tool calls, ReAct paths, guardrail flags, truncations
 │   ├── middleware.py            # request id, request logging, metrics + HTTP span (route templates only); SecurityMiddleware: body-size cap (413) + security headers
 │   ├── context_budget.py        # token estimate (3.5 chars/token) + truncate_text for prompt inputs
-│   ├── guardrails.py            # wrap_untrusted (prompt-injection delimiting), allergy output check, output sanity checks
+│   ├── guardrails.py            # wrap_untrusted (prompt-injection delimiting), allergy output check, output sanity checks, outbound_search_query (identifiers out of external API queries)
 │   ├── verification.py          # deterministic check of an answer's numeric claims (doses, %, lab values) against its sources
 │   └── agent_run.py             # AgentRunTracker: per-run token budget + step trace
 ├── tools/                       # Phase 2
@@ -93,7 +93,7 @@ src/medagent/
 └── app.py                       # Phase 6 — create_app(): lifespan, middleware, routers
 ```
 
-Outside `src/`: `migrations/` (Alembic), `docker/` (MCP server images), `ops/` (Prometheus/Grafana/Tempo/Caddy config), `docker-compose.prod.yml` (production overlay: Caddy TLS, no other public ports, required secrets, optional Ollama), `docs/deployment.md` (production runbook), `deploy/k8s/` (Kustomize: base, `overlays/local` for kind, `overlays/aws` for EKS + RDS + ALB), `tests/eval/` (live golden-dataset evals).
+Outside `src/`: `migrations/` (Alembic), `docker/` (MCP server images, with each server's audited `package.json` / `package-lock.json`), `ops/` (Prometheus/Grafana/Tempo/Caddy config), `docker-compose.prod.yml` (production overlay: Caddy TLS, no other public ports, required secrets, optional Ollama), `docs/deployment.md` (production runbook), `deploy/k8s/` (Kustomize: base, `overlays/local` for kind, `overlays/aws` for EKS + RDS + ALB), `tests/eval/` (live golden-dataset evals).
 
 `tests/` mirrors `src/` 1:1. `docs/glossary.md` for canonical terms; `docs/info.md` explains every concept and flow; `docs/code-walkthrough.md` traces each request through the files and describes every module. Architecture decisions and their rationale live in commit messages and the README.
 
@@ -203,7 +203,9 @@ Tools available: `search-drugs`, `get-drug-details`, `search-drug-nomenclature`,
 - The `checkpoint_*` schema is a frozen copy of the saver's migrations in `memory/schema.py`; after upgrading `langgraph-checkpoint-postgres`, `tests/unit/memory/test_drafts.py` (and the app at startup) tell you to add an Alembic migration.
 - A change to chunking, the embedding model, re-ranking or retrieval needs `make rag-eval` before and after; report the numbers, including ms/query. Chunks must fit the embedding model's token limit (`EmbeddingModel.max_tokens`), or the rest of the chunk is silently not embedded.
 - Retention deletes only when configured, whole records only (drafts included), and audits itself. Never add another code path that deletes patient data.
-- `make deps-audit` (pip-audit) must stay clean; an ignored advisory needs a reason in the Makefile and is removed when a fix ships.
+- `make deps-audit` (pip-audit) must stay clean; an ignored advisory needs a reason in the Makefile and is removed when a fix ships. `make mcp-audit` (npm audit over `docker/*/package-lock.json`) must stay clean of high/critical.
+- Vendored MCP servers are pinned to commits in `scripts/setup_vendor_mcp.sh` and install our overlay lockfiles (`docker/<server>/`); an upgrade changes the commit, regenerates the overlay and re-runs `make mcp-audit` (`docs/deployment.md` §12).
+- Any query sent to an external medical API goes through `infra/guardrails.py::outbound_search_query` (strips the patient's name and id, dates, numbers, contact details). Local searches (ChromaDB) don't need it.
 - `/health` is liveness (Docker uses it; must not flap on dependencies). `/ready` is readiness: Postgres down -> 503, other dependencies -> `degraded`; it never exposes hostnames or error text and never calls the LLM.
 - Metric labels must come from a small fixed set -- never a patient id, query text, error message, or a name the model chose.
 - Anything shared across requests (`AppState` clients, models) is used concurrently -- `HttpMCPClient` is re-entrant and `EmbeddingModel` serializes encodes for this reason. A new shared resource must be safe under overlapping use, with a test that overlaps it.
@@ -224,6 +226,7 @@ make format-check    # uv run ruff format --check .
 make type-check      # uv run mypy
 make import-check    # import-linter: the layer rules above
 make deps-audit      # pip-audit over the locked runtime dependencies (also in CI)
+make mcp-audit       # npm audit over the MCP servers' committed lockfiles (also in CI)
 make pre-commit      # format-fix + lint-fix + lint-check + type-check + import-check + unit-tests
 make ci-check        # format-check + lint-check + type-check + import-check + unit-tests (what CI runs; no auto-fix)
 make serve           # uv run uvicorn medagent.app:app --reload

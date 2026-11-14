@@ -177,7 +177,7 @@ END  →  AssessmentOutcome(report, interactions)
 
 - **Evidence** (`agents/evidence_agent.py`):
   1. Builds a patient preamble: conditions, allergies, medications, recent visits, and changes since the last visit, all wrapped as untrusted text.
-  2. Runs a ReAct loop (`agents/base.py::ReActAgent`, max 3 turns) over two tools: `search_medical_literature` (`tools/mcp/medical.py` → PubMed) and `search_guidelines` (`rag/retriever.py` → ChromaDB).
+  2. Runs a ReAct loop (`agents/base.py::ReActAgent`, max 3 turns) over two tools: `search_medical_literature` (`tools/mcp/medical.py` → PubMed; the query first passes `outbound_search_query`, which strips patient identifiers, as does the fallback's) and `search_guidelines` (`rag/retriever.py` → ChromaDB, local).
   3. If the model retrieves nothing or the loop fails, it falls back to the fixed retrieve-then-summarize pipeline.
   4. Every answer goes through the figure check (`infra/verification.py`) and the allergy cross-check (`infra/guardrails.py`).
 
@@ -339,7 +339,7 @@ No log line, span attribute or metric label carries patient data; `tests/unit/in
 | `circuit_breaker.py` | Opens after repeated real outages (timeouts, connection errors, 5xx), fails fast while open, then tries again. 4xx and rate limits never count. |
 | `rate_limiter.py` | `TokenBucket` for outbound calls (waits); `KeyedRateLimiter` for incoming abuse limits per user/IP, per process (never waits; returns the retry time; bounded memory). |
 | `context_budget.py` | Token estimate (3.5 characters per token) and `truncate_text`, which records a truncation metric. |
-| `guardrails.py` | `wrap_untrusted` (delimits outside text so it isn't followed as instructions), the allergy-mention check on output, and `validate_output` sanity checks. |
+| `guardrails.py` | `wrap_untrusted` (delimits outside text so it isn't followed as instructions), the allergy-mention check on output, `validate_output` sanity checks, and `outbound_search_query` (removes patient identifiers from queries sent to external APIs). |
 | `verification.py` | Finds doses, percentages and lab values in an answer that appear in none of its sources, and adds an `UNVERIFIED FIGURES` warning. |
 | `agent_run.py` | `AgentRunTracker`: token budget per run, step records (completed / skipped / failed), and a summary for the logs. |
 
@@ -447,7 +447,7 @@ No log line, span attribute or metric label carries patient data; `tests/unit/in
 | `docker-compose.prod.yml` | Production overlay: Caddy (HTTPS) as the only public service, required secrets, optional Ollama. |
 | `deploy/k8s/` | Kustomize manifests for several replicas: `base/`, `overlays/local/` (kind), `overlays/aws/` (EKS + RDS + ALB). |
 | `Dockerfile` | The app image (CPU-only torch, non-root user). |
-| `scripts/setup_vendor_mcp.sh` | Clones and builds the two MCP servers that come from GitHub into `vendor/`. |
+| `scripts/setup_vendor_mcp.sh` | Fetches the two MCP servers that come from GitHub into `vendor/` at pinned commits and lays our audited dependency overlay (`docker/<server>/package*.json`) over each. |
 | `Makefile` | Every developer command (`make pre-commit`, `make eval`, `make serve`...). |
 | `pyproject.toml`, `uv.lock` | Dependencies, tool configuration, import-linter contracts. |
 

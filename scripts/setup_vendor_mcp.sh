@@ -1,38 +1,57 @@
 #!/usr/bin/env bash
-# Clones and builds the two local-build MCP servers referenced by AGENTS.md's
-# MCP Server Config (healthcare-mcp, med-research-mcp-suite). Neither is
-# published to npm under those names -- they're real public repos meant to be
-# vendored and built locally. `medical-mcp` (the third server) IS a real npx
-# package and needs no setup here.
+# Fetches the two MCP servers that are built from GitHub source into vendor/
+# (healthcare-mcp, med-research-mcp-suite) at PINNED commits, then lays our
+# audited dependency overlay over each: docker/<server>/package.json and
+# package-lock.json. The Docker images install exactly that lockfile (npm ci).
+# medical-mcp (the third server) is an npm package, pinned and locked in
+# docker/medical-mcp-bridge/.
 #
-# Includes two workarounds for confirmed bugs in the upstream projects:
-#   1. healthcare-mcp-public is missing `dicom-parser` from package.json's
-#      dependencies despite importing it in server/dicom-tool.js.
-#   2. Its real entry point is server/index.js, not build/index.js as
-#      AGENTS.md's original config guessed (already fixed in core/config.py).
+# Upgrading a server is deliberate: change its commit below, regenerate its
+# overlay (see docs/deployment.md, "MCP server supply chain") and run
+# `make mcp-audit`.
+#
+# The overlays differ from upstream where needed:
+#   healthcare-mcp: adds dicom-parser (imported by server/dicom-tool.js but missing
+#     from upstream's package.json) and drops sqlite3 (never imported; its native
+#     build pulled in a vulnerable tar and needed a C++ toolchain in the image).
+#   med-research-mcp-suite: tsx moves to dependencies (the image runs
+#     src/web-server.ts through it), so dev tooling stays out of the image; the MCP
+#     SDK is upgraded to a fixed release (only the stdio src/index.ts imports it).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+HEALTHCARE_MCP_REPO=https://github.com/Cicatriiz/healthcare-mcp-public.git
+HEALTHCARE_MCP_COMMIT=1c4c40c3bb63b94ecf71f972d9806c76e7ffee7b
+RESEARCH_MCP_REPO=https://github.com/ezhou89/medical-research-mcp-suite.git
+RESEARCH_MCP_COMMIT=10ae11baffa0f2d42020ccf8bc17657c8230f6c4
+
+# fetch_pinned <repo> <commit> <dir> <overlay dir>
+fetch_pinned() {
+  local repo=$1 commit=$2 dir=$3 overlay=$4
+  if [ ! -d "$dir/.git" ]; then
+    git clone --quiet "$repo" "$dir"
+  fi
+  git -C "$dir" fetch --quiet origin
+  # Discard anything a previous run (or an older version of this script) changed.
+  git -C "$dir" checkout --quiet --force "$commit"
+  git -C "$dir" clean --quiet -fdx
+  if [ "$(git -C "$dir" rev-parse HEAD)" != "$commit" ]; then
+    echo "error: $dir is not at the pinned commit $commit" >&2
+    exit 1
+  fi
+  cp "$overlay/package.json" "$overlay/package-lock.json" "$dir/"
+  echo "$dir: $commit + overlay from $overlay"
+}
+
 mkdir -p vendor
+fetch_pinned "$HEALTHCARE_MCP_REPO" "$HEALTHCARE_MCP_COMMIT" vendor/healthcare-mcp docker/healthcare-mcp
+fetch_pinned "$RESEARCH_MCP_REPO" "$RESEARCH_MCP_COMMIT" vendor/med-research-mcp-suite docker/med-research-mcp-suite
 
-if [ ! -d vendor/healthcare-mcp ]; then
-  git clone https://github.com/Cicatriiz/healthcare-mcp-public.git vendor/healthcare-mcp
-fi
-(cd vendor/healthcare-mcp && npm install && npm install dicom-parser)
+# vendor/ is gitignored (third-party clones, not our source), so a tracked
+# .dockerignore can't live inside them -- the Docker build context for each is
+# its vendor dir (see docker-compose.yml), and `COPY . .` must not pick up a
+# host node_modules or secrets.
+printf 'node_modules\nlogs\n.env\n.git\n' > vendor/healthcare-mcp/.dockerignore
+printf 'node_modules\ndist\nlogs\n.env\n.git\n' > vendor/med-research-mcp-suite/.dockerignore
 
-if [ ! -d vendor/med-research-mcp-suite ]; then
-  git clone https://github.com/ezhou89/medical-research-mcp-suite.git vendor/med-research-mcp-suite
-fi
-(cd vendor/med-research-mcp-suite && npm install && npm run build)
-
-# vendor/ is gitignored (these are third-party clones, not our source), so a
-# tracked .dockerignore can't live inside them -- the Docker build context for
-# each is its vendor dir (see docker-compose.yml), and without this,
-# `COPY . .` in docker/*/Dockerfile would also copy the node_modules just
-# installed above (built for the host platform) into the container image.
-printf 'node_modules\nlogs\n.env\n' > vendor/healthcare-mcp/.dockerignore
-printf 'node_modules\ndist\nlogs\n.env\n' > vendor/med-research-mcp-suite/.dockerignore
-
-echo "Done. Verify with:"
-echo "  node vendor/healthcare-mcp/server/index.js < /dev/null"
-echo "  node vendor/med-research-mcp-suite/dist/index.js < /dev/null"
+echo "Done. Audit with: make mcp-audit"

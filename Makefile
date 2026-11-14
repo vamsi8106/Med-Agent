@@ -1,4 +1,4 @@
-.PHONY: purge-expired deps-audit import-check install test unit-tests eval integration rag-eval lint-check lint-fix format-fix format-check type-check pre-commit ci-check serve docker-up-deps docker-up docker-down docker-logs db-upgrade db-downgrade db-revision ingest-guideline k8s-local-up k8s-local-down
+.PHONY: purge-expired deps-audit mcp-audit import-check install test unit-tests eval integration rag-eval lint-check lint-fix format-fix format-check type-check pre-commit ci-check serve docker-up-deps docker-up docker-down docker-logs db-upgrade db-downgrade db-revision ingest-guideline k8s-local-up k8s-local-down
 
 install:
 	uv sync
@@ -48,6 +48,16 @@ import-check:
 # as an HTTP client); the server container is reachable only on the compose
 # network / localhost. Remove each ignore as soon as a fix ships.
 CHROMADB_UNFIXED := PYSEC-2026-311 PYSEC-2026-3813 PYSEC-2026-3814 PYSEC-2026-3815
+# npm audit over the three MCP servers' committed lockfiles (docker/*/), the
+# exact dependencies their images install with `npm ci --omit=dev`. Fails on
+# high or critical. Vendored servers are pinned in scripts/setup_vendor_mcp.sh.
+MCP_SERVERS := docker/healthcare-mcp docker/med-research-mcp-suite docker/medical-mcp-bridge
+mcp-audit:
+	@for dir in $(MCP_SERVERS); do \
+	  echo "== $$dir"; \
+	  (cd $$dir && npm audit --omit=dev --audit-level=high) || exit 1; \
+	done
+
 deps-audit:
 	uv export --frozen --no-dev --no-hashes --no-emit-project --quiet \
 	  | uv run pip-audit --disable-pip --no-deps --progress-spinner off -r /dev/stdin \

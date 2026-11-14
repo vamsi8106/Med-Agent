@@ -5,7 +5,11 @@
   "version": "1.0.0",
   "description": "Stdio<->HTTP bridge for medical-mcp, which only supports stdio transport.",
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.15.0",
+    "@modelcontextprotocol/sdk": "^1.32.2",
     "medical-mcp": "1.0.8"
+  },
+  "overrides": {
+    "puppeteer": "^25.17.0",
+    "zod": "^4.6.7"
   }
 }

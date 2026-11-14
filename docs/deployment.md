@@ -218,7 +218,44 @@ The overlay assumes these exist already; it does not create them:
 
 **Observability.** Pods carry Prometheus scrape annotations. Use Amazon Managed Prometheus or your own Prometheus, and send traces through an OpenTelemetry collector (ADOT → X-Ray, or Tempo). The Compose stack's Prometheus, Grafana and Tempo are not part of these manifests.
 
-## 11. Known limits
+## 11. Outbound network traffic
+
+Patient data is stored only in Postgres, but several components call services outside your network. Know what leaves, and restrict the rest.
+
+| Component | Calls (HTTPS only) | What is sent |
+|---|---|---|
+| `medagent` (app) | the LLM endpoint (step 4); Hugging Face at startup (embedding and optional re-ranker models); your OTLP collector | prompts (patient data, hence step 4); nothing for model downloads; traces without patient data |
+| `medical-mcp-bridge` | api.fda.gov, rxnav.nlm.nih.gov, eutils.ncbi.nlm.nih.gov / pubmed / www.ncbi.nlm.nih.gov, ghoapi.azureedge.net (WHO), clinicaltrials.gov; its unused tools also reach scholar.google.com and cochranelibrary.com | drug names, literature search terms |
+| `healthcare-mcp` | clinicaltrials.gov, clinicaltables.nlm.nih.gov, api.fda.gov, NCBI, odphp.health.gov, medRxiv | conditions, search terms |
+| `research-mcp` | api.fda.gov, eutils.ncbi.nlm.nih.gov, clinicaltrials.gov | drug pairs |
+| Postgres, ChromaDB | nothing | — |
+
+**Search queries are stripped of identifiers.** Every PubMed query goes through `infra/guardrails.py::outbound_search_query`, on the ReAct path and the fallback. It removes:
+- the patient's name and record ID;
+- dates, stand-alone numbers (ages, values), e-mail addresses, phone numbers and URLs.
+
+It keeps clinical terms such as `SGLT2` or `eGFRcr-cys`, and caps the query at 12 words. Redactions are counted in `medagent_guardrail_flags_total{kind="outbound_query_redacted"}`. The guard only recognises what the record or a pattern identifies, so a name the doctor types that isn't the patient's (a relative, a colleague) would still pass. **Doctors should not type identifiers into questions.** The trial finder sends only the first recorded condition; drug checks send drug names.
+
+**Restricting egress:**
+- **Kubernetes:** `deploy/k8s/base/network-policies.yaml` already allows the MCP pods only DNS and TCP 443 to public addresses (no private ranges), and gives ChromaDB no egress at all. This needs a network plugin that enforces NetworkPolicy (section 13).
+- **A host-name allowlist:** NetworkPolicy can't match host names. Allowlist the hosts above with an egress proxy, AWS Network Firewall domain lists, or Cilium FQDN policies.
+- **Model downloads:** pre-download the Hugging Face models into the app image, so app pods need egress only to the LLM endpoint and the collector.
+
+## 12. MCP server supply chain
+
+The MCP servers are third-party code with internet access, so they're pinned and audited:
+- **`healthcare-mcp` and `med-research-mcp-suite`:** cloned by `scripts/setup_vendor_mcp.sh` at **fixed commits**. The script refuses any other commit and discards local changes. Our **dependency overlay** (`docker/<server>/package.json` + `package-lock.json`) replaces upstream's, and the images install exactly that lockfile with `npm ci --omit=dev`.
+- **`medical-mcp`:** an npm package pinned to 1.0.8 in `docker/medical-mcp-bridge/`, now with a lockfile. Its `overrides` force fixed puppeteer and zod releases that 1.0.8 doesn't allow on its own.
+- **`make mcp-audit`** runs `npm audit --omit=dev --audit-level=high` on all three lockfiles, locally and in CI on every push. On 2026-11-14 it went from 27 known vulnerabilities (4 critical) in the two vendored servers, plus one server that couldn't be audited, to **0**.
+
+**To upgrade a server:**
+1. Change its commit in the setup script.
+2. Regenerate its overlay in a clean clone: apply the same edits (see the script header), then run `npm install --package-lock-only --ignore-scripts` and `npm audit fix --package-lock-only`.
+3. Copy `package.json` and `package-lock.json` into `docker/<server>/`.
+4. Run `make mcp-audit`.
+5. Rebuild, and run `make integration` and `make eval`.
+
+## 13. Known limits
 
 - Circuit breakers and outbound MCP rate limits are kept per process (by design, see section 10). With `STATE_BACKEND=memory`, abuse limits and drafts are per process too, so use `postgres` with more than one replica.
 - With `STATE_BACKEND=memory`, a restart discards pending WebSocket drafts.

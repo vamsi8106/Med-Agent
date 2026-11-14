@@ -12,6 +12,7 @@ from medagent.infra.context_budget import truncate_text
 from medagent.infra.guardrails import (
     allergy_mention_warning,
     find_allergy_mentions,
+    outbound_search_query,
     validate_output,
     wrap_untrusted,
 )
@@ -179,7 +180,7 @@ class EvidenceAgent(BaseAgent):
         collected: list[ClinicalEvidence] = []
         agent = ReActAgent(
             self._llm,
-            self._build_react_tools(collected),
+            self._build_react_tools(context, collected),
             SessionMemory(),
             system_prompt=_REACT_SYSTEM_PROMPT,
             max_iterations=_REACT_MAX_ITERATIONS,
@@ -208,13 +209,15 @@ class EvidenceAgent(BaseAgent):
         )
         return self._finish(context, message, result.answer, collected, result.usage)
 
-    def _build_react_tools(self, collected: list[ClinicalEvidence]) -> ToolRegistry:
+    def _build_react_tools(
+        self, context: PatientContext, collected: list[ClinicalEvidence]
+    ) -> ToolRegistry:
         """Tools are rebuilt per call so each run collects its own evidence
         (for the citations footer and AgentResult) without shared state."""
 
         async def search_medical_literature(query: str) -> str:
             """Search PubMed for medical literature. Use specific clinical terms."""
-            text = await self._search_literature(query)
+            text = await self._search_literature(query, context)
             collected.append(ClinicalEvidence(title=query, summary=text, source="PubMed"))
             return text
 
@@ -234,7 +237,7 @@ class EvidenceAgent(BaseAgent):
     async def _gather_deterministic(self, context: PatientContext, message: str) -> AgentResult:
         guideline_hits, literature_content = await asyncio.gather(
             self._guideline_retriever.run(query=message, top_k=3),
-            self._search_literature(message),
+            self._search_literature(message, context),
         )
 
         literature_evidence = [
@@ -316,9 +319,15 @@ class EvidenceAgent(BaseAgent):
             role=AgentRole.EVIDENCE, summary=summary, evidence=evidence, usage=dict(usage)
         )
 
-    async def _search_literature(self, query: str) -> str:
+    async def _search_literature(self, query: str, context: PatientContext) -> str:
+        """PubMed, via the medical MCP server -- an external API, so the query is
+        stripped of patient identifiers first, on every path (the ReAct tool and
+        the fallback, which starts from the doctor's raw message)."""
+        terms = outbound_search_query(query, context) or ", ".join(context.conditions[:2])
+        if not terms:
+            return "No search terms left after removing patient identifiers."
         async with self._medical_client as client:
-            content = await client.search_medical_literature(query)
+            content = await client.search_medical_literature(terms)
         return truncate_text(
             _extract_text(content),
             get_settings().agent_context_field_max_tokens,

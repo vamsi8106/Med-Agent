@@ -7,8 +7,10 @@ ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true \
 
 WORKDIR /app
 
-COPY package.json ./
-RUN npm install --omit=dev
+# Locked and audited: package.json overrides puppeteer and zod to fixed
+# releases that medical-mcp 1.0.8 (the latest) does not allow on its own.
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev
 
 COPY server.js ./
 

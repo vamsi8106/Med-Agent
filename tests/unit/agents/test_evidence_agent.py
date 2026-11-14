@@ -636,3 +636,68 @@ async def test_prompt_includes_changes_since_last_visit() -> None:
     user_message = next(m for m in llm.received_messages if m.role == "user")
     assert "Changes to the record since the last visit (2026-01-15)" in user_message.content
     assert "Stopped: Glimepiride" in user_message.content
+
+
+# --- outbound queries carry no patient identifiers ---------------------------------
+
+
+async def test_the_fallback_sends_pubmed_the_redacted_message_not_the_raw_one() -> None:
+    guideline_retriever = AsyncMock()
+    guideline_retriever.run.return_value = []
+    medical_client = _FakeMedicalClient("n/a")
+    agent = EvidenceAgent(
+        llm=MockLLMProvider(fixed_response="Summary."),
+        medical_client=medical_client,  # type: ignore[arg-type]
+        guideline_retriever=guideline_retriever,
+    )
+    message = "Patient Alpha (P-TEST-001), 55, seen 2026-03-01: SGLT2 inhibitor for CKD?"
+
+    await agent.gather_evidence(_patient(), message)
+
+    [sent] = medical_client.search_medical_literature.call_args.args
+    assert sent == "SGLT2 inhibitor CKD"
+    # Guideline search stays local, so it still gets the full question.
+    assert guideline_retriever.run.call_args.kwargs["query"] == message
+
+
+async def test_a_message_of_only_identifiers_searches_the_patients_conditions() -> None:
+    guideline_retriever = AsyncMock()
+    guideline_retriever.run.return_value = []
+    medical_client = _FakeMedicalClient("n/a")
+    agent = EvidenceAgent(
+        llm=MockLLMProvider(fixed_response="Summary."),
+        medical_client=medical_client,  # type: ignore[arg-type]
+        guideline_retriever=guideline_retriever,
+    )
+    patient = _patient()
+    patient.conditions = ["type 2 diabetes", "hypertension", "gout"]
+
+    await agent.gather_evidence(patient, "Patient Alpha P-TEST-001")
+
+    medical_client.search_medical_literature.assert_awaited_once_with(
+        "type 2 diabetes, hypertension"
+    )
+
+
+async def test_the_react_tool_redacts_the_query_the_model_wrote() -> None:
+    turn = LLMResponse(
+        content="",
+        model="mock",
+        tool_calls=[
+            ToolCall(
+                id="c1",
+                tool_name="search_medical_literature",
+                arguments={"query": "Patient Alpha P-TEST-001 SGLT2 outcomes"},
+            )
+        ],
+        usage={"prompt_tokens": 10, "completion_tokens": 5},
+    )
+    llm = _ReActScriptedLLM(
+        [turn, LLMResponse(content="Answer.", model="mock", usage={"prompt_tokens": 1})]
+    )
+    agent = _react_agent(llm, [])
+
+    await agent.gather_evidence(_patient(), "SGLT2 outcomes?")
+
+    medical_client = agent._medical_client
+    medical_client.search_medical_literature.assert_awaited_once_with("SGLT2 outcomes")  # type: ignore[attr-defined]

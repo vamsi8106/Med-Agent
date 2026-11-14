@@ -1,14 +1,12 @@
 FROM node:20-alpine
 
-# sqlite3 is a native npm dependency built via node-gyp at install time,
-# which needs a real build toolchain -- alpine doesn't ship one by default
-# (confirmed against a real build: "npm error gyp ERR!" without these).
-RUN apk add --no-cache python3 make g++
-
 WORKDIR /app
 
+# package.json / package-lock.json are our audited overlay (docker/healthcare-mcp/,
+# copied over the pinned clone by scripts/setup_vendor_mcp.sh). No native
+# modules any more (sqlite3 was unused), so no build toolchain in the image.
 COPY package.json package-lock.json ./
-RUN npm ci --omit=dev
+RUN npm ci --omit=dev --ignore-scripts
 
 COPY . .
 

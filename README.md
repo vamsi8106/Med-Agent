@@ -99,7 +99,8 @@ The provisioned **MedAgent Overview** dashboard shows, from `/metrics`: HTTP rat
 - Every response has `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy` and `Cache-Control: no-store`.
 - `APP_ENV=production` refuses to start with the placeholder or a short `JWT_SECRET_KEY` (32+ chars, e.g. `openssl rand -hex 32`) or a short bootstrap password, hides `/docs`, and adds HSTS. In development the app logs a warning when the placeholder secret is used.
 - Docker Compose publishes every port on `127.0.0.1` only, and the app container runs as a non-root user.
-- `make deps-audit` scans the locked dependencies for known vulnerabilities (also in CI).
+- `make deps-audit` scans the locked Python dependencies and `make mcp-audit` the three MCP servers' npm lockfiles for known vulnerabilities (both in CI). The vendored MCP servers are pinned to fixed commits.
+- Search terms sent to external medical APIs are stripped of the patient's name, record ID, dates and numbers (`outbound_search_query`); [docs/deployment.md §11](docs/deployment.md#11-outbound-network-traffic) lists every outbound host.
 - **Patient data and the model:** `LLM_PROVIDER=openai_compatible` with `LLM_BASE_URL`/`LLM_MODEL` uses a model you host (Ollama, vLLM, LM Studio), so prompts never leave your machines. Production refuses Groq or a public-host model unless `ALLOW_EXTERNAL_LLM_WITH_PHI=true` (you have a data agreement).
 - **Accounts:** `GET /admin/users`, `POST /admin/users/{username}/disable|enable|reset-password|revoke-tokens`, `POST /auth/change-password`. Each of these except enable ends that user's existing sessions immediately. All are audited.
 - **Retention:** `make purge-expired` (dry run) / `python -m medagent.cli purge-expired --execute`, only when `RETENTION_DAYS` / `AUDIT_RETENTION_DAYS` are set.
@@ -339,6 +340,7 @@ make eval          # golden-dataset eval against real Groq + real MCP servers (n
 make integration   # real embeddings + Postgres + medical-mcp bridge (skips what is unavailable)
 make import-check  # layer rules (import-linter, contracts in pyproject.toml)
 make deps-audit    # known-vulnerability scan of the locked dependencies (pip-audit)
+make mcp-audit     # npm audit over the MCP servers' committed lockfiles
 make pre-commit    # format + lint + type-check + import-check + unit-tests, run this before committing
 ```
 
@@ -346,7 +348,7 @@ make pre-commit    # format + lint + type-check + import-check + unit-tests, run
 
 ### CI
 
-- **Every push, any branch**: format check, lint, mypy, import-check, unit tests (`make ci-check`), and the dependency audit (`make deps-audit`).
+- **Every push, any branch**: format check, lint, mypy, import-check, unit tests (`make ci-check`), and the dependency audits (`make deps-audit`, `make mcp-audit`).
 - **Pull requests into `main` only**: additionally the golden-dataset eval against live MCP containers and a Docker build of every image. These are gated to PRs because they call the real Groq API and build several images. The eval job needs a `GROQ_API_KEY` repository secret (Settings → Secrets and variables → Actions).
 
 ## Docker image

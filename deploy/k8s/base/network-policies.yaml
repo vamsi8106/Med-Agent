@@ -16,3 +16,47 @@ spec:
     - from:
         - podSelector:
             matchLabels: { app.kubernetes.io/name: medagent }
+---
+# Egress. The MCP servers call public medical APIs over HTTPS only (FDA,
+# NLM/NCBI/PubMed, ClinicalTrials.gov, WHO, medRxiv -- docs/deployment.md,
+# "Outbound network traffic"), so they may reach DNS and TCP 443 on public
+# addresses, never the cluster's private ranges (no lateral movement to
+# Postgres, ChromaDB or other workloads). NetworkPolicy cannot match host
+# names; for a host allowlist use an egress proxy, AWS Network Firewall or
+# Cilium FQDN policies.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mcp-servers-egress-https-only
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app.kubernetes.io/name
+        operator: In
+        values: [medical-mcp-bridge, healthcare-mcp, research-mcp]
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels: { k8s-app: kube-dns }
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16]
+      ports:
+        - { protocol: TCP, port: 443 }
+---
+# ChromaDB only answers the app; it has no reason to open connections.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: chromadb-no-egress
+spec:
+  podSelector:
+    matchLabels: { app.kubernetes.io/name: chromadb }
+  policyTypes: [Egress]
+  egress: []

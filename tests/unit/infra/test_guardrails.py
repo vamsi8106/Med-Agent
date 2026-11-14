@@ -1,6 +1,8 @@
+from medagent.core.models import PatientContext
 from medagent.infra.guardrails import (
     allergy_mention_warning,
     find_allergy_mentions,
+    outbound_search_query,
     validate_output,
     wrap_untrusted,
 )
@@ -65,4 +67,57 @@ def test_guardrail_findings_are_counted_by_kind() -> None:
     assert (
         metric_value("medagent_guardrail_flags_total", kind="output_validation") - validation_before
         == 1
+    )
+
+
+_ALPHA = PatientContext(id="P-TEST-001", name="Patient Alpha", age=68, sex="F")
+
+
+def test_outbound_query_drops_identifiers_and_keeps_clinical_terms() -> None:
+    query = outbound_search_query(
+        "Patient Alpha, 68, P-TEST-001, seen 2026-03-01, call 555-123-4567, "
+        "mail alpha@example.org, on metformin with eGFR 25 and HbA1c 9.8",
+        _ALPHA,
+    )
+
+    for identifier in ("Alpha", "P-TEST-001", "68", "2026", "555", "example.org", "25", "9.8"):
+        assert identifier not in query
+    for term in ("metformin", "eGFR", "HbA1c"):
+        assert term in query
+
+
+def test_outbound_query_keeps_terms_that_mix_letters_and_digits() -> None:
+    query = outbound_search_query("SGLT2 inhibitor in CKD G3a with eGFRcr-cys", _ALPHA)
+    assert query == "SGLT2 inhibitor CKD G3a eGFRcr-cys"
+
+
+def test_outbound_query_drops_conversational_filler_and_punctuation() -> None:
+    # A sentence finds no PubMed article; search terms do.
+    query = outbound_search_query("Is an SGLT2 inhibitor right for her CKD?", _ALPHA)
+    assert query == "SGLT2 inhibitor right CKD"
+
+
+def test_outbound_query_matches_names_as_whole_words_in_any_case() -> None:
+    assert outbound_search_query("ALPHA alphabet soup", _ALPHA) == "alphabet soup"
+
+
+def test_outbound_query_is_capped_at_twelve_words() -> None:
+    words = [f"term{chr(97 + i)}" for i in range(20)]
+    assert outbound_search_query(" ".join(words), _ALPHA).split() == words[:12]
+
+
+def test_outbound_query_can_end_up_empty() -> None:
+    assert outbound_search_query("Alpha P-TEST-001 68", _ALPHA) == ""
+    assert outbound_search_query("", _ALPHA) == ""
+
+
+def test_only_a_redacted_query_is_counted() -> None:
+    from tests.conftest import metric_value
+
+    before = metric_value("medagent_guardrail_flags_total", kind="outbound_query_redacted")
+    outbound_search_query("Is metformin safe in CKD?", _ALPHA)  # filler alone is no redaction
+    assert metric_value("medagent_guardrail_flags_total", kind="outbound_query_redacted") == before
+    outbound_search_query("metformin for Alpha", _ALPHA)
+    assert (
+        metric_value("medagent_guardrail_flags_total", kind="outbound_query_redacted") - before == 1
     )
