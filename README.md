@@ -355,6 +355,7 @@ make pre-commit    # format + lint + type-check + import-check + unit-tests, run
 ## More detail
 
 - [`docs/info.md`](docs/info.md): complete guide to the concepts and flows (workflow, agents, MCP, harness, observability, memory, security).
+- [`docs/code-walkthrough.md`](docs/code-walkthrough.md): how the code runs (entry points, every request flow, where output goes) and what each file does.
 - [`docs/deployment.md`](docs/deployment.md): production runbook.
 - [`AGENTS.md`](AGENTS.md): architecture, phase breakdown, dependency rules, and the MCP server contracts.
 - [`docs/glossary.md`](docs/glossary.md): canonical terms.
