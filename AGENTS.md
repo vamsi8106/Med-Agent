@@ -61,7 +61,7 @@ src/medagent/
 │   ├── trial_finder_agent.py    # ClinicalTrials.gov search
 │   └── report_agent.py          # synthesizes multi-agent output
 ├── memory/                      # Phase 4
-│   ├── patient_store.py         # Postgres CRUD for patient records (per-doctor isolation via doctor_id; saving another doctor's id → PatientOwnershipError 409). Medications/labs are append-only history: reconciled, never deleted; get_patient returns active meds + latest lab per test + changes_since_last_visit
+│   ├── patient_store.py         # Postgres CRUD for patient records (per-doctor isolation via doctor_id; saving another doctor's id → PatientOwnershipError 409). Medications/labs are append-only history: reconciled, never deleted; get_patient returns active meds + latest lab per test + changes_since_last_visit. log_interactions / get_interactions: insert-only interactions_log
 │   ├── record_changes.py        # visit snapshot + deterministic diff (meds started/stopped/changed, conditions, allergies, newer labs) -- facts only, no clinical interpretation
 │   ├── audit_log.py             # durable record of every patient-data access and every account change
 │   ├── retention.py             # opt-in purge of whole inactive patient records and old audit entries (RETENTION_DAYS / AUDIT_RETENTION_DAYS)
@@ -137,6 +137,10 @@ Medications and lab results are append-only: a stopped medication keeps its
 row (`status='stopped'`, `end_date`), a dose change closes the old row and
 opens a new one, labs are unique per (patient, test, collected_at). Each visit
 stores `record_snapshot`, the baseline for "Changes Since Last Visit".
+`interactions_log` gets one row per drug pair each time an interaction check
+runs (`/drug-check`, an assessment/follow-up where Drug Safety ran, an approved
+or edited WebSocket report -- never a rejected draft); the API layer writes it
+from the workflow outcome, `GET /patients/{id}/interactions` reads it.
 
 ```sql
 patients    (id, name, age, sex, doctor_id, weight_kg, height_cm, conditions JSON, allergies JSON, created_at, updated_at)
@@ -192,6 +196,7 @@ Tools available: `search-drugs`, `get-drug-details`, `search-drug-nomenclature`,
 - Abuse limits: login per username and per IP, agent runs per user (`KeyedRateLimiter`, `enforce_limit` in `api/state.py`), 429 + Retry-After. A new endpoint that spends LLM quota must use `agent_run_user` (or `enforce_limit`).
 - `APP_ENV=production` refuses weak secrets at startup, hides the API docs and adds HSTS. The WebSocket authenticates with its first message (`{"type":"auth","token":...}`), never a URL token.
 - Account changes (disable, password reset/change, revoke) bump the user's `token_version`; every token carries the version it was issued with, so old tokens stop working at once. All account changes are audited.
+- Workflows return their structured results (`AssessmentOutcome`, `FollowupOutcome`, `DrugCheckOutcome`); persisting them (visits, `interactions_log`) is the API layer's job, so workflows never import `memory/`.
 - Retention deletes only when configured, whole records only, and audits itself. Never add another code path that deletes patient data.
 - `make deps-audit` (pip-audit) must stay clean; an ignored advisory needs a reason in the Makefile and is removed when a fix ships.
 - `/health` is liveness (Docker uses it; must not flap on dependencies). `/ready` is readiness: Postgres down -> 503, other dependencies -> `degraded`; it never exposes hostnames or error text and never calls the LLM.

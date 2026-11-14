@@ -1,5 +1,6 @@
 """Drug-check workflow: load current meds from memory, check a proposed addition."""
 
+from dataclasses import dataclass
 from typing import TypedDict
 
 from langgraph.graph import END, START, StateGraph
@@ -7,7 +8,7 @@ from langgraph.graph import END, START, StateGraph
 from medagent.agents.drug_safety_agent import DrugSafetyAgent
 from medagent.core.exceptions import PatientNotFoundError
 from medagent.core.interfaces import BaseMemory
-from medagent.core.models import PatientContext
+from medagent.core.models import DrugInteraction, PatientContext
 
 
 class DrugCheckState(TypedDict):
@@ -17,6 +18,13 @@ class DrugCheckState(TypedDict):
     context: PatientContext | None
     message: str
     answer: str
+    interactions: list[DrugInteraction]
+
+
+@dataclass
+class DrugCheckOutcome:
+    answer: str
+    interactions: list[DrugInteraction]
 
 
 def _build_graph(drug_safety: DrugSafetyAgent, memory: BaseMemory) -> StateGraph:
@@ -31,8 +39,8 @@ def _build_graph(drug_safety: DrugSafetyAgent, memory: BaseMemory) -> StateGraph
         assert context is not None
         current_drugs = [med.name for med in context.medications]
         message = f"Check interactions for {', '.join([*current_drugs, state['new_drug']])}"
-        answer = await drug_safety.run(context, message)
-        return {"message": message, "answer": answer}
+        result = await drug_safety.run_result(context, message)
+        return {"message": message, "answer": result.summary, "interactions": result.interactions}
 
     graph = StateGraph(DrugCheckState)
     graph.add_node("load_patient", load_patient)
@@ -49,9 +57,9 @@ async def run_drug_check(
     patient_id: str,
     new_drug: str,
     doctor_id: str | None = None,
-) -> str:
+) -> DrugCheckOutcome:
     graph = _build_graph(drug_safety, memory).compile()
     result = await graph.ainvoke(
         {"patient_id": patient_id, "doctor_id": doctor_id, "new_drug": new_drug}
     )
-    return result["answer"]
+    return DrugCheckOutcome(answer=result["answer"], interactions=result["interactions"])

@@ -33,7 +33,7 @@ from medagent.agents.triage_agent import TriageAgent
 from medagent.agents.trial_finder_agent import TrialFinderAgent
 from medagent.core.exceptions import PatientNotFoundError, ToolError
 from medagent.core.interfaces import BaseMemory
-from medagent.core.models import PatientContext
+from medagent.core.models import DrugInteraction, PatientContext
 from medagent.infra.logging import get_logger
 from medagent.infra.tracing import traced_node
 from medagent.workflows.patient_assessment import build_assessment_graph
@@ -59,7 +59,15 @@ class FollowupState(TypedDict):
     message: str
     context: PatientContext | None
     report: str
+    interactions: list[DrugInteraction]
     decision: str
+
+
+@dataclass
+class FollowupOutcome:
+    report: str
+    context: PatientContext
+    interactions: list[DrugInteraction]
 
 
 @dataclass
@@ -67,6 +75,7 @@ class DraftResult:
     report: str
     context: PatientContext
     message: str
+    interactions: list[DrugInteraction]
 
 
 @dataclass
@@ -75,6 +84,7 @@ class ApprovalOutcome:
     report: str | None
     context: PatientContext
     message: str
+    interactions: list[DrugInteraction]
 
 
 def interpret_decision(decision: str, drafted_report: str) -> tuple[ApprovalKind, str | None]:
@@ -162,12 +172,14 @@ async def run_followup(
     patient_id: str,
     message: str,
     doctor_id: str | None = None,
-) -> tuple[str, PatientContext]:
+) -> FollowupOutcome:
     graph = build_followup_graph(triage, drug_safety, evidence, trial_finder, report, memory)
     result = await graph.ainvoke(
         {"patient_id": patient_id, "doctor_id": doctor_id, "message": message}
     )
-    return result["report"], result["context"]
+    return FollowupOutcome(
+        report=result["report"], context=result["context"], interactions=result["interactions"]
+    )
 
 
 def _config(thread_id: str) -> RunnableConfig:
@@ -210,7 +222,10 @@ async def pending_draft(graph: CompiledStateGraph, thread_id: str) -> DraftResul
         return None
     values = snapshot.values
     return DraftResult(
-        report=values["report"], context=values["context"], message=values["message"]
+        report=values["report"],
+        context=values["context"],
+        message=values["message"],
+        interactions=values.get("interactions", []),
     )
 
 
@@ -265,4 +280,10 @@ async def resolve_followup(
     finally:
         await discard_draft(graph, thread_id)
     kind, report = interpret_decision(result["decision"], draft.report)
-    return ApprovalOutcome(kind=kind, report=report, context=draft.context, message=draft.message)
+    return ApprovalOutcome(
+        kind=kind,
+        report=report,
+        context=draft.context,
+        message=draft.message,
+        interactions=draft.interactions,
+    )

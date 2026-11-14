@@ -2,6 +2,7 @@ import asyncio
 import json
 from collections.abc import Iterator
 from contextlib import contextmanager
+from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
@@ -20,10 +21,13 @@ from medagent.core.exceptions import (
     ProviderError,
     ToolError,
 )
-from medagent.core.models import AgentResult, PatientContext
-from medagent.core.types import AgentRole
+from medagent.core.models import AgentResult, DrugInteraction, PatientContext
+from medagent.core.types import AgentRole, InteractionSeverity
 from medagent.memory.patient_store import PatientStore
 from medagent.memory.persistent import PersistentStore
+from medagent.workflows.drug_check import DrugCheckOutcome
+from medagent.workflows.followup import ApprovalOutcome
+from medagent.workflows.patient_assessment import AssessmentOutcome
 
 _ADMIN_USERNAME = "admin"
 _ADMIN_PASSWORD = "admin-pass-1234"
@@ -316,7 +320,7 @@ def test_assess_endpoint_returns_report(pg_dsn: str) -> None:
         )
         with patch(
             "medagent.api.routes.patients.run_patient_assessment",
-            AsyncMock(return_value="# Report"),
+            AsyncMock(return_value=AssessmentOutcome(report="# Report", interactions=[])),
         ):
             response = client.post(
                 "/patients/P-TEST-801/assess", json={"message": "hi"}, headers=headers
@@ -336,7 +340,7 @@ def test_assess_endpoint_creates_visit_record(pg_dsn: str) -> None:
         )
         with patch(
             "medagent.api.routes.patients.run_patient_assessment",
-            AsyncMock(return_value="# Report"),
+            AsyncMock(return_value=AssessmentOutcome(report="# Report", interactions=[])),
         ):
             client.post(
                 "/patients/P-TEST-820/assess", json={"message": "headache"}, headers=headers
@@ -355,7 +359,7 @@ def test_drug_check_endpoint(pg_dsn: str) -> None:
         headers = _auth_headers(client)
         with patch(
             "medagent.api.routes.patients.run_drug_check",
-            AsyncMock(return_value="No major concerns."),
+            AsyncMock(return_value=DrugCheckOutcome(answer="No major concerns.", interactions=[])),
         ):
             response = client.post(
                 "/drug-check",
@@ -365,6 +369,94 @@ def test_drug_check_endpoint(pg_dsn: str) -> None:
 
     assert response.status_code == 200
     assert response.json() == {"answer": "No major concerns."}
+
+
+def _interaction(drug_a: str, drug_b: str, severity: InteractionSeverity) -> DrugInteraction:
+    return DrugInteraction(
+        drug_a=drug_a,
+        drug_b=drug_b,
+        severity=severity,
+        description="Synthetic test finding.",
+        source="med-research-mcp-suite",
+        checked_at=datetime.now(UTC),
+    )
+
+
+def test_drug_check_and_assessment_are_recorded_in_the_interactions_log(pg_dsn: str) -> None:
+    with _make_client(pg_dsn) as client:
+        headers = _auth_headers(client, username="dr.interact")
+        token = headers["Authorization"].removeprefix("Bearer ")
+        _create_patient(client, token, "P-TEST-830", "Patient Alpha")
+        checked = DrugCheckOutcome(
+            answer="ok",
+            interactions=[_interaction("Metformin", "Ibuprofen", InteractionSeverity.MODERATE)],
+        )
+        with patch("medagent.api.routes.patients.run_drug_check", AsyncMock(return_value=checked)):
+            client.post(
+                "/drug-check",
+                json={"patient_id": "P-TEST-830", "new_drug": "Ibuprofen"},
+                headers=headers,
+            )
+        assessed = AssessmentOutcome(
+            report="# Report",
+            interactions=[_interaction("Metformin", "Glimepiride", InteractionSeverity.MINOR)],
+        )
+        with patch(
+            "medagent.api.routes.patients.run_patient_assessment", AsyncMock(return_value=assessed)
+        ):
+            client.post("/patients/P-TEST-830/assess", json={"message": "hi"}, headers=headers)
+
+        response = client.get("/patients/P-TEST-830/interactions", headers=headers)
+        assert response.status_code == 200
+        rows = response.json()
+        # newest first
+        assert [(r["drug_a"], r["drug_b"], r["severity"]) for r in rows] == [
+            ("Metformin", "Glimepiride", "minor"),
+            ("Metformin", "Ibuprofen", "moderate"),
+        ]
+        page = client.get("/patients/P-TEST-830/interactions?limit=1", headers=headers)
+        assert page.json() == rows[:1]
+        invalid = client.get("/patients/P-TEST-830/interactions?limit=0", headers=headers)
+        assert invalid.status_code == 422
+
+        audit = client.get("/patients/P-TEST-830/audit-log", headers=headers).json()
+        assert "interactions_viewed" in [entry["action"] for entry in audit]
+
+        other = _auth_headers(client, username="dr.notmine")
+        assert client.get("/patients/P-TEST-830/interactions", headers=other).status_code == 404
+
+
+def test_websocket_records_interactions_only_when_the_report_is_saved(pg_dsn: str) -> None:
+    with _make_client(pg_dsn) as client:
+        token = _admin_token(client)
+        headers = {"Authorization": f"Bearer {token}"}
+        _create_patient(client, token, "P-TEST-831", "Patient Beta")
+        context = PatientContext.model_validate(
+            client.get("/patients/P-TEST-831", headers=headers).json()
+        )
+
+        def outcome(kind: str) -> ApprovalOutcome:
+            return ApprovalOutcome(
+                kind=kind,  # type: ignore[arg-type]
+                report=None if kind == "rejected" else "# Report",
+                context=context,
+                message="any updates?",
+                interactions=[_interaction("Metformin", "Lisinopril", InteractionSeverity.MINOR)],
+            )
+
+        for kind, expected in (("rejected", 0), ("approved", 1)):
+            with (
+                patch(
+                    "medagent.api.routes.ws.resolve_followup",
+                    AsyncMock(return_value=outcome(kind)),
+                ),
+                _ws(client, "P-TEST-831", token) as websocket,
+            ):
+                _draft(websocket, "any updates?")
+                websocket.send_text("whatever")
+                websocket.receive_json()
+            recorded = client.get("/patients/P-TEST-831/interactions", headers=headers).json()
+            assert len(recorded) == expected
 
 
 def test_mcp_error_maps_to_502(pg_dsn: str) -> None:
@@ -843,7 +935,10 @@ def test_agent_runs_are_limited_per_user(pg_dsn: str) -> None:
         alice = _auth_headers(client, "dr.alice")
         bob = _auth_headers(client, "dr.bob")
         _create_patient(client, alice["Authorization"].removeprefix("Bearer "), "P-TEST-950", "A")
-        with patch("medagent.api.routes.patients.run_drug_check", AsyncMock(return_value="ok")):
+        with patch(
+            "medagent.api.routes.patients.run_drug_check",
+            AsyncMock(return_value=DrugCheckOutcome(answer="ok", interactions=[])),
+        ):
             body = {"patient_id": "P-TEST-950", "new_drug": "Ibuprofen"}
             codes = [
                 client.post("/drug-check", json=body, headers=alice).status_code for _ in range(3)

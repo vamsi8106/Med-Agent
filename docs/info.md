@@ -124,7 +124,7 @@ Example: `POST /patients/{id}/assess` with "Check interactions for current medic
    - `report` merges their output into one markdown report and appends the deterministic sections from the record: Changes Since Last Visit, Known Allergies and Lab Flags.
 5. Each specialist runs a ReAct loop, calling tools (MCP servers, guideline search) and the LLM. Every LLM/MCP call passes through retry, a circuit breaker, a rate limiter, and emits metrics and spans.
 6. The answer goes through **guardrails** (allergy cross-check, sanity checks, figure verification).
-7. The route saves the patient (reconciling medications and labs, never deleting history), saves the visit with a snapshot of the record, writes an **audit-log** entry, and returns `{"report": ...}`.
+7. The route saves the patient (reconciling medications and labs, never deleting history), saves the visit with a snapshot of the record, records the interaction pairs in `interactions_log`, writes an **audit-log** entry, and returns `{"report": ...}`.
 8. **Middleware** finishes: it records the request metric by route template, logs one `http_request` line, and returns the `X-Request-ID` header.
 
 ## 5. The user flows
@@ -315,7 +315,7 @@ Agent memory is often described with four types borrowed from cognitive science:
 | Type | Meaning | In MedAgent |
 |---|---|---|
 | **Working** | what the agent holds for the current task | LangGraph run state, the ReAct message buffer (`memory/session.py`) and the prompt. Lasts one request (approval drafts: up to 30 minutes). Bounded by the context budgets. |
-| **Episodic** | specific past events | the `visits` table: each visit's question, report, date and a **snapshot of the record**. Recent visits are replayed as short summaries; the snapshot is the baseline for "what changed". The audit log also records events, for accountability only. |
+| **Episodic** | specific past events | the `visits` table: each visit's question, report, date and a **snapshot of the record**. Recent visits are replayed as short summaries; the snapshot is the baseline for "what changed". The `interactions_log` keeps every drug-interaction check (one row per pair, with severity and source). The audit log also records events, for accountability only. |
 | **Semantic** | facts | the patient record (conditions, allergies, medications, labs) in Postgres; guidelines in ChromaDB; FDA/PubMed/RxNorm/trial data from the MCP servers. |
 | **Procedural** | how to do things | prompts, graph structure, triage rules, tools, guardrails. **Fixed in code on purpose**: an agent that rewrote its own clinical rules from feedback would change behaviour without review or tests. Doctor edits are logged (`report_edited`) for people to review. |
 
@@ -344,6 +344,7 @@ Saving a patient does not delete anything. `PatientStore.save_patient` reconcile
 | same medication, different dose, frequency or route | the old row is stopped, a new active row opens (start date now) |
 | unchanged medication | nothing is written |
 | a lab result | a new row; the same test at the same collection time is not duplicated (unique on patient, test, collected_at) |
+| an interaction check (`/drug-check`, an assessment or follow-up where Drug Safety ran, an approved/edited WebSocket report) | one `interactions_log` row per drug pair: drugs, severity, description, source, time. `doctor_id` comes from the patient row. Read with `GET /patients/{id}/interactions` (newest first, `limit`/`offset`, audited as `interactions_viewed`). A rejected WebSocket draft records nothing. |
 
 Medications match by name, ignoring case and surrounding spaces. A re-save of an unchanged record writes nothing, which matters because `/assess`, `/followup` and the WebSocket re-save the loaded patient every time.
 

@@ -159,6 +159,7 @@ async def _apply_outcome(
     await state.patient_store.save_visit(
         patient_id, require_doctor_id(outcome.context), outcome.message, outcome.report
     )
+    await state.patient_store.log_interactions(patient_id, outcome.interactions)
     if outcome.kind == "approved":
         await state.audit_log.record(user, patient_id, "report_approved")
     else:

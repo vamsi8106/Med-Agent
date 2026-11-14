@@ -102,15 +102,17 @@ async def test_no_patient_data_reaches_any_span_or_log_call(
     ]
 
     with trace.get_tracer("t").start_as_current_span("request"):
-        report = await run_patient_assessment(
-            TriageAgent(),
-            DrugSafetyAgent(drug_provider, _Checker()),  # type: ignore[arg-type]
-            EvidenceAgent(evidence_provider, _MedicalClient(), guidelines),  # type: ignore[arg-type]
-            AsyncMock(),
-            ReportAgent(),
-            patient,
-            question,
-        )
+        report = (
+            await run_patient_assessment(
+                TriageAgent(),
+                DrugSafetyAgent(drug_provider, _Checker()),  # type: ignore[arg-type]
+                EvidenceAgent(evidence_provider, _MedicalClient(), guidelines),  # type: ignore[arg-type]
+                AsyncMock(),
+                ReportAgent(),
+                patient,
+                question,
+            )
+        ).report
 
     # Positive control: the sensitive data really did flow through the system.
     assert "quillfeather" in report.lower()

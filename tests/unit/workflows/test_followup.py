@@ -59,7 +59,7 @@ async def test_followup_recalls_and_runs_assessment() -> None:
         guideline_retriever=guideline_retriever,
     )
 
-    report, patient = await run_followup(
+    outcome = await run_followup(
         TriageAgent(),
         AsyncMock(),
         evidence,
@@ -70,8 +70,9 @@ async def test_followup_recalls_and_runs_assessment() -> None:
         "follow-up visit",
     )
 
-    assert "Patient Alpha" in report
-    assert patient.id == "P-TEST-600"
+    assert "Patient Alpha" in outcome.report
+    assert outcome.context.id == "P-TEST-600"
+    assert outcome.interactions == []  # no medications: drug safety is not routed
     memory.save_patient.assert_not_awaited()
 
 

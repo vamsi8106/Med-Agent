@@ -1,11 +1,13 @@
-"""Postgres-backed CRUD for patient records: patients, medications, lab_results, visits.
+"""Postgres-backed CRUD for patient records: patients, medications, lab_results,
+visits, interactions_log.
 
 Medications and lab results are append-only history. A save reconciles the
 incoming record with what is stored: a medication that disappears is marked
 stopped (the row stays, with end_date), a dose change closes the old row and
 opens a new one, and a lab result is a new row. get_patient returns the
 current view -- active medications, the latest result per test -- plus what
-changed since the newest visit (see record_changes.py).
+changed since the newest visit (see record_changes.py). interactions_log is
+insert-only too: one row per drug pair each time an interaction check runs.
 """
 
 import json
@@ -18,7 +20,8 @@ import asyncpg
 from medagent.core.exceptions import MemoryError as MedAgentMemoryError
 from medagent.core.exceptions import PatientOwnershipError
 from medagent.core.interfaces import BaseMemory
-from medagent.core.models import LabResult, Medication, PatientContext, Visit
+from medagent.core.models import DrugInteraction, LabResult, Medication, PatientContext, Visit
+from medagent.core.types import InteractionSeverity
 from medagent.memory.persistent import PersistentStore
 from medagent.memory.record_changes import (
     compute_changes,
@@ -292,3 +295,56 @@ class PatientStore(BaseMemory):
                 json.dumps(snapshot) if snapshot is not None else None,
                 now,
             )
+
+    async def log_interactions(self, patient_id: str, interactions: list[DrugInteraction]) -> None:
+        """Records one interaction check: a row per drug pair. doctor_id comes
+        from the patient row, so a check an admin runs is still owned by the
+        patient's doctor, like every other row of the record."""
+        if not interactions:
+            return
+        async with self._store.connect() as conn, conn.transaction():
+            await conn.executemany(
+                """INSERT INTO interactions_log
+                (id, patient_id, doctor_id, drug_a, drug_b, severity, description, source,
+                 checked_at)
+                SELECT $1, p.id, p.doctor_id, $3, $4, $5, $6, $7, $8
+                FROM patients p WHERE p.id = $2""",
+                [
+                    (
+                        str(uuid.uuid4()),
+                        patient_id,
+                        interaction.drug_a,
+                        interaction.drug_b,
+                        interaction.severity.value,
+                        interaction.description,
+                        interaction.source,
+                        interaction.checked_at,
+                    )
+                    for interaction in interactions
+                ],
+            )
+
+    async def get_interactions(
+        self, patient_id: str, *, limit: int = 100, offset: int = 0
+    ) -> list[DrugInteraction]:
+        """Newest first, one page at a time. Not doctor-filtered: the caller
+        checks ownership first, as for the audit log."""
+        async with self._store.connect() as conn:
+            rows = await conn.fetch(
+                """SELECT * FROM interactions_log WHERE patient_id = $1
+                ORDER BY checked_at DESC, id LIMIT $2 OFFSET $3""",
+                patient_id,
+                limit,
+                offset,
+            )
+        return [
+            DrugInteraction(
+                drug_a=row["drug_a"],
+                drug_b=row["drug_b"],
+                severity=InteractionSeverity(row["severity"]),
+                description=row["description"],
+                source=row["source"],
+                checked_at=row["checked_at"],
+            )
+            for row in rows
+        ]

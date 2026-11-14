@@ -4,7 +4,8 @@ import pytest
 
 from medagent.core.exceptions import MemoryError as MedAgentMemoryError
 from medagent.core.exceptions import PatientOwnershipError
-from medagent.core.models import LabResult, Medication, PatientContext
+from medagent.core.models import DrugInteraction, LabResult, Medication, PatientContext
+from medagent.core.types import InteractionSeverity
 from medagent.memory.patient_store import PatientStore
 from medagent.memory.persistent import PersistentStore
 
@@ -354,3 +355,44 @@ async def test_visit_without_a_snapshot_gives_no_baseline(pg_dsn: str) -> None:
     loaded = await store.get_patient("P-TEST-100")
     assert loaded is not None
     assert loaded.changes_since_last_visit is None
+
+
+def _interaction(drug_b: str, checked_at: datetime) -> DrugInteraction:
+    return DrugInteraction(
+        drug_a="Metformin",
+        drug_b=drug_b,
+        severity=InteractionSeverity.MODERATE,
+        description="Synthetic finding.",
+        source="med-research-mcp-suite",
+        checked_at=checked_at,
+    )
+
+
+async def test_interaction_checks_are_logged_and_read_back_newest_first(pg_dsn: str) -> None:
+    store = _make_store(pg_dsn)
+    await store.save_patient(
+        PatientContext(id="P-TEST-IX1", name="Patient Alpha", age=60, sex="F", doctor_id="DR-A")
+    )
+    older = _interaction("Glimepiride", datetime(2026, 1, 1, tzinfo=UTC))
+    newer = _interaction("Ibuprofen", datetime(2026, 2, 1, tzinfo=UTC))
+
+    await store.log_interactions("P-TEST-IX1", [older])
+    await store.log_interactions("P-TEST-IX1", [newer])
+    await store.log_interactions("P-TEST-IX1", [])  # nothing checked: no-op
+
+    assert await store.get_interactions("P-TEST-IX1") == [newer, older]
+    assert await store.get_interactions("P-TEST-IX1", limit=1, offset=1) == [older]
+
+
+async def test_logged_interactions_belong_to_the_patients_doctor(pg_dsn: str) -> None:
+    store = _make_store(pg_dsn)
+    await store.save_patient(
+        PatientContext(id="P-TEST-IX2", name="Patient Beta", age=60, sex="M", doctor_id="DR-B")
+    )
+    await store.log_interactions("P-TEST-IX2", [_interaction("Lisinopril", datetime.now(UTC))])
+
+    async with PersistentStore(pg_dsn).connect() as conn:
+        owners = await conn.fetch(
+            "SELECT doctor_id FROM interactions_log WHERE patient_id = $1", "P-TEST-IX2"
+        )
+    assert [row["doctor_id"] for row in owners] == ["DR-B"]

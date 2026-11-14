@@ -4,7 +4,8 @@ import pytest
 from pydantic import ValidationError
 
 from medagent.core.config import Settings
-from medagent.core.models import LabResult, Medication, PatientContext, User
+from medagent.core.models import DrugInteraction, LabResult, Medication, PatientContext, User
+from medagent.core.types import InteractionSeverity
 from medagent.memory.audit_log import AuditLogStore
 from medagent.memory.patient_store import PatientStore
 from medagent.memory.persistent import PersistentStore
@@ -34,6 +35,18 @@ async def _seed(store: PersistentStore, patient_id: str) -> None:
         )
     )
     await PatientStore(store).save_visit(patient_id, "DR-TEST-001", "check", "# Report")
+    await PatientStore(store).log_interactions(
+        patient_id,
+        [
+            DrugInteraction(
+                drug_a="Metformin",
+                drug_b="Ibuprofen",
+                severity=InteractionSeverity.MINOR,
+                description="Synthetic finding.",
+                checked_at=datetime(2026, 1, 1, tzinfo=UTC),
+            )
+        ],
+    )
 
 
 async def _backdate(store: PersistentStore, patient_id: str, when: datetime) -> None:
@@ -85,7 +98,7 @@ async def test_execute_deletes_whole_inactive_records_only(pg_dsn: str) -> None:
     )
 
     assert result.patients == 1
-    for table in ("medications", "lab_results", "visits"):
+    for table in ("medications", "lab_results", "visits", "interactions_log"):
         assert await _count(store, table, "P-TEST-OLD") == 0
         assert await _count(store, table, "P-TEST-ACTIVE") == 1
     assert await PatientStore(store).get_patient("P-TEST-OLD") is None

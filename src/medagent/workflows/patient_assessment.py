@@ -20,6 +20,7 @@ is there nothing clinical to report, and AllAgentsFailedError is raised.
 import operator
 import uuid
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from typing import Annotated, TypedDict
 
 from langgraph.graph import END, START, StateGraph
@@ -33,7 +34,7 @@ from medagent.agents.triage_agent import TriageAgent
 from medagent.agents.trial_finder_agent import TrialFinderAgent
 from medagent.core.config import get_settings
 from medagent.core.exceptions import AllAgentsFailedError, MedAgentError, UpstreamError
-from medagent.core.models import AgentFailure, AgentResult, PatientContext
+from medagent.core.models import AgentFailure, AgentResult, DrugInteraction, PatientContext
 from medagent.core.types import AgentRole
 from medagent.infra.agent_run import AgentRunTracker
 from medagent.infra.logging import get_logger
@@ -53,7 +54,16 @@ class AssessmentState(TypedDict):
     results: Annotated[list[AgentResult], operator.add]
     failures: Annotated[list[AgentFailure], operator.add]
     report: str
+    # The Drug Safety agent's structured pair results, for the caller to
+    # record in interactions_log; empty when that agent did not run.
+    interactions: list[DrugInteraction]
     tracker: AgentRunTracker
+
+
+@dataclass
+class AssessmentOutcome:
+    report: str
+    interactions: list[DrugInteraction]
 
 
 def _doctor_safe_reason(exc: MedAgentError) -> str:
@@ -194,7 +204,10 @@ def _build_graph(
         if note:
             markdown += "\n\n" + note
         logger.info("agent_run_completed", run_id=tracker.run_id, trace=tracker.trace_summary())
-        return {"report": markdown}
+        interactions = [
+            i for r in results if r.role is AgentRole.DRUG_SAFETY for i in r.interactions
+        ]
+        return {"report": markdown, "interactions": interactions}
 
     def route_after_triage(state: AssessmentState) -> list[str]:
         roles = state["roles"]
@@ -249,9 +262,9 @@ async def run_patient_assessment(
     context: PatientContext,
     message: str,
     max_tokens: int | None = None,
-) -> str:
+) -> AssessmentOutcome:
     graph = build_assessment_graph(triage, drug_safety, evidence, trial_finder, report)
     result = await graph.ainvoke(
         {"context": context, "message": message, "token_budget": max_tokens}
     )
-    return result["report"]
+    return AssessmentOutcome(report=result["report"], interactions=result["interactions"])

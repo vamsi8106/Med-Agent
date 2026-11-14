@@ -81,7 +81,7 @@ async def test_gate_complex_patient_multi_agent_structured_report() -> None:
     report = ReportAgent()
 
     patient = _complex_patient()
-    result = await run_patient_assessment(
+    outcome = await run_patient_assessment(
         triage,
         drug_safety,
         evidence,
@@ -90,7 +90,10 @@ async def test_gate_complex_patient_multi_agent_structured_report() -> None:
         patient,
         "Check interactions for current medications and any relevant treatment evidence",
     )
+    result = outcome.report
     trial_finder.find_trials.assert_not_awaited()
+    # the structured pair results come out for the caller to record
+    assert outcome.interactions == interactions
 
     assert "Patient Alpha" in result
     assert "## Drug Safety" in result
@@ -118,9 +121,11 @@ async def test_workflow_skips_drug_safety_when_single_medication() -> None:
     patient = PatientContext(id="P-TEST-501", name="Patient Beta", age=40, sex="M")
     patient.medications = [Medication(name="Lisinopril")]
 
-    result = await run_patient_assessment(
-        triage, drug_safety, evidence, trial_finder, report, patient, "any guidance?"
-    )
+    result = (
+        await run_patient_assessment(
+            triage, drug_safety, evidence, trial_finder, report, patient, "any guidance?"
+        )
+    ).report
 
     assert "## Drug Safety" not in result
     assert "Patient Beta" in result
@@ -151,16 +156,18 @@ async def test_workflow_skips_remaining_agents_once_token_budget_exhausted() -> 
     report = ReportAgent()
 
     patient = _complex_patient()
-    result = await run_patient_assessment(
-        triage,
-        drug_safety,
-        evidence,
-        trial_finder,
-        report,
-        patient,
-        "Check interactions for current medications and any relevant treatment evidence",
-        max_tokens=100,
-    )
+    result = (
+        await run_patient_assessment(
+            triage,
+            drug_safety,
+            evidence,
+            trial_finder,
+            report,
+            patient,
+            "Check interactions for current medications and any relevant treatment evidence",
+            max_tokens=100,
+        )
+    ).report
 
     assert "## Note" in result
     assert "token budget" in result
@@ -196,9 +203,11 @@ async def test_workflow_runs_trial_finder_when_message_mentions_trials() -> None
 
     patient = PatientContext(id="P-TEST-502", name="Patient Gamma", age=50, sex="F")
 
-    result = await run_patient_assessment(
-        triage, drug_safety, evidence, trial_finder, report, patient, "any clinical trials?"
-    )
+    result = (
+        await run_patient_assessment(
+            triage, drug_safety, evidence, trial_finder, report, patient, "any clinical trials?"
+        )
+    ).report
 
     trial_finder.find_trials.assert_awaited_once()
     assert "## Trial Finder" in result
@@ -213,15 +222,17 @@ def _agent_result(role: AgentRole, summary: str) -> AgentResult:
 
 
 async def _assess_with(drug_safety: object, evidence: object, trial_finder: object, message: str):
-    return await run_patient_assessment(
-        TriageAgent(),
-        drug_safety,  # type: ignore[arg-type]
-        evidence,  # type: ignore[arg-type]
-        trial_finder,  # type: ignore[arg-type]
-        ReportAgent(),
-        _complex_patient(),
-        message,
-    )
+    return (
+        await run_patient_assessment(
+            TriageAgent(),
+            drug_safety,  # type: ignore[arg-type]
+            evidence,  # type: ignore[arg-type]
+            trial_finder,  # type: ignore[arg-type]
+            ReportAgent(),
+            _complex_patient(),
+            message,
+        )
+    ).report
 
 
 _BOTH = "Check interactions for current medications and any relevant treatment evidence"
@@ -263,9 +274,11 @@ async def test_failed_specialist_does_not_drop_the_deterministic_sections() -> N
     evidence = AsyncMock()
     evidence.gather_evidence.return_value = _agent_result(AgentRole.EVIDENCE, "Evidence text.")
 
-    report = await run_patient_assessment(
-        TriageAgent(), drug_safety, evidence, AsyncMock(), ReportAgent(), patient, _BOTH
-    )
+    report = (
+        await run_patient_assessment(
+            TriageAgent(), drug_safety, evidence, AsyncMock(), ReportAgent(), patient, _BOTH
+        )
+    ).report
 
     assert "Evidence text." in report
     assert "## Known Allergies" in report
@@ -320,16 +333,18 @@ async def test_failure_and_budget_skip_share_one_note() -> None:
     trial_finder = AsyncMock()
     trial_finder.find_trials.side_effect = ProviderError("down")
 
-    report = await run_patient_assessment(
-        TriageAgent(),
-        _CostlyDrugSafety(),  # type: ignore[arg-type]
-        evidence,
-        trial_finder,
-        ReportAgent(),
-        _complex_patient(),
-        f"{_BOTH} and any clinical trials",
-        max_tokens=100,
-    )
+    report = (
+        await run_patient_assessment(
+            TriageAgent(),
+            _CostlyDrugSafety(),  # type: ignore[arg-type]
+            evidence,
+            trial_finder,
+            ReportAgent(),
+            _complex_patient(),
+            f"{_BOTH} and any clinical trials",
+            max_tokens=100,
+        )
+    ).report
 
     assert report.count("## Note") == 1
 

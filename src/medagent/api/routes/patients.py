@@ -8,7 +8,7 @@ from medagent.api.errors import doctor_scope, require_doctor_id
 from medagent.api.schemas import AssessRequest, DrugCheckRequest
 from medagent.api.state import AppState, enforce_limit, get_state
 from medagent.auth.dependencies import get_current_user
-from medagent.core.models import PatientContext, User
+from medagent.core.models import DrugInteraction, PatientContext, User
 from medagent.workflows.drug_check import run_drug_check
 from medagent.workflows.followup import run_followup
 from medagent.workflows.patient_assessment import run_patient_assessment
@@ -75,6 +75,22 @@ async def get_patient_audit_log(
     return await state.audit_log.for_patient(patient_id, limit=limit, offset=offset)
 
 
+@router.get("/patients/{patient_id}/interactions", response_model=list[DrugInteraction])
+async def get_patient_interactions(
+    patient_id: str,
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    user: User = Depends(get_current_user),
+    state: AppState = Depends(get_state),
+) -> list[DrugInteraction]:
+    """Every interaction check recorded for this patient, newest first."""
+    patient = await state.patient_store.get_patient(patient_id, doctor_scope(user))
+    if patient is None:
+        raise HTTPException(status_code=404, detail=f"Unknown patient: {patient_id}")
+    await state.audit_log.record(user, patient_id, "interactions_viewed")
+    return await state.patient_store.get_interactions(patient_id, limit=limit, offset=offset)
+
+
 @router.post("/patients/{patient_id}/assess")
 async def assess_patient(
     patient_id: str,
@@ -87,7 +103,7 @@ async def assess_patient(
     patient = await state.patient_store.get_patient(patient_id, doctor_scope(user))
     if patient is None:
         raise HTTPException(status_code=404, detail=f"Unknown patient: {patient_id}")
-    report = await run_patient_assessment(
+    outcome = await run_patient_assessment(
         state.triage,
         state.drug_safety,
         state.evidence,
@@ -98,10 +114,11 @@ async def assess_patient(
     )
     await state.patient_store.save_patient(patient)
     await state.patient_store.save_visit(
-        patient_id, require_doctor_id(patient), body.message, report
+        patient_id, require_doctor_id(patient), body.message, outcome.report
     )
+    await state.patient_store.log_interactions(patient_id, outcome.interactions)
     await state.audit_log.record(user, patient_id, "assessment_run", {"message": body.message})
-    return {"report": report}
+    return {"report": outcome.report}
 
 
 @router.post("/patients/{patient_id}/followup")
@@ -111,7 +128,7 @@ async def followup_visit(
     user: User = Depends(agent_run_user),
     state: AppState = Depends(get_state),
 ) -> dict[str, str]:
-    report, patient = await run_followup(
+    outcome = await run_followup(
         state.triage,
         state.drug_safety,
         state.evidence,
@@ -122,12 +139,13 @@ async def followup_visit(
         body.message,
         doctor_id=doctor_scope(user),
     )
-    await state.patient_store.save_patient(patient)
+    await state.patient_store.save_patient(outcome.context)
     await state.patient_store.save_visit(
-        patient_id, require_doctor_id(patient), body.message, report
+        patient_id, require_doctor_id(outcome.context), body.message, outcome.report
     )
+    await state.patient_store.log_interactions(patient_id, outcome.interactions)
     await state.audit_log.record(user, patient_id, "followup_run", {"message": body.message})
-    return {"report": report}
+    return {"report": outcome.report}
 
 
 @router.post("/drug-check")
@@ -136,14 +154,15 @@ async def drug_check(
     user: User = Depends(agent_run_user),
     state: AppState = Depends(get_state),
 ) -> dict[str, str]:
-    answer = await run_drug_check(
+    outcome = await run_drug_check(
         state.drug_safety,
         state.patient_store,
         body.patient_id,
         body.new_drug,
         doctor_id=doctor_scope(user),
     )
+    await state.patient_store.log_interactions(body.patient_id, outcome.interactions)
     await state.audit_log.record(
         user, body.patient_id, "drug_check_run", {"new_drug": body.new_drug}
     )
-    return {"answer": answer}
+    return {"answer": outcome.answer}

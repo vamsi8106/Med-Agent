@@ -40,15 +40,17 @@ def _evidence_agent(llm: object) -> EvidenceAgent:
 
 
 async def _assess(evidence: EvidenceAgent) -> str:
-    return await run_patient_assessment(
-        TriageAgent(),
-        AsyncMock(),
-        evidence,
-        AsyncMock(),
-        ReportAgent(),
-        PatientContext(id="P-TEST-1", name="Patient Alpha", age=60, sex="F"),
-        "any updates?",  # routes to the evidence agent only
-    )
+    return (
+        await run_patient_assessment(
+            TriageAgent(),
+            AsyncMock(),
+            evidence,
+            AsyncMock(),
+            ReportAgent(),
+            PatientContext(id="P-TEST-1", name="Patient Alpha", age=60, sex="F"),
+            "any updates?",  # routes to the evidence agent only
+        )
+    ).report
 
 
 async def test_a_rate_limit_storm_fails_fast_instead_of_stacking_retries(clock: FakeClock) -> None:

@@ -235,6 +235,16 @@ curl -s "$BASE/patients/P-TEST-001/audit-log?limit=50&offset=0" -H "Authorizatio
 
 Newest first, paged with `limit` (1–500, default 100) and `offset`.
 
+### 7b. Interaction-check history
+
+Every interaction check (`/drug-check`, and assessments or follow-ups where the Drug Safety agent ran) is recorded, one row per drug pair with severity, description and source. Over the WebSocket, only an approved or edited report records its checks.
+
+```bash
+curl -s "$BASE/patients/P-TEST-001/interactions?limit=50" -H "Authorization: Bearer $ALICE_TOKEN" | python3 -m json.tool
+```
+
+Newest first, same paging and ownership rules as the audit log.
+
 ### 8. Confirm per-doctor data isolation
 
 A second doctor gets a plain 404 for a patient they don't own — not 403, so patient existence is never leaked across doctors. Admins bypass isolation and can see any patient.
