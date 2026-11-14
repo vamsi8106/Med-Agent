@@ -11,3 +11,5 @@ build/
 .chroma/
 guidelines_pdf/
 vendor/
+.mypy_cache/
+.import_linter_cache/

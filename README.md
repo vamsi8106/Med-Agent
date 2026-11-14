@@ -325,6 +325,7 @@ The LLM only ever summarizes; safety-relevant facts are computed deterministical
 make unit-tests    # network-free, requires Docker for Postgres-backed tests (auto-skips if unavailable)
 make type-check    # mypy over src/medagent
 make eval          # golden-dataset eval against real Groq + real MCP servers (needs GROQ_API_KEY)
+make integration   # real embeddings + Postgres + medical-mcp bridge (skips what is unavailable)
 make import-check  # layer rules (import-linter, contracts in pyproject.toml)
 make deps-audit    # known-vulnerability scan of the locked dependencies (pip-audit)
 make pre-commit    # format + lint + type-check + import-check + unit-tests, run this before committing
@@ -343,7 +344,7 @@ make pre-commit    # format + lint + type-check + import-check + unit-tests, run
 
 ## More detail
 
-- [`info.md`](info.md): complete guide to the concepts and flows (workflow, agents, MCP, harness, observability, memory, security).
+- [`docs/info.md`](docs/info.md): complete guide to the concepts and flows (workflow, agents, MCP, harness, observability, memory, security).
 - [`docs/deployment.md`](docs/deployment.md): production runbook.
 - [`AGENTS.md`](AGENTS.md): architecture, phase breakdown, dependency rules, and the MCP server contracts.
 - [`docs/glossary.md`](docs/glossary.md): canonical terms.

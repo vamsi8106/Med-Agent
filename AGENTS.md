@@ -92,7 +92,7 @@ src/medagent/
 
 Outside `src/`: `migrations/` (Alembic), `docker/` (MCP server images), `ops/` (Prometheus/Grafana/Tempo/Caddy config), `docker-compose.prod.yml` (production overlay: Caddy TLS, no other public ports, required secrets, optional Ollama), `docs/deployment.md` (production runbook), `tests/eval/` (live golden-dataset evals).
 
-`tests/` mirrors `src/` 1:1. `docs/glossary.md` for canonical terms. Architecture decisions and their rationale live in commit messages and the README.
+`tests/` mirrors `src/` 1:1. `docs/glossary.md` for canonical terms; `docs/info.md` explains every concept and flow. Architecture decisions and their rationale live in commit messages and the README.
 
 # Dependency Rules
 
@@ -206,6 +206,7 @@ make install         # uv sync
 make test            # uv run pytest
 make unit-tests      # uv run pytest tests/unit/
 make eval            # live golden-dataset evals: real Groq + real MCP servers (needs GROQ_API_KEY, `make docker-up-deps`)
+make integration     # tests/integration: real embeddings + Postgres + medical-mcp bridge (skips what is unavailable)
 make lint-check      # uv run ruff check .
 make lint-fix        # uv run ruff check --fix .
 make format-fix      # uv run ruff format .

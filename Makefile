@@ -1,4 +1,4 @@
-.PHONY: purge-expired deps-audit import-check install test unit-tests eval lint-check lint-fix format-fix format-check type-check pre-commit ci-check serve docker-up-deps docker-up docker-down docker-logs db-upgrade db-downgrade db-revision ingest-guideline
+.PHONY: purge-expired deps-audit import-check install test unit-tests eval integration lint-check lint-fix format-fix format-check type-check pre-commit ci-check serve docker-up-deps docker-up docker-down docker-logs db-upgrade db-downgrade db-revision ingest-guideline
 
 install:
 	uv sync
@@ -11,6 +11,12 @@ unit-tests:
 
 eval:
 	uv run pytest tests/eval/ -v
+
+# Real sentence-transformers + throwaway Postgres + the medical-mcp bridge
+# (`make docker-up-deps`; from the host set MEDICAL_MCP_URL=http://localhost:8081);
+# each test skips if its dependency is unavailable.
+integration:
+	uv run pytest tests/integration/ -v
 
 lint-check:
 	uv run ruff check .
