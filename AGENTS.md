@@ -26,9 +26,9 @@ src/medagent/
 ├── core/                        # Phase 1 — shared kernel, zero external deps beyond pydantic
 │   ├── interfaces.py            # ABCs: BaseLLMProvider, BaseTool, BaseAgent, BaseMemory
 │   ├── models.py                # PatientContext, Medication, LabResult, Visit, DrugInteraction, Message, ToolCall, LLMResponse
-│   ├── exceptions.py            # MedAgentError → UpstreamError (→ ProviderError, MCPError; carries `reason`, `retryable`, `retry_after`), ToolError, MemoryError, AuthError, PatientNotFoundError, PatientOwnershipError, RateLimitedError, AgentBudgetExceededError, AllAgentsFailedError (each carries its HTTP status_code)
+│   ├── exceptions.py            # MedAgentError → UpstreamError (→ ProviderError, MCPError; carries `reason`, `retryable`, `retry_after`), ToolError, MemoryError, AuthError, PatientNotFoundError, PatientOwnershipError, RateLimitedError, AllAgentsFailedError (each carries its HTTP status_code)
 │   ├── config.py                # Settings (pydantic-settings)
-│   └── types.py                 # Enums: EvidenceGrade, InteractionSeverity, CKDStage, TrialPhase, AgentRole
+│   └── types.py                 # Enums: EvidenceGrade, InteractionSeverity, AgentRole
 ├── llm/                         # Phase 1 — provider layer
 │   ├── registry.py              # ProviderRegistry: get_provider(name) → BaseLLMProvider
 │   ├── chat_base.py             # ChatCompletionProvider: breaker, retry, llm.chat span, metrics shared by every provider; OpenAI-format message helpers
@@ -52,7 +52,7 @@ src/medagent/
 │   ├── registry.py              # ToolRegistry: auto-discovery
 │   ├── decorators.py            # @tool: auto JSON schema from type hints
 │   ├── mcp/                     # HTTP clients: http_base.py (breaker/retry/rate-limit/tracing), medical.py, healthcare.py, research.py
-│   └── custom/                  # interaction_checker, patient_context, lab_interpreter, report_generator
+│   └── custom/                  # interaction_checker, lab_interpreter, report_generator
 ├── agents/                      # Phase 3 (base + drug_safety), Phase 5 (rest)
 │   ├── base.py                  # ReActAgent: LangGraph think → act loop. Bounded five ways: turn cap, whole-loop deadline, prompt ceiling, capped/untrusted tool output, duplicate-call detection (a stalled turn forces the answer). A turn's tool calls run concurrently, so tools must be concurrency-safe
 │   ├── triage_agent.py          # routes to specialists
@@ -81,10 +81,10 @@ src/medagent/
 │   ├── checkpointing.py         # in-memory checkpointer (PHI stays in process memory) with a msgpack type allowlist; purge_expired_drafts
 │   └── drug_check.py            # enumerate pairs → check → aggregate
 ├── cli.py                       # `medagent ingest-guideline` (RAG ingestion), `medagent purge-expired` (retention); separate process from the server
-├── health.py                    # readiness aggregation for /ready (ok/degraded/down)
 ├── api/                         # HTTP + WebSocket layer
 │   ├── state.py                 # AppState (all clients/agents, built once) + get_state dependency
 │   ├── errors.py                # error → status/body mapping, doctor_scope, Retry-After
+│   ├── health.py                # readiness aggregation for /ready (ok/degraded/down)
 │   ├── schemas.py               # request/response bodies
 │   └── routes/                  # system (health/ready/metrics), auth, patients (REST workflows), ws (approval chat)
 └── app.py                       # Phase 6 — create_app(): lifespan, middleware, routers
@@ -116,7 +116,7 @@ Never import upward. `core/` never imports from `llm/`. `tools/` never imports f
 
 **Phase 1 — Foundation:** `core/` (all files) + `infra/` (logging, retry, rate_limiter) + `llm/` (groq, mock, registry). Unit tests for models, config, retry, mock provider. Gate: `make pre-commit` green.
 
-**Phase 2 — Tools & MCP:** `tools/` (base, registry, decorators, mcp clients, interaction_checker, patient_context). Integration test with real medical-mcp. Gate: `search-drugs("metformin")` returns structured response via MCP.
+**Phase 2 — Tools & MCP:** `tools/` (base, registry, decorators, mcp clients, interaction_checker). Integration test with real medical-mcp. Gate: `search-drugs("metformin")` returns structured response via MCP.
 
 **Phase 3 — Single Agent:** `agents/base.py` (ReAct loop) + `drug_safety_agent` + `memory/session.py`. Gate: "Check interactions for Metformin + Glimepiride" → correct response with citations.
 
@@ -172,7 +172,6 @@ Tools available: `search-drugs`, `get-drug-details`, `search-drug-nomenclature`,
 | Tool | Does | Inputs → Outputs |
 |---|---|---|
 | `interaction_checker` | pairwise drug checks via MCP | `list[Medication]` → `list[DrugInteraction]` |
-| `patient_context` | CRUD patient records | `patient_id` → `PatientContext` |
 | `lab_interpreter` | flag abnormals against each result's own reference range (`PatientContext` is accepted but not yet used: no age/sex/condition adjustment) | `list[LabResult], PatientContext` → `list[LabFlag]` |
 | `report_generator` | structure findings with citations | `AgentResult` → markdown report |
 | `guideline_retriever` (in `rag/retriever.py`) | RAG over ingested guidelines | `query, top_k` → `list[ClinicalEvidence]` |

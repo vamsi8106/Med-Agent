@@ -47,10 +47,6 @@ def create_access_token(
     return jwt.encode(payload, secret_key, algorithm=algorithm)
 
 
-def decode_access_token(token: str, secret_key: str, algorithm: str) -> str:
-    return decode_token_claims(token, secret_key, algorithm)[0]
-
-
 def decode_token_claims(token: str, secret_key: str, algorithm: str) -> tuple[str, int]:
     """(subject, token version). Tokens issued before versions existed count as 0."""
     try:

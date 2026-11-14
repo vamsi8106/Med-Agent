@@ -455,7 +455,7 @@ POST /patients/{patient_id}/assess          (HTTP span)
 
 | Kind | What | Where |
 |---|---|---|
-| **Unit** | ~470 tests. Mock LLM (`MockLLMProvider`), no network. Postgres-backed tests use a throwaway Docker container and skip if Docker is unavailable. | `tests/unit/` (mirrors `src/`) |
+| **Unit** | ~510 tests. Mock LLM (`MockLLMProvider`), no network. Postgres-backed tests use a throwaway Docker container and skip if Docker is unavailable. | `tests/unit/` (mirrors `src/`) |
 | **Fault injection** | Each failure mode (timeout, 5xx, 4xx, rate limit, breaker open) is simulated with a fake clock, so retries and breakers are tested without waiting. | `tests/unit/infra/test_fault_injection.py` |
 | **Telemetry** | Span coverage, tracing setup, middleware labels, and the no-PHI check. | `tests/unit/infra/` |
 | **Live evals** | Golden datasets against the **real** Groq model and real MCP servers, because mocks cannot catch real-model regressions. | `tests/eval/`, `make eval` |

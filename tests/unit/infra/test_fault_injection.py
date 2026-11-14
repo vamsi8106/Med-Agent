@@ -17,7 +17,7 @@ from medagent.core.exceptions import AllAgentsFailedError
 from medagent.core.models import PatientContext
 from medagent.workflows.patient_assessment import run_patient_assessment
 from tests.conftest import FakeClock, metric_value
-from tests.unit.test_groq_provider import _FakeSDK, _ok_response, _provider, _status_error
+from tests.unit.llm.test_groq_provider import _FakeSDK, _ok_response, _provider, _status_error
 
 
 class _MedicalClient:

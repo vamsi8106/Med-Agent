@@ -2,8 +2,8 @@ import asyncio
 
 import pytest
 
-from medagent import health
-from medagent.health import check_readiness
+from medagent.api import health
+from medagent.api.health import check_readiness
 
 
 async def _ok() -> bool:

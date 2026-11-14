@@ -27,7 +27,7 @@ from medagent.tools.mcp.http_base import HttpMCPClient
 from medagent.tools.registry import ToolRegistry
 from medagent.workflows.patient_assessment import run_patient_assessment
 from tests.conftest import FakeClock, span_text
-from tests.unit.test_groq_provider import _FakeSDK, _ok_response, _provider, _status_error
+from tests.unit.llm.test_groq_provider import _FakeSDK, _ok_response, _provider, _status_error
 
 
 def _by_name(spans, name: str):

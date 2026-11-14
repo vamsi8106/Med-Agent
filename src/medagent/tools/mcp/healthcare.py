@@ -43,13 +43,3 @@ class HealthcareMCPClient(HttpMCPClient):
         if max_results is not None:
             arguments["max_results"] = max_results
         return await self.call_tool("clinical_trials_search", arguments)
-
-    async def medical_terminology(self, code_or_term: str) -> Any:
-        return await self.call_tool(
-            "lookup_icd_code", {"code": code_or_term, "description": code_or_term}
-        )
-
-    async def medical_calculator(self, height_meters: float, weight_kg: float) -> Any:
-        return await self.call_tool(
-            "calculate_bmi", {"height_meters": height_meters, "weight_kg": weight_kg}
-        )

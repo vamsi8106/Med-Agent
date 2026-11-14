@@ -1,11 +1,10 @@
 """Shared HTTP transport for containerized MCP-adjacent REST servers.
 
-Replaces the old stdio subprocess transport (MCPStdioClient) now that each
-MCP server runs as its own network-reachable container: healthcare-mcp and
-med-research-mcp-suite ship their own REST APIs, and medical-mcp (stdio-only)
-runs behind a stdio<->HTTP bridge sidecar. Same cross-cutting protections as
-before -- circuit breaker, retry with backoff, per-instance rate limiting,
-tracing -- just over httpx instead of a stdio ClientSession.
+Each MCP server runs as its own container: healthcare-mcp and
+med-research-mcp-suite expose REST APIs, and medical-mcp (stdio-only) sits
+behind a stdio<->HTTP bridge. Every request goes through the same protections
+here: circuit breaker, retry with backoff, per-instance rate limiting, tracing
+and metrics.
 """
 
 import asyncio

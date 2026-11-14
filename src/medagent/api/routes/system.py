@@ -4,8 +4,8 @@ from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse, Response
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
+from medagent.api.health import check_readiness
 from medagent.api.state import AppState, get_state
-from medagent.health import check_readiness
 
 router = APIRouter()
 

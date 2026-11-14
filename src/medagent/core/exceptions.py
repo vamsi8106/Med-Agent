@@ -150,11 +150,3 @@ class AllAgentsFailedError(MedAgentError):
         self.retry_after = retry_after
         if reason == "rate_limited":
             self.status_code = 429
-
-
-class AgentBudgetExceededError(MedAgentError):
-    """Raised when a multi-agent run's cumulative LLM token usage would
-    exceed its configured ceiling -- a resource-exhaustion condition, so it
-    maps to 429 rather than 400."""
-
-    status_code = 429

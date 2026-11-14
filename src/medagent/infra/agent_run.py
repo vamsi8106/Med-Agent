@@ -63,9 +63,6 @@ class AgentRunTracker:
     def skipped_steps(self) -> list[str]:
         return [step.name for step in self.steps if step.status == "skipped"]
 
-    def failed_steps(self) -> list[str]:
-        return [step.name for step in self.steps if step.status == "failed"]
-
     def trace_summary(self) -> str:
         return ", ".join(
             f"{step.name}={step.status}({step.tokens_used} tok)" for step in self.steps

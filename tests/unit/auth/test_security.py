@@ -2,7 +2,7 @@ import pytest
 
 from medagent.auth.security import (
     create_access_token,
-    decode_access_token,
+    decode_token_claims,
     hash_password,
     verify_password,
 )
@@ -21,17 +21,16 @@ def test_hash_password_uses_random_salt() -> None:
 
 def test_create_and_decode_access_token_round_trip() -> None:
     token = create_access_token("dr.alpha", "secret", "HS256", expire_minutes=5)
-    subject = decode_access_token(token, "secret", "HS256")
-    assert subject == "dr.alpha"
+    assert decode_token_claims(token, "secret", "HS256") == ("dr.alpha", 0)
 
 
-def test_decode_access_token_rejects_wrong_secret() -> None:
+def test_decode_token_claims_rejects_wrong_secret() -> None:
     token = create_access_token("dr.alpha", "secret", "HS256", expire_minutes=5)
     with pytest.raises(AuthError):
-        decode_access_token(token, "wrong-secret", "HS256")
+        decode_token_claims(token, "wrong-secret", "HS256")
 
 
-def test_decode_access_token_rejects_expired_token() -> None:
+def test_decode_token_claims_rejects_expired_token() -> None:
     token = create_access_token("dr.alpha", "secret", "HS256", expire_minutes=-1)
     with pytest.raises(AuthError):
-        decode_access_token(token, "secret", "HS256")
+        decode_token_claims(token, "secret", "HS256")

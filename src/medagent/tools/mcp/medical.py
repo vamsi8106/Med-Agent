@@ -1,13 +1,9 @@
 """Client for medical-mcp (FDA/WHO/RxNorm/PubMed), reached via a stdio<->HTTP bridge.
 
-medical-mcp itself is stdio-only (confirmed against its packed build: it only
-registers a StdioServerTransport, no HTTP option) and isn't vendored in this
-repo -- it's pulled via `npx -y medical-mcp`. To run it as its own
-network-reachable container, it sits behind a small bridge sidecar
-(docker/medical-mcp-bridge) that spawns it over stdio internally and exposes
-a generic `POST /call-tool` HTTP endpoint: body {"name": ..., "arguments":
-...}, response {"content": [...]} mirroring the real MCP tool-call result
-shape. Update this mapping if the chosen bridge tool's contract differs.
+medical-mcp is stdio-only (it registers only a StdioServerTransport). The
+bridge image (docker/medical-mcp-bridge) installs it as a pinned npm package
+and exposes it over HTTP: `POST /call-tool` with {"name": ..., "arguments":
+...} returns {"content": [...]}, the MCP tool-call result shape.
 """
 
 from typing import Any
@@ -38,25 +34,7 @@ class MedicalMCPClient(HttpMCPClient):
     async def search_drugs(self, query: str) -> Any:
         return await self.call_tool("search-drugs", {"query": query})
 
-    async def get_drug_details(self, drug_name: str) -> Any:
-        return await self.call_tool("get-drug-details", {"drug_name": drug_name})
-
-    async def search_drug_nomenclature(self, query: str) -> Any:
-        return await self.call_tool("search-drug-nomenclature", {"query": query})
-
-    async def get_health_statistics(self, indicator: str, country: str | None = None) -> Any:
-        arguments: dict[str, Any] = {"indicator": indicator}
-        if country is not None:
-            arguments["country"] = country
-        return await self.call_tool("get-health-statistics", arguments)
-
     async def search_medical_literature(self, query: str, max_results: int = 10) -> Any:
         return await self.call_tool(
             "search-medical-literature", {"query": query, "max_results": max_results}
         )
-
-    async def get_article_details(self, article_id: str) -> Any:
-        return await self.call_tool("get-article-details", {"article_id": article_id})
-
-    async def fda_drug_lookup(self, drug_name: str) -> Any:
-        return await self.call_tool("fda_drug_lookup", {"drug_name": drug_name})

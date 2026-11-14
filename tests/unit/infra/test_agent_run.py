@@ -55,7 +55,7 @@ def test_fail_records_the_step_as_failed_and_reports_it() -> None:
 
     tracker.fail("evidence", "ProviderError")
 
-    assert tracker.failed_steps() == ["evidence"]
+    assert [step.name for step in tracker.steps if step.status == "failed"] == ["evidence"]
     assert tracker.skipped_steps() == []
     assert tracker.steps[-1].detail == "ProviderError"
     assert "evidence=failed(0 tok)" in tracker.trace_summary()

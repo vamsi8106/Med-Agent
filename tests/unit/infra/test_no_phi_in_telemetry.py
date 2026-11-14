@@ -21,7 +21,7 @@ from medagent.core.types import InteractionSeverity
 from medagent.tools.base import ToolResult
 from medagent.workflows.patient_assessment import run_patient_assessment
 from tests.conftest import FakeClock, span_text
-from tests.unit.test_groq_provider import (
+from tests.unit.llm.test_groq_provider import (
     _fake_groq_response,
     _FakeSDK,
     _ok_response,
