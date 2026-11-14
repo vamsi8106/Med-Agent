@@ -87,6 +87,10 @@ Canonical names for every domain concept in MedAgent. Use these exact terms in c
 | **recall@k / MRR** | recall@k: share of questions whose answer is in the top k chunks. MRR: mean of 1 / rank of the first correct chunk. |
 | **Reaches model** | Share of retrieval-eval questions whose answer survives into what the evidence agent gives the LLM (top 3 passages, capped at `AGENT_CONTEXT_FIELD_MAX_TOKENS`). The end-to-end retrieval number. |
 | **Context prefix** | `<source> › <section>`, embedded with each guideline chunk (`Chunk.embedding_text`) but not stored as its text, so a passage is found by the document and section it belongs to. |
+| **Re-ranker (cross-encoder)** | `rag/reranker.py`: the second retrieval stage. Reads the question and each candidate passage together and scores the pair, so it ranks better than comparing two separate embeddings, but is too slow for the whole corpus; used on the `RAG_RERANK_CANDIDATES` nearest chunks. |
+| **Hybrid search** | Keyword search (BM25) and vector search run side by side and merged, so exact terms (drug names, `eGFRcr-cys`) are found as well as meaning. Measured in `make rag-eval`; in production it needs a keyword index (e.g. Postgres full-text search with pgvector). |
+| **BM25** | The standard keyword-relevance score: rewards query words that are rare in the corpus and frequent in the passage. |
+| **Reciprocal rank fusion (RRF)** | Merges ranked lists by summing 1 / (60 + rank) for each passage across lists; needs no calibration between differently scaled scores. |
 | **Shared limiter** | `memory/rate_limits.py::PostgresKeyedLimiter`: the abuse-limit token bucket kept in Postgres under a row lock, so every replica enforces one limit. Same interface (`core/interfaces.py::BaseKeyedLimiter`) as the per-process `KeyedRateLimiter`. |
 | **Migration lock** | The Postgres advisory lock `migrations/env.py` takes, so app pods that run `alembic upgrade head` at once queue and only one applies the migrations. |
 | **Eval vs Unit Test** | Unit tests prove the code calls the right things; evals prove the real model/servers produce correct output. Runs on PRs into `main`. |

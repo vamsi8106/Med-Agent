@@ -121,6 +121,11 @@ class Settings(BaseSettings):
     # shared safely across multiple app replicas instead of embedded per-pod.
     chroma_host: str = "chromadb"
     chroma_port: int = 8000
+    # Second retrieval stage: a cross-encoder re-scores RAG_RERANK_CANDIDATES
+    # nearest guideline chunks and keeps the best. Empty = vector search only.
+    # Choice and gain measured by `make rag-eval` (docs/info.md section 13.1).
+    rag_reranker_model: str | None = None
+    rag_rerank_candidates: int = Field(default=20, ge=1, le=200)
 
     # Distributed tracing (OpenTelemetry). Spans are always created -- they carry
     # the trace_id that correlates log lines -- but only exported when an OTLP/HTTP

@@ -10,6 +10,7 @@ a ToolRegistry alongside ordinary tools.
 from medagent.core.interfaces import BaseTool
 from medagent.core.models import ClinicalEvidence
 from medagent.rag.embeddings import EmbeddingModel
+from medagent.rag.reranker import CrossEncoderReranker
 from medagent.rag.vector_store import VectorStore
 
 
@@ -17,9 +18,18 @@ class GuidelineRetrieverTool(BaseTool):
     name = "guideline_retriever"
     description = "Retrieves the most relevant ingested clinical guideline passages for a query."
 
-    def __init__(self, embeddings: EmbeddingModel, vector_store: VectorStore) -> None:
+    def __init__(
+        self,
+        embeddings: EmbeddingModel,
+        vector_store: VectorStore,
+        reranker: CrossEncoderReranker | None = None,
+        candidates: int = 20,
+    ) -> None:
         self._embeddings = embeddings
         self._vector_store = vector_store
+        # With a reranker: fetch `candidates` nearest chunks, return its top_k.
+        self._reranker = reranker
+        self._candidates = candidates
 
     # Narrowed from BaseTool.run(**kwargs: Any) to this tool's real, typed
     # params -- an intentional, safe narrowing, not a real LSP mismatch.
@@ -27,9 +37,10 @@ class GuidelineRetrieverTool(BaseTool):
         self, query: str, top_k: int = 5
     ) -> list[ClinicalEvidence]:
         [query_embedding] = await self._embeddings.embed([query])
-        matches = await self._vector_store.query(query_embedding, top_k=top_k)
+        fetch = max(top_k, self._candidates) if self._reranker else top_k
+        matches = await self._vector_store.query(query_embedding, top_k=fetch)
 
-        return [
+        evidence = [
             ClinicalEvidence(
                 title=match["metadata"].get("section") or match["metadata"].get("source", ""),
                 summary=match["document"],
@@ -37,3 +48,6 @@ class GuidelineRetrieverTool(BaseTool):
             )
             for match in matches
         ]
+        if self._reranker is None:
+            return evidence
+        return await self._reranker.rerank(query, evidence, top_k)

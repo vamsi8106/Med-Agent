@@ -75,6 +75,7 @@ src/medagent/
 │   ├── vector_store.py          # ChromaDB adapter (re-ingesting a source replaces its chunks)
 │   ├── chunker.py               # section-header-aware; chunks sized to the embedding model's token limit, context prefix, reference lists dropped
 │   ├── pipeline.py              # PDF → chunk → embed → store
+│   ├── reranker.py              # CrossEncoderReranker: second retrieval stage (RAG_RERANKER_MODEL), re-scores the nearest chunks
 │   └── retriever.py             # GuidelineRetrieverTool (BaseTool): RAG over ingested guidelines
 ├── auth/                        # JWT auth: security.py (hashing, tokens with a version claim), store.py (users: disable, password, revoke), dependencies.py (FastAPI deps; rejects disabled users and revoked tokens)
 ├── workflows/                   # Phase 5
@@ -200,7 +201,7 @@ Tools available: `search-drugs`, `get-drug-details`, `search-drug-nomenclature`,
 - Workflows return their structured results (`AssessmentOutcome`, `FollowupOutcome`, `DrugCheckOutcome`); persisting them (visits, `interactions_log`) is the API layer's job, so workflows never import `memory/`.
 - State shared between replicas goes through `STATE_BACKEND`: `postgres` keeps approval drafts (LangGraph checkpointer) and abuse limits (`memory/rate_limits.py`) in the database. Anything else held in process memory must be per-pod by design (circuit breakers, outbound MCP buckets) or go through it. Migrations take a Postgres advisory lock (`migrations/env.py`), so concurrent `alembic upgrade head` is safe.
 - The `checkpoint_*` schema is a frozen copy of the saver's migrations in `memory/schema.py`; after upgrading `langgraph-checkpoint-postgres`, `tests/unit/memory/test_drafts.py` (and the app at startup) tell you to add an Alembic migration.
-- A change to chunking, the embedding model or retrieval needs `make rag-eval` before and after; report the numbers. Chunks must fit the embedding model's token limit (`EmbeddingModel.max_tokens`), or the rest of the chunk is silently not embedded.
+- A change to chunking, the embedding model, re-ranking or retrieval needs `make rag-eval` before and after; report the numbers, including ms/query. Chunks must fit the embedding model's token limit (`EmbeddingModel.max_tokens`), or the rest of the chunk is silently not embedded.
 - Retention deletes only when configured, whole records only (drafts included), and audits itself. Never add another code path that deletes patient data.
 - `make deps-audit` (pip-audit) must stay clean; an ignored advisory needs a reason in the Makefile and is removed when a fix ships.
 - `/health` is liveness (Docker uses it; must not flap on dependencies). `/ready` is readiness: Postgres down -> 503, other dependencies -> `degraded`; it never exposes hostnames or error text and never calls the LLM.

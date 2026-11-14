@@ -302,7 +302,7 @@ PDF/text → extract text (pypdf) → chunk → embed (local model) → store in
 - **Embeddings** (`rag/embeddings.py`): `all-MiniLM-L6-v2` running locally on CPU. No patient text or guideline text goes to an external embedding service. Encodes are serialised for safe concurrent use.
 - **Vector store** (`rag/vector_store.py`): a ChromaDB server in its own container. Each chunk keeps its `source`, `section`, `embedding_model` and `ingestion_id`. Re-ingesting a source **replaces** its chunks: the new ones are added first, then the older ingestion's are deleted.
 
-**Retrieval** (`rag/retriever.py`, the `guideline_retriever` tool): embed the query, fetch the top-k nearest chunks, return them as evidence with source and title. The evidence agent calls it as `search_guidelines`.
+**Retrieval** (`rag/retriever.py`, the `guideline_retriever` tool): embed the query, fetch the top-k nearest chunks, return them as evidence with source and title. The evidence agent calls it as `search_guidelines`. Optionally (`RAG_RERANKER_MODEL`), a **cross-encoder re-ranker** (`rag/reranker.py`) re-scores the `RAG_RERANK_CANDIDATES` nearest chunks and keeps the best: two-stage retrieval. It is off by default because of CPU latency (see 13.1).
 
 Guidelines are not committed to the repository. The `guidelines_pdf/` folder is git-ignored. A short synthetic demo guideline lives in `docs/demo/`. Check each document's licence before ingesting it: the ADA *Standards of Care* PDF forbids text and data mining and machine-learning use without permission, and KDIGO 2024 is CC BY-NC-ND (non-commercial only).
 
@@ -330,9 +330,26 @@ What the numbers teach:
 - **recall@k flatters big chunks.** Five 512-word chunks are about 2,300 words, so the answer is likely somewhere in them, but the agent caps its tool output at 1,000 tokens and cuts most of it. End to end, both chunkings get 57 % of answers to the model.
 - **Embedding only part of a chunk is a hidden failure.** Two thirds of the old chunks' text was never embedded, so search could not match it.
 - **Context prefixes and dropping reference lists each recover recall** after shrinking chunks: citation titles otherwise outrank the recommendations.
-- **The bottleneck is now ranking.** The answer is often in the top 5 but not the top 3. Hybrid keyword + vector search and a re-ranker are the next steps.
+- **The bottleneck is now ranking.** The answer is often in the top 5 but not the top 3.
 
-`make rag-eval` takes about 5 minutes on CPU. `tests/eval/test_retrieval_eval.py` keeps the current configuration above floors just under these numbers and skips when the PDFs are absent.
+**Ranking (steps 4–5), measured on 2026-11-14 on chunking 4, CPU with 4 threads:**
+
+| Configuration | recall@1 | recall@5 | MRR | Reaches model | ms/query |
+|---|---|---|---|---|---|
+| Vector only (default) | 38 % | 71 % | 0.49 | 57 % | 36 |
+| + re-rank, general `cross-encoder/ms-marco-MiniLM-L6-v2`, 20 candidates | 62 % | 76 % | 0.69 | **76 %** | ~1,100–1,800 |
+| the same, 10 candidates | 57 % | 71 % | 0.64 | 71 % | ~700 |
+| + re-rank, medical `ncbi/MedCPT-Cross-Encoder` | 33 % | 86 % | 0.56 | 76 % | ~9,500 |
+| Hybrid BM25 + vector (RRF) | 29 % | 67 % | 0.43 | 57 % | 47 |
+| Hybrid + MedCPT re-rank | 38 % | 86 % | 0.59 | 81 % | ~9,200 |
+
+What these numbers teach:
+- **Re-ranking is the big win:** it moves the right chunk to the top (recall@1 38 % → 62 %), so far more answers survive the agent's top-3 cut (57 % → 76 %). The cost is latency: a cross-encoder reads every (question, passage) pair, about 1 s for 20 candidates on this CPU, and a few tens of milliseconds on a GPU.
+- **A domain model is not automatically better.** MedCPT finds more answers somewhere in the top 5, but ranks fewer first, and is about 9× slower (a BERT-base model on 512-token pairs).
+- **Hybrid search alone did not help here.** BM25 on its own adds noise to vector search; combined with re-ranking it reached the best score (81 %), one question more than MiniLM re-ranking alone, at 9 s per query. With 21 questions, one question is about 5 points, so differences that small are within noise. Hybrid search is therefore not worth building yet; revisit it with pgvector (Postgres full-text search) and a larger question set.
+- **Decision:** the re-ranker ships **off**, because about 1 s per guideline search on CPU (up to three searches per ReAct run) missed the 300 ms target. Turn it on with `RAG_RERANKER_MODEL=cross-encoder/ms-marco-MiniLM-L6-v2` on a GPU host, or on CPU if the extra seconds per assessment are acceptable; `RAG_RERANK_CANDIDATES=10` halves the cost for 71 %.
+
+`make rag-eval` takes about 15 minutes on CPU (the MedCPT configurations dominate); the re-ranker models download from Hugging Face on first run. `tests/eval/test_retrieval_eval.py` keeps the current configuration above floors just under these numbers and skips when the PDFs are absent.
 
 ## 14. Memory and storage
 

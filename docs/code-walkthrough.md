@@ -376,7 +376,8 @@ No log line, span attribute or metric label carries patient data; `tests/unit/in
 | `embeddings.py` | `EmbeddingModel`: sentence-transformers `all-MiniLM-L6-v2` on CPU; one encode at a time so it can be shared safely. `max_tokens` (the model's limit) and `count_tokens` size the chunks. |
 | `vector_store.py` | `VectorStore`: ChromaDB client (add, query, `delete_source`); accepts an injected client for tests and the retrieval eval. |
 | `pipeline.py` | `IngestionPipeline`: text → chunks → embeddings (with context) → ChromaDB; re-ingesting a source replaces its chunks. |
-| `retriever.py` | `GuidelineRetrieverTool`: query → top-k `ClinicalEvidence` passages. |
+| `retriever.py` | `GuidelineRetrieverTool`: query → top-k `ClinicalEvidence` passages; with a re-ranker, fetches `RAG_RERANK_CANDIDATES` nearest chunks and returns the re-ranker's top k. |
+| `reranker.py` | `CrossEncoderReranker`: scores (question, passage) pairs in one batched call, under a lock (shared across requests); keeps the best `top_n`. |
 
 ### `memory/`: Postgres
 

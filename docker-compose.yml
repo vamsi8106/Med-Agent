@@ -99,6 +99,8 @@ services:
       POSTGRES_DSN: postgresql://medagent:${POSTGRES_PASSWORD:-medagent}@postgres:5432/medagent
       CHROMA_HOST: chromadb
       CHROMA_PORT: 8000
+      RAG_RERANKER_MODEL: ${RAG_RERANKER_MODEL:-}
+      RAG_RERANK_CANDIDATES: ${RAG_RERANK_CANDIDATES:-20}
       MEDICAL_MCP_URL: http://medical-mcp-bridge:8080
       HEALTHCARE_MCP_URL: http://healthcare-mcp:3000
       RESEARCH_MCP_URL: http://research-mcp:3000

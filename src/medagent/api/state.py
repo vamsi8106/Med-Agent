@@ -29,6 +29,7 @@ from medagent.memory.patient_store import PatientStore
 from medagent.memory.persistent import PersistentStore
 from medagent.memory.rate_limits import PostgresKeyedLimiter
 from medagent.rag.embeddings import EmbeddingModel
+from medagent.rag.reranker import CrossEncoderReranker
 from medagent.rag.retriever import GuidelineRetrieverTool
 from medagent.rag.vector_store import VectorStore
 from medagent.tools.custom.interaction_checker import InteractionCheckerTool
@@ -83,7 +84,18 @@ class AppState:
         self.triage = TriageAgent()
         self.drug_safety = DrugSafetyAgent(self.llm, InteractionCheckerTool(research_client))
         self.evidence = EvidenceAgent(
-            self.llm, medical_client, GuidelineRetrieverTool(embeddings, self.vector_store)
+            self.llm,
+            medical_client,
+            GuidelineRetrieverTool(
+                embeddings,
+                self.vector_store,
+                reranker=(
+                    CrossEncoderReranker(settings.rag_reranker_model)
+                    if settings.rag_reranker_model
+                    else None
+                ),
+                candidates=settings.rag_rerank_candidates,
+            ),
         )
         self.trial_finder = TrialFinderAgent(self.llm, healthcare_client)
         self.report = ReportAgent()
