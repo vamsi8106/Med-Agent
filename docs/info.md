@@ -298,13 +298,41 @@ RAG (retrieval-augmented generation) lets the agent answer from documents you su
 PDF/text → extract text (pypdf) → chunk → embed (local model) → store in ChromaDB
 ```
 
-- **Chunker** (`rag/chunker.py`): splits text into sections and then into windows of 512 words with 64 overlap. A line counts as a section header if it is a markdown `# heading`, a numbered heading such as `2.2 Risk prediction in people with CKD`, or an ALL-CAPS title of two or more real words. Table labels (`CKD G1`, `NA/NA`) and lone words do not qualify.
+- **Chunker** (`rag/chunker.py`): splits text into sections, then into windows sized to the **embedding model's token limit** (254 tokens for MiniLM, counted with the model's own tokenizer, 32-token overlap). Each chunk carries a **context prefix** (`<source> › <section>`) that is embedded with it but not stored as its text. Reference-list chunks (journal citations, `et al.`) are left out. A line counts as a section header if it is a markdown `# heading`, a numbered heading such as `2.2 Risk prediction in people with CKD`, or an ALL-CAPS title of two or more real words. Table labels (`CKD G1`, `NA/NA`) and lone words do not qualify.
 - **Embeddings** (`rag/embeddings.py`): `all-MiniLM-L6-v2` running locally on CPU. No patient text or guideline text goes to an external embedding service. Encodes are serialised for safe concurrent use.
-- **Vector store** (`rag/vector_store.py`): a ChromaDB server in its own container. Each chunk keeps its `source` label and `section`.
+- **Vector store** (`rag/vector_store.py`): a ChromaDB server in its own container. Each chunk keeps its `source`, `section`, `embedding_model` and `ingestion_id`. Re-ingesting a source **replaces** its chunks: the new ones are added first, then the older ingestion's are deleted.
 
 **Retrieval** (`rag/retriever.py`, the `guideline_retriever` tool): embed the query, fetch the top-k nearest chunks, return them as evidence with source and title. The evidence agent calls it as `search_guidelines`.
 
-Guidelines are not committed to the repository. The `guidelines_pdf/` folder is git-ignored. A short synthetic demo guideline lives in `docs/demo/`.
+Guidelines are not committed to the repository. The `guidelines_pdf/` folder is git-ignored. A short synthetic demo guideline lives in `docs/demo/`. Check each document's licence before ingesting it: the ADA *Standards of Care* PDF forbids text and data mining and machine-learning use without permission, and KDIGO 2024 is CC BY-NC-ND (non-commercial only).
+
+### 13.1 Measuring retrieval (`make rag-eval`)
+
+`tests/eval/retrieval_golden_dataset.py` holds 21 doctor-style questions over KDIGO 2024 and NICE NG136. Each has a short phrase copied verbatim from the guideline. A question counts as answered at rank k when one of the top k chunks contains its phrase. `tests/eval/retrieval_eval.py` builds an in-memory index per chunking configuration and reports:
+
+| Metric | Meaning |
+|---|---|
+| **recall@k** | share of questions whose answer is in the top k chunks |
+| **MRR** | mean of 1 / rank of the first correct chunk (1.0 = always first) |
+| **reaches model** | share whose answer survives into what the evidence agent actually gives the LLM: the top 3 passages, joined and capped at `AGENT_CONTEXT_FIELD_MAX_TOKENS` |
+| **beyond limit** | share of embedded tokens past the model's limit (silently ignored by the model) |
+
+Measured on 2026-11-14:
+
+| Configuration | Chunks | Beyond limit | recall@1 | recall@5 | MRR | Reaches model |
+|---|---|---|---|---|---|---|
+| 512 words (before) | 398 | 66 % | 52 % | 86 % | 0.64 | 57 % |
+| Fit to model (254 tokens) | 1,217 | 0 % | 24 % | 52 % | 0.37 | 52 % |
+| + context prefix | 1,275 | 0 % | 38 % | 62 % | 0.47 | 57 % |
+| + no reference lists (current) | 1,007 | 0 % | 38 % | 71 % | 0.49 | 57 % |
+
+What the numbers teach:
+- **recall@k flatters big chunks.** Five 512-word chunks are about 2,300 words, so the answer is likely somewhere in them, but the agent caps its tool output at 1,000 tokens and cuts most of it. End to end, both chunkings get 57 % of answers to the model.
+- **Embedding only part of a chunk is a hidden failure.** Two thirds of the old chunks' text was never embedded, so search could not match it.
+- **Context prefixes and dropping reference lists each recover recall** after shrinking chunks: citation titles otherwise outrank the recommendations.
+- **The bottleneck is now ranking.** The answer is often in the top 5 but not the top 3. Hybrid keyword + vector search and a re-ranker are the next steps.
+
+`make rag-eval` takes about 5 minutes on CPU. `tests/eval/test_retrieval_eval.py` keeps the current configuration above floors just under these numbers and skips when the PDFs are absent.
 
 ## 14. Memory and storage
 

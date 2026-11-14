@@ -45,3 +45,19 @@ async def test_concurrent_embeds_never_overlap_inside_the_model() -> None:
         await asyncio.gather(*(model.embed([f"q{i}"]) for i in range(4)))
 
     assert max_inside == 1
+
+
+def test_max_tokens_and_count_tokens_come_from_the_model() -> None:
+    fake_model = MagicMock()
+    fake_model.max_seq_length = 256
+    fake_model.tokenizer.return_value = {"input_ids": [[1], [2, 3, 4], [5, 6]]}
+
+    with patch("medagent.rag.embeddings.SentenceTransformer", return_value=fake_model):
+        model = EmbeddingModel()
+
+    assert model.max_tokens == 254
+    assert model.count_tokens(["CKD", "eGFRcr-cys", "aspirin"]) == [1, 3, 2]
+    fake_model.tokenizer.assert_called_once_with(
+        ["CKD", "eGFRcr-cys", "aspirin"], add_special_tokens=False
+    )
+    assert model.count_tokens([]) == []

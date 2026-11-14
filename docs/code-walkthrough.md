@@ -283,7 +283,7 @@ The route records the pairs in `interactions_log` and the audit entry `drug_chec
 
 | Command | Flow | Output |
 |---|---|---|
-| `ingest-guideline --file X --source Y` | read the PDF (`pypdf`) or text → `rag/pipeline.py`: `rag/chunker.py` (section headers, 512 tokens, 64 overlap) → `rag/embeddings.py` → `rag/vector_store.py` (ChromaDB) | chunk count on the terminal; chunks in ChromaDB |
+| `ingest-guideline --file X --source Y` | read the PDF (`pypdf`) or text → `rag/pipeline.py`: `rag/chunker.py` (section headers, chunks sized to the model's token limit, context prefix, reference lists dropped) → `rag/embeddings.py` → `rag/vector_store.py` (ChromaDB) | chunk count on the terminal; chunks in ChromaDB |
 | `purge-expired [--execute]` | `memory/retention.py::purge_expired`: does nothing unless `RETENTION_DAYS` / `AUDIT_RETENTION_DAYS` are set (minimum 365). Dry run by default. `--execute` deletes whole inactive records and old audit entries, and audits the purge. | counts only on the terminal, never names or IDs |
 
 ---
@@ -372,10 +372,10 @@ No log line, span attribute or metric label carries patient data; `tests/unit/in
 
 | File | Does |
 |---|---|
-| `chunker.py` | Splits text on section headers (markdown, numbered `3.1.2 Title`, all-caps multi-word lines) into chunks of up to 512 tokens with 64 overlap. |
-| `embeddings.py` | `EmbeddingModel`: sentence-transformers `all-MiniLM-L6-v2` on CPU; one encode at a time so it can be shared safely. |
-| `vector_store.py` | `VectorStore`: ChromaDB client (add, query). |
-| `pipeline.py` | `IngestionPipeline`: text → chunks → embeddings → ChromaDB. |
+| `chunker.py` | Splits text on section headers (markdown, numbered `3.1.2 Title`, all-caps multi-word lines), then into windows that fit the embedding model (token counts from its tokenizer, 32-token overlap). Each chunk has a `<source> › <section>` context prefix for embedding; `is_reference_list` drops bibliography chunks. |
+| `embeddings.py` | `EmbeddingModel`: sentence-transformers `all-MiniLM-L6-v2` on CPU; one encode at a time so it can be shared safely. `max_tokens` (the model's limit) and `count_tokens` size the chunks. |
+| `vector_store.py` | `VectorStore`: ChromaDB client (add, query, `delete_source`); accepts an injected client for tests and the retrieval eval. |
+| `pipeline.py` | `IngestionPipeline`: text → chunks → embeddings (with context) → ChromaDB; re-ingesting a source replaces its chunks. |
 | `retriever.py` | `GuidelineRetrieverTool`: query → top-k `ClinicalEvidence` passages. |
 
 ### `memory/`: Postgres
@@ -463,4 +463,4 @@ No log line, span attribute or metric label carries patient data; `tests/unit/in
 | `tests/unit/infra/test_fault_injection.py` | Each failure mode (timeout, 5xx, 4xx, 429, breaker open) with a fake clock | Nothing |
 | `tests/unit/infra/test_no_phi_in_telemetry.py` | No patient data in any span or log line | Nothing |
 | `tests/integration/` | Real embeddings, a real Postgres container and the real medical-mcp bridge (`make integration`) | Docker, `make docker-up-deps` |
-| `tests/eval/` | Golden cases against the real model and real MCP servers (`make eval`) | `GROQ_API_KEY`, the MCP containers |
+| `tests/eval/` | Golden cases against the real model and real MCP servers (`make eval`), and the retrieval eval (`make rag-eval`: recall@k, MRR, reaches-model) | `GROQ_API_KEY` and the MCP containers; the guideline PDFs for the retrieval eval |

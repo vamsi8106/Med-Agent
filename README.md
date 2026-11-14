@@ -306,7 +306,7 @@ Connecting *without* `resume=1` discards any stale draft, so a fresh question is
 
 ### Guideline RAG (optional)
 
-The evidence agent's `search_guidelines` tool searches guidelines you ingest into ChromaDB (`.pdf` or `.txt`). The chunker splits on section headers (markdown, numbered like `3.1.2 Title`, or all-caps multi-word lines) before sizing chunks. A synthetic demo guideline is included:
+The evidence agent's `search_guidelines` tool searches guidelines you ingest into ChromaDB (`.pdf` or `.txt`). The chunker splits on section headers (markdown, numbered like `3.1.2 Title`, or all-caps multi-word lines), then sizes each chunk to the embedding model's token limit, adds a `<source> › <section>` context prefix for embedding, and drops reference-list chunks. Re-ingesting a source replaces its chunks, so **re-ingest guidelines that were ingested before this change** (their chunks were too long to embed fully). `make rag-eval` measures retrieval quality over your PDFs ([docs/info.md §13.1](docs/info.md#131-measuring-retrieval-make-rag-eval)). A synthetic demo guideline is included:
 
 ```bash
 make ingest-guideline file=docs/demo/synthetic-t2dm-guideline.txt source=synthetic-t2dm

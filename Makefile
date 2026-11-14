@@ -1,4 +1,4 @@
-.PHONY: purge-expired deps-audit import-check install test unit-tests eval integration lint-check lint-fix format-fix format-check type-check pre-commit ci-check serve docker-up-deps docker-up docker-down docker-logs db-upgrade db-downgrade db-revision ingest-guideline k8s-local-up k8s-local-down
+.PHONY: purge-expired deps-audit import-check install test unit-tests eval integration rag-eval lint-check lint-fix format-fix format-check type-check pre-commit ci-check serve docker-up-deps docker-up docker-down docker-logs db-upgrade db-downgrade db-revision ingest-guideline k8s-local-up k8s-local-down
 
 install:
 	uv sync
@@ -17,6 +17,12 @@ eval:
 # each test skips if its dependency is unavailable.
 integration:
 	uv run pytest tests/integration/ -v
+
+# Retrieval quality (recall@k, MRR) over the local guideline PDFs, for three
+# chunking configurations side by side. Offline: no LLM, no MCP. Run it before
+# and after changing chunking, the embedding model or retrieval.
+rag-eval:
+	HF_HUB_OFFLINE=1 uv run python -m tests.eval.retrieval_eval
 
 lint-check:
 	uv run ruff check .

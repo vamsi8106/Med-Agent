@@ -9,7 +9,6 @@ cached locally.
 """
 
 import os
-from unittest.mock import patch
 
 import chromadb
 
@@ -41,13 +40,8 @@ async def test_followup_visit_recalls_patient_and_retrieves_guidelines(pg_dsn: s
     await patient_store.save_patient(context)
 
     embeddings = EmbeddingModel()
-    # VectorStore always constructs chromadb.HttpClient (production talks to the
-    # chromadb server container) -- redirect to an in-memory client here since
-    # this integration test has no running Chroma server.
-    with patch(
-        "medagent.rag.vector_store.chromadb.HttpClient", return_value=chromadb.EphemeralClient()
-    ):
-        vector_store = VectorStore(host="unused", port=0)
+    # An in-memory chromadb client: this test has no running Chroma server.
+    vector_store = VectorStore(host="unused", port=0, client=chromadb.EphemeralClient())
     pipeline = IngestionPipeline(embeddings=embeddings, vector_store=vector_store)
     await pipeline.ingest_text(
         "# Pharmacotherapy\nMetformin is recommended as first-line therapy for "
