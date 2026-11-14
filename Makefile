@@ -1,4 +1,4 @@
-.PHONY: purge-expired deps-audit import-check install test unit-tests eval integration lint-check lint-fix format-fix format-check type-check pre-commit ci-check serve docker-up-deps docker-up docker-down docker-logs db-upgrade db-downgrade db-revision ingest-guideline
+.PHONY: purge-expired deps-audit import-check install test unit-tests eval integration lint-check lint-fix format-fix format-check type-check pre-commit ci-check serve docker-up-deps docker-up docker-down docker-logs db-upgrade db-downgrade db-revision ingest-guideline k8s-local-up k8s-local-down
 
 install:
 	uv sync
@@ -87,3 +87,19 @@ purge-expired:
 
 ingest-guideline:
 	uv run python -m medagent.cli ingest-guideline --file "$(file)" --source "$(source)"
+
+# Multi-replica test on a local kind cluster (deploy/k8s/overlays/local):
+# 3 app replicas sharing drafts and limits through Postgres, the mock LLM.
+# Needs kind + kubectl, `./scripts/setup_vendor_mcp.sh`, and secrets.env /
+# postgres.env copied from their .example files. App: http://localhost:18080
+K8S_LOCAL := deploy/k8s/overlays/local
+k8s-local-up:
+	docker compose build medagent medical-mcp-bridge healthcare-mcp research-mcp
+	kind get clusters | grep -qx medagent || kind create cluster --name medagent --config $(K8S_LOCAL)/kind-config.yaml
+	for image in medagent medical-mcp-bridge healthcare-mcp research-mcp; do \
+	  kind load docker-image --name medagent medagent-$$image:latest; done
+	kubectl apply -k $(K8S_LOCAL)
+	kubectl -n medagent-local rollout status deployment/medagent --timeout=600s
+
+k8s-local-down:
+	kind delete cluster --name medagent

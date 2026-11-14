@@ -169,7 +169,7 @@ LangGraph models the workflow as a graph of nodes over shared state. What we use
 - **Partial failure.** If one specialist raises a `MedAgentError`, it is recorded as a failure and the report is built from the rest, with the failure noted. Only if **all** specialists fail does the run raise `AllAgentsFailedError`. Non-`MedAgentError` exceptions are bugs and stay loud.
 - **Subgraphs.** The assessment graph can be embedded inside the follow-up graph.
 - **`interrupt()`** for human approval ([section 12](#12-human-in-the-loop-approval)).
-- **Checkpointer.** State is checkpointed in memory so a paused run can resume. It is in memory on purpose so patient data is never written to disk. A msgpack allowlist (`_CHECKPOINT_STATE_TYPES`) controls which types may be deserialised; a test fails if a new state type is missing from it.
+- **Checkpointer.** State is checkpointed so a paused run can resume: in process memory with `STATE_BACKEND=memory` (one instance), or in Postgres with `STATE_BACKEND=postgres` (LangGraph's `AsyncPostgresSaver`), so any replica can resume a draft and a restart keeps it. A msgpack allowlist (`_CHECKPOINT_STATE_TYPES`) controls which types may be deserialised; a test fails if a new state type is missing from it.
 - **Progress streaming.** Nodes emit `progress` events, which the WebSocket forwards as they happen.
 - **Traced nodes.** Each node is wrapped by `traced_node`, so it appears as its own span.
 
@@ -284,7 +284,7 @@ Doctor replies:
 
 - **Authentication.** The first message must be `{"type":"auth","token":"<JWT>"}`, sent within 10 seconds, or the socket is closed (code 1008). The token never goes in the URL, because proxies and load balancers log URLs. Each draft counts against the user's agent-run limit, and messages are limited to 4000 characters.
 - **A draft survives a dropped connection.** Reconnect with `?resume=1` to get it back (`"resumed": true`) and decide. Connecting without it discards any stale draft, so a new question is never mistaken for the reply to an old one.
-- Drafts live only in server memory (they contain patient data), are private to the doctor who made them, and expire after `APPROVAL_DRAFT_TTL_MINUTES` (default 30). A server restart loses pending drafts.
+- Drafts contain patient data. They are private to the doctor who made them (thread id = user + patient), expire after `APPROVAL_DRAFT_TTL_MINUTES` (default 30) and are deleted with their patient by retention. With `STATE_BACKEND=memory` a restart loses them; with `postgres` they survive restarts and move between replicas.
 - Every step (drafted, approved, edited, rejected, resumed, discarded) is written to the audit log.
 - The plain REST `/assess` and `/followup` do **not** pause for approval; they auto-save. Approval exists only over the WebSocket.
 
@@ -330,7 +330,8 @@ Principles the design follows:
 
 - **Postgres** holds patients, medications, lab results, visits, users, the audit log and an interactions log. The schema is owned by **Alembic** (`migrations/`, `make db-upgrade`). `doctor_id` is on every patient-data table.
 - **Session buffer** (`memory/session.py`): a sliding window of conversation messages used by the ReAct agent.
-- **Checkpoints** (LangGraph): in memory only, by design ([section 7](#7-graph-engineering-langgraph)).
+- **Checkpoints** (LangGraph): in memory, or the `checkpoint_*` tables with `STATE_BACKEND=postgres` ([section 7](#7-graph-engineering-langgraph)).
+- **Rate-limit buckets**: `rate_limit_buckets` with `STATE_BACKEND=postgres`, so abuse limits hold across replicas.
 - **ChromaDB**: guideline embeddings.
 
 ### 14.3 History is kept (append-only facts)
@@ -383,7 +384,7 @@ The schema change is migration `5b1e7c2d9a40` (adds `visits.record_snapshot` and
 - **Error hygiene.** Clients see fixed wording for upstream failures, not raw upstream text.
 - **Local data.** Patient data stays in your Postgres and ChromaDB. The uvicorn access log is disabled (`--no-access-log`) because it prints raw URL paths.
 - **LangSmith warning.** LangChain's tracing (`LANGCHAIN_TRACING_V2`) is **off by default** because it would send prompts, which contain patient data, to a third party. If turned on, the app logs a warning at startup.
-- **Abuse limits.** Login is limited per username (5 per minute) and per client IP (20 per minute), counted even when the password is right, so guessing is capped. Agent runs (`/assess`, `/followup`, `/drug-check`, WebSocket drafts) are limited per user (6 per minute, burst 3) because each one spends LLM quota. Over a limit: 429 with `Retry-After`. Limits are per process, like the circuit breakers.
+- **Abuse limits.** Login is limited per username (5 per minute) and per client IP (20 per minute), counted even when the password is right, so guessing is capped. Agent runs (`/assess`, `/followup`, `/drug-check`, WebSocket drafts) are limited per user (6 per minute, burst 3) because each one spends LLM quota. Over a limit: 429 with `Retry-After`. Limits are per process with `STATE_BACKEND=memory`, and shared by every replica with `postgres` (`memory/rate_limits.py`).
 - **Login timing.** An unknown username still checks a password hash, so response time does not reveal which usernames exist. Token errors say only "Invalid access token".
 - **Input bounds.** Request bodies over 1 MB are refused with 413 (by `Content-Length` and by counting streamed bytes). Text fields and lists have maximum sizes: patient ids match `[A-Za-z0-9_-]{1,64}`, messages are 1–4000 characters, a patient has at most 100 medications and 500 lab results. Passwords need 12+ characters; roles are `doctor` or `admin`; the audit log is paged (`limit` up to 500).
 - **Security headers.** Every response carries `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer` and `Cache-Control: no-store` (responses contain patient data). HSTS is added in production.
@@ -538,8 +539,8 @@ Stated plainly so they are not a surprise:
 - **`lab_interpreter` uses only each result's own reference range.** It does not adjust for age, sex or conditions.
 - **Guideline coverage depends on what you ingest.** Retrieval quality depends on the chunker and the source text; a flowchart PDF gives few useful chunks.
 - **Memory limits.** Past visits are replayed by recency, not relevance (the last five). Visits saved before record snapshots existed give no "what changed" baseline, so an existing patient's first follow-up after the upgrade has no Changes section. A patient row with an empty `doctor_id` (possible only in very old data) can no longer be saved until it is backfilled. Weight and height have no history.
-- **Approval drafts are in memory.** A restart loses pending drafts, and the approval step exists only over the WebSocket.
-- **Circuit-breaker state is per process**, not shared across replicas.
+- **Approval only over the WebSocket.** The REST endpoints save immediately.
+- **Circuit-breaker state and outbound MCP rate limits are per process**, by design; with `STATE_BACKEND=memory` drafts and abuse limits are too (use `postgres` with several replicas).
 - **The Groq quota is a hard external limit.** When it is exhausted the API returns 429 with `Retry-After`, and reports degrade or fail accordingly.
 - **Self-hosted model quality depends on the model.** The evals were tuned on Groq's `openai/gpt-oss-20b`; small local models (3B and under) are much weaker. Run `make eval` against the model you choose before relying on it.
 - **Not built:** LLM prompt/response tracing (would need a self-hosted tool such as Langfuse or Phoenix because of PHI), log aggregation, alert rules, and database-query spans.

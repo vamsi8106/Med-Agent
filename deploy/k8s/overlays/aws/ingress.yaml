@@ -1,0 +1,42 @@
+# Public entry point: an internet-facing ALB, HTTPS only (HTTP redirects).
+# TLS ends at the ALB with an ACM certificate; ALB -> pod traffic stays in the VPC.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: medagent
+  annotations:
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}, {"HTTPS": 443}]'
+    alb.ingress.kubernetes.io/ssl-redirect: "443"
+    alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:<region>:<account>:certificate/<id>
+    alb.ingress.kubernetes.io/ssl-policy: ELBSecurityPolicy-TLS13-1-2-2021-06
+    # A doctor may take a while to approve a WebSocket draft; the 60 s default
+    # would cut the connection.
+    alb.ingress.kubernetes.io/load-balancer-attributes: idle_timeout.timeout_seconds=3600
+    alb.ingress.kubernetes.io/healthcheck-path: /ready
+    alb.ingress.kubernetes.io/success-codes: "200"
+    # Prometheus scrapes /metrics inside the cluster; the internet gets 404.
+    alb.ingress.kubernetes.io/actions.metrics-not-public: >-
+      {"type": "fixed-response", "fixedResponseConfig":
+      {"contentType": "text/plain", "statusCode": "404", "messageBody": "Not Found"}}
+    # Optional: attach an AWS WAF web ACL.
+    # alb.ingress.kubernetes.io/wafv2-acl-arn: arn:aws:wafv2:<region>:<account>:regional/webacl/<name>/<id>
+spec:
+  ingressClassName: alb
+  rules:
+    - host: <medagent.example.org>
+      http:
+        paths:
+          - path: /metrics
+            pathType: Exact
+            backend:
+              service:
+                name: metrics-not-public
+                port: { name: use-annotation }
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: medagent
+                port: { name: http }

@@ -94,7 +94,7 @@ The provisioned **MedAgent Overview** dashboard shows, from `/metrics`: HTTP rat
 **Traces.** With the Docker stack, spans go to Grafana Tempo. In Grafana (`http://localhost:3000`) open *Explore* -> *Tempo* and run `{ resource.service.name = "medagent" }` (or use the *Recent Traces* panel). One trace shows the request, each graph node, ReAct turns, LLM calls, tool calls and MCP calls, with retries as events. Every log line carries `trace_id` and `request_id` (also returned as the `X-Request-ID` header). Traces, logs and metrics contain no patient data. Set `OTEL_CONSOLE_EXPORTER=true` for local span printing, or `OTEL_SAMPLE_RATIO` to sample.
 
 **Security defaults.**
-- Login is limited per username (5/min) and per client IP (20/min); agent runs (`/assess`, `/followup`, `/drug-check`, WebSocket drafts) are limited per user (6/min, burst 3). Over the limit: `429` with `Retry-After`. Limits are per process (`LOGIN_ATTEMPTS_*`, `AGENT_RUNS_*`).
+- Login is limited per username (5/min) and per client IP (20/min); agent runs (`/assess`, `/followup`, `/drug-check`, WebSocket drafts) are limited per user (6/min, burst 3). Over the limit: `429` with `Retry-After`. Limits are per process, or shared by every replica with `STATE_BACKEND=postgres` (`LOGIN_ATTEMPTS_*`, `AGENT_RUNS_*`).
 - Request bodies over 1 MB get `413`; text fields and lists have maximum sizes (messages up to 4000 characters, patient ids `[A-Za-z0-9_-]{1,64}`); passwords need 12+ characters; roles are `doctor` or `admin`.
 - Every response has `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy` and `Cache-Control: no-store`.
 - `APP_ENV=production` refuses to start with the placeholder or a short `JWT_SECRET_KEY` (32+ chars, e.g. `openssl rand -hex 32`) or a short bootstrap password, hides `/docs`, and adds HSTS. In development the app logs a warning when the placeholder secret is used.
@@ -104,6 +104,7 @@ The provisioned **MedAgent Overview** dashboard shows, from `/metrics`: HTTP rat
 - **Accounts:** `GET /admin/users`, `POST /admin/users/{username}/disable|enable|reset-password|revoke-tokens`, `POST /auth/change-password`. Each of these except enable ends that user's existing sessions immediately. All are audited.
 - **Retention:** `make purge-expired` (dry run) / `python -m medagent.cli purge-expired --execute`, only when `RETENTION_DAYS` / `AUDIT_RETENTION_DAYS` are set.
 - **Production:** `docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build` — Caddy with automatic HTTPS as the only public service, required secrets, optional Ollama. Full runbook (secrets, model choice, encrypted disks and backups, upgrades, retention schedule, accounts): [docs/deployment.md](docs/deployment.md).
+- **Kubernetes / several replicas:** `deploy/k8s/` (Kustomize). `STATE_BACKEND=postgres` shares drafts and abuse limits through the database; `make k8s-local-up` runs 3 replicas on kind; `overlays/aws` targets EKS + RDS + ALB ([docs/deployment.md](docs/deployment.md#10-kubernetes-and-aws-several-replicas)).
 
 **Privacy note:** `LANGCHAIN_TRACING_V2=true` (LangSmith) sends prompts, which contain patient data, to a third-party service; keep it off for real data.
 
@@ -301,7 +302,7 @@ wscat -c "ws://localhost:8000/ws/P-TEST-001?resume=1"
 # server replies: {"type":"pending_approval","report":"...","resumed":true}
 ```
 
-Connecting *without* `resume=1` discards any stale draft, so a fresh question is never mistaken for the reply to an old one. Drafts are held in server memory only (they contain patient data), are private to the doctor who drafted them, and are purged after `APPROVAL_DRAFT_TTL_MINUTES` (default 30). A server restart loses pending drafts.
+Connecting *without* `resume=1` discards any stale draft, so a fresh question is never mistaken for the reply to an old one. Drafts contain patient data: they are private to the doctor who drafted them and purged after `APPROVAL_DRAFT_TTL_MINUTES` (default 30). With the default `STATE_BACKEND=memory` they live in server memory and a restart loses them; with `postgres` they survive restarts and can be resumed on any replica.
 
 ### Guideline RAG (optional)
 
@@ -326,7 +327,7 @@ The LLM only ever summarizes; safety-relevant facts are computed deterministical
 - **Context budgets**: raw MCP payloads are curated to the clinically relevant fields (not dumped as JSON), every external text field and the final prompt are capped, and each past visit is truncated when replayed as history. Sizes are the `AGENT_*_TOKENS` settings in `.env.example` — tune them to your Groq tier's per-request limit (the free `openai/gpt-oss-20b` tier is 8000 tokens).
 - **Figure check**: every evidence answer is checked for doses, percentages and lab values that appear in none of the sources the model was given (retrieved evidence, the patient record, the doctor's question). Unmatched figures get an `UNVERIFIED FIGURES` warning. Deterministic and advisory (no extra LLM call, never blocks); it checks numbers, not whether the reasoning follows.
 - **Per-run token budget**: one assess/followup run stops launching further specialist agents once `AGENT_MAX_TOKENS_PER_RUN` is spent, and the report says which were skipped. Each step's cost and outcome is logged (`agent_step_completed` / `agent_step_skipped`).
-- **Human approval**: the WebSocket chat drafts a report and saves nothing until the doctor approves, edits or rejects it. The pause is a LangGraph `interrupt()` held by an in-memory checkpointer, so a dropped connection can resume the draft. The REST endpoints save immediately.
+- **Human approval**: the WebSocket chat drafts a report and saves nothing until the doctor approves, edits or rejects it. The pause is a LangGraph `interrupt()` held by a LangGraph checkpointer (in memory, or Postgres for several replicas), so a dropped connection can resume the draft. The REST endpoints save immediately.
 - **Partial failure**: if one specialist agent fails (LLM or MCP outage), the report still ships with the other sections and the deterministic allergy/lab sections, plus a note saying what was unavailable (in fixed, doctor-safe wording, never the raw error). If *every* specialist fails there is nothing clinical to report and the request returns 502 -- or, if they were all rate-limited by the LLM/MCP provider, **429 with a `Retry-After` header** (and a `retry_after` field) and wording that says how long to wait, so a client can back off instead of treating it as an outage. Upstream errors never return their raw message (it can carry account ids or internal hostnames), only fixed text.
 
 ## Tests

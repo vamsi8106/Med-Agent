@@ -111,6 +111,12 @@ class Settings(BaseSettings):
     agent_loop_timeout_seconds: float = 40.0
 
     postgres_dsn: str = "postgresql://medagent:medagent@localhost:5432/medagent"
+    # Where state that must be shared between app replicas lives: the WebSocket
+    # approval drafts and the abuse limits. "memory" (one process, the default)
+    # or "postgres" (any number of replicas behind a load balancer; tables from
+    # migration 0006). Circuit breakers and outbound MCP rate limits stay per
+    # process either way.
+    state_backend: Literal["memory", "postgres"] = "memory"
     # ChromaDB runs as its own server container so a persist-dir volume can be
     # shared safely across multiple app replicas instead of embedded per-pod.
     chroma_host: str = "chromadb"

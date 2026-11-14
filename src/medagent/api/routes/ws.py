@@ -3,7 +3,6 @@
 import asyncio
 import json
 import uuid
-from datetime import timedelta
 
 import structlog
 from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
@@ -16,7 +15,6 @@ from medagent.core.exceptions import MedAgentError
 from medagent.core.models import User
 from medagent.infra.logging import get_logger
 from medagent.infra.tracing import get_tracer
-from medagent.workflows.checkpointing import purge_expired_drafts
 from medagent.workflows.followup import (
     ApprovalOutcome,
     discard_draft,
@@ -81,9 +79,7 @@ async def chat(websocket: WebSocket, patient_id: str, state: AppState = Depends(
     structlog.contextvars.clear_contextvars()
     structlog.contextvars.bind_contextvars(request_id=uuid.uuid4().hex)
     try:
-        await purge_expired_drafts(
-            state.checkpointer, timedelta(minutes=state.settings.approval_draft_ttl_minutes)
-        )
+        await state.purge_expired_drafts()
         stale = await pending_draft(graph, thread_id)
         if stale is not None:
             if websocket.query_params.get("resume") in ("1", "true"):
@@ -107,7 +103,7 @@ async def chat(websocket: WebSocket, patient_id: str, state: AppState = Depends(
                 )
                 continue
             try:
-                enforce_limit(
+                await enforce_limit(
                     state.agent_runs,
                     user.id,
                     limit="agent_runs",

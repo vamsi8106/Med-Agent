@@ -32,41 +32,41 @@ class _Clock:
         return self.now
 
 
-def test_keyed_limiter_allows_the_burst_then_says_how_long_to_wait() -> None:
+async def test_keyed_limiter_allows_the_burst_then_says_how_long_to_wait() -> None:
     clock = _Clock()
     limiter = KeyedRateLimiter(rate_per_second=0.5, capacity=3, now=clock)
 
-    assert [limiter.try_acquire("dr.alpha") for _ in range(3)] == [None, None, None]
-    assert limiter.try_acquire("dr.alpha") == pytest.approx(2.0)
+    assert [await limiter.try_acquire("dr.alpha") for _ in range(3)] == [None, None, None]
+    assert await limiter.try_acquire("dr.alpha") == pytest.approx(2.0)
 
 
-def test_keyed_limiter_refills_over_time() -> None:
+async def test_keyed_limiter_refills_over_time() -> None:
     clock = _Clock()
     limiter = KeyedRateLimiter(rate_per_second=0.5, capacity=1, now=clock)
-    assert limiter.try_acquire("k") is None
-    assert limiter.try_acquire("k") is not None
+    assert await limiter.try_acquire("k") is None
+    assert await limiter.try_acquire("k") is not None
 
     clock.now += 2.0
 
-    assert limiter.try_acquire("k") is None
+    assert await limiter.try_acquire("k") is None
 
 
-def test_keyed_limiter_keys_are_independent() -> None:
+async def test_keyed_limiter_keys_are_independent() -> None:
     limiter = KeyedRateLimiter(rate_per_second=0.1, capacity=1, now=_Clock())
-    assert limiter.try_acquire("a") is None
-    assert limiter.try_acquire("a") is not None
-    assert limiter.try_acquire("b") is None
+    assert await limiter.try_acquire("a") is None
+    assert await limiter.try_acquire("a") is not None
+    assert await limiter.try_acquire("b") is None
 
 
-def test_keyed_limiter_memory_stays_bounded() -> None:
+async def test_keyed_limiter_memory_stays_bounded() -> None:
     clock = _Clock()
     limiter = KeyedRateLimiter(rate_per_second=1.0, capacity=1, max_keys=100, now=clock)
 
     for i in range(1_000):
-        limiter.try_acquire(f"random-user-{i}")
+        await limiter.try_acquire(f"random-user-{i}")
 
     assert len(limiter) <= 100
 
     # An exhausted key keeps its state across pruning when it is recent.
-    limiter.try_acquire("victim")
-    assert limiter.try_acquire("victim") is not None
+    await limiter.try_acquire("victim")
+    assert await limiter.try_acquire("victim") is not None

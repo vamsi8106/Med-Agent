@@ -1,12 +1,15 @@
-"""Checkpointer for paused follow-up drafts.
+"""Checkpointers for paused follow-up drafts.
 
-In-memory on purpose: a checkpoint holds the full PatientContext and the draft
-report, i.e. patient data. Keeping it in process memory matches where the draft
-lived before (a local variable in the WebSocket handler) and stays outside the
-per-doctor-isolated Postgres tables and their audit trail. The cost is that a
-server restart loses pending drafts, and that it works for a single replica
-only -- a persistent checkpointer would need its own retention and doctor_id
-isolation for that data.
+A checkpoint holds the full PatientContext and the draft report, i.e. patient
+data. Two stores, chosen by STATE_BACKEND:
+
+- memory (default): process memory. A restart loses pending drafts, and it
+  only works with a single replica.
+- postgres: LangGraph's AsyncPostgresSaver on the checkpoint_* tables
+  (migration 0006), so any replica can resume a draft and a restart keeps it.
+  Drafts are scoped by thread id ("{user_id}:{patient_id}"), expire after
+  APPROVAL_DRAFT_TTL_MINUTES (memory/drafts.py), are deleted with their
+  patient by retention, and rely on the database's encryption at rest.
 
 LangGraph deserializes checkpoint state through an allowlist of types and warns
 that unregistered ones "will be blocked in a future version", so every type
@@ -17,8 +20,13 @@ from datetime import UTC, datetime, timedelta
 
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
+from psycopg import AsyncConnection
+from psycopg.rows import DictRow, dict_row
+from psycopg_pool import AsyncConnectionPool
 
+from medagent.core.exceptions import MemoryError as MedAgentMemoryError
 from medagent.infra.logging import get_logger
 
 logger = get_logger(__name__)
@@ -49,6 +57,41 @@ def build_serializer() -> JsonPlusSerializer:
 
 def build_checkpointer() -> InMemorySaver:
     return InMemorySaver(serde=build_serializer())
+
+
+async def open_postgres_checkpointer(
+    dsn: str,
+) -> tuple[AsyncPostgresSaver, AsyncConnectionPool[AsyncConnection[DictRow]]]:
+    """A Postgres-backed checkpointer and the pool it runs on (close the pool on
+    shutdown). The tables come from Alembic, never from saver.setup(): refuses
+    to start if the installed saver expects schema versions the database lacks."""
+    # autocommit / prepare_threshold / dict_row: what AsyncPostgresSaver requires
+    # of its connections (as in its own from_conn_string).
+    pool = AsyncConnectionPool(
+        dsn,
+        connection_class=AsyncConnection[DictRow],
+        min_size=1,
+        max_size=10,
+        open=False,
+        kwargs={"autocommit": True, "prepare_threshold": 0, "row_factory": dict_row},
+    )
+    await pool.open()
+    try:
+        async with pool.connection() as conn:
+            cursor = await conn.execute("SELECT max(v) AS v FROM checkpoint_migrations")
+            row: DictRow | None = await cursor.fetchone()
+    except Exception:
+        await pool.close()
+        raise
+    expected = len(AsyncPostgresSaver.MIGRATIONS) - 1
+    if row is None or row["v"] != expected:
+        await pool.close()
+        raise MedAgentMemoryError(
+            f"Checkpoint schema is at version {row['v'] if row else None}, the installed "
+            f"langgraph-checkpoint-postgres expects {expected}: add an Alembic migration "
+            "(see CHECKPOINT_SAVER_MIGRATIONS in memory/schema.py)"
+        )
+    return AsyncPostgresSaver(pool, serde=build_serializer()), pool
 
 
 async def purge_expired_drafts(

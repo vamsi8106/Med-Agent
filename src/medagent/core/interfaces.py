@@ -26,6 +26,15 @@ class BaseAgent(ABC):
     async def run(self, context: PatientContext, message: str) -> str: ...
 
 
+class BaseKeyedLimiter(ABC):
+    """An abuse limit per key (a username, a client IP, a user id)."""
+
+    @abstractmethod
+    async def try_acquire(self, key: str) -> float | None:
+        """None when allowed, otherwise the seconds until a token is available.
+        Never waits."""
+
+
 class BaseMemory(ABC):
     @abstractmethod
     async def get_patient(

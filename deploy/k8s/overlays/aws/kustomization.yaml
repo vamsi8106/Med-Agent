@@ -1,0 +1,31 @@
+# AWS: EKS + RDS for PostgreSQL + an ALB (AWS Load Balancer Controller) with an
+# ACM certificate. Assumes the cluster, the RDS instance, the certificate and
+# the ECR repositories already exist (docs/deployment.md, "Kubernetes and AWS").
+# Replace every <...> placeholder before applying.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: medagent
+resources:
+  - namespace.yaml
+  - ../../base
+  - ingress.yaml
+images:
+  - { name: medagent, newName: <account>.dkr.ecr.<region>.amazonaws.com/medagent, newTag: <version> }
+  - { name: medical-mcp-bridge, newName: <account>.dkr.ecr.<region>.amazonaws.com/medical-mcp-bridge, newTag: <version> }
+  - { name: healthcare-mcp, newName: <account>.dkr.ecr.<region>.amazonaws.com/healthcare-mcp, newTag: <version> }
+  - { name: research-mcp, newName: <account>.dkr.ecr.<region>.amazonaws.com/research-mcp, newTag: <version> }
+patches:
+  - target: { kind: ConfigMap, name: medagent-config }
+    patch: |-
+      # The ALB reaches pods from inside the VPC (target-type: ip). Only it may
+      # set X-Forwarded-For, so per-IP login limits see the real client.
+      - { op: replace, path: /data/FORWARDED_ALLOW_IPS, value: "<vpc-cidr, e.g. 10.0.0.0/16>" }
+      # A self-hosted model inside the VPC keeps patient data in your account.
+      - { op: add, path: /data/LLM_BASE_URL, value: "http://<model-endpoint>.internal:8000/v1" }
+      - { op: add, path: /data/LLM_MODEL, value: "<model name>" }
+      # Traces to an OpenTelemetry collector (e.g. the ADOT collector -> X-Ray / Tempo).
+      - { op: add, path: /data/OTEL_EXPORTER_OTLP_ENDPOINT, value: "http://<otel-collector>:4318" }
+  # ChromaDB volume on gp3 EBS (encrypted by the StorageClass).
+  - target: { kind: StatefulSet, name: chromadb }
+    patch: |-
+      - { op: add, path: /spec/volumeClaimTemplates/0/spec/storageClassName, value: gp3 }

@@ -87,7 +87,8 @@ Then the **lifespan** runs when the server actually starts:
    | `EmbeddingModel`, `VectorStore` | `rag/` | guideline search |
    | `MedicalMCPClient`, `HealthcareMCPClient`, `ResearchMCPClient` | `tools/mcp/` | medical data |
    | `TriageAgent`, `DrugSafetyAgent`, `EvidenceAgent`, `TrialFinderAgent`, `ReportAgent` | `agents/` | the specialists |
-   | `checkpointer` + `followup_graph` | `workflows/checkpointing.py`, `workflows/followup.py` | the long-lived WebSocket graph that can pause for approval |
+   | `checkpointer` + `followup_graph` | `workflows/checkpointing.py`, `workflows/followup.py` | the long-lived WebSocket graph that can pause for approval (built in `init()` for the Postgres checkpointer) |
+   | abuse limiters | `infra/rate_limiter.py` or `memory/rate_limits.py`, by `STATE_BACKEND` | per process, or shared by every replica |
 
 4. `AppState.init()` opens the connection pool and, if the users table is empty, creates the bootstrap admin from `ADMIN_BOOTSTRAP_USERNAME` / `ADMIN_BOOTSTRAP_PASSWORD`.
 5. The state is stored on `app.state.medagent`; every route gets it through `get_state()`.
@@ -252,13 +253,13 @@ The route records the pairs in `interactions_log` and the audit entry `drug_chec
    - It's limited to 4000 characters and counts against the agent-run limit.
    - `workflows/followup.py::draft_followup` runs the follow-up graph *with* the approval node, streaming `{"type":"progress",...}` frames as each step finishes.
 4. **Pause.**
-   - The approval node calls LangGraph `interrupt()`. The graph state (the draft) is held by the in-memory checkpointer (`workflows/checkpointing.py`), not in Postgres.
+   - The approval node calls LangGraph `interrupt()`. The graph state (the draft) is held by the checkpointer (`workflows/checkpointing.py`): in process memory with `STATE_BACKEND=memory`, or in Postgres with `postgres`, so a resume can land on any replica.
    - The server sends `{"type":"pending_approval","report":...}` and audits `report_drafted`.
 5. **The doctor decides.**
    - `resolve_followup` resumes the graph with the reply, and `interpret_decision` maps it: `approve` → save the draft; `reject` → save nothing; any other text → save that text as the edited report.
    - On approve or edit, `_apply_outcome` saves the patient, the visit and the interactions, and audits `report_approved` or `report_edited`.
    - On reject it audits `report_rejected` and saves nothing.
-6. **Expiry.** Drafts older than `APPROVAL_DRAFT_TTL_MINUTES` are purged (`purge_expired_drafts`). A server restart loses them, by design, because they contain patient data.
+6. **Expiry.** Drafts older than `APPROVAL_DRAFT_TTL_MINUTES` are purged on each connection (`AppState.purge_expired_drafts`: the checkpointer scan in memory, one SQL delete in `memory/drafts.py` for Postgres). With `STATE_BACKEND=memory` a restart loses them.
 
 ---
 
@@ -336,7 +337,7 @@ No log line, span attribute or metric label carries patient data; `tests/unit/in
 | `middleware.py` | `ObservabilityMiddleware` (request id, request log, metrics, HTTP span with the route template) and `SecurityMiddleware` (body-size cap → 413, security headers, HSTS). |
 | `retry.py` | `@retry`: retries only retryable `UpstreamError`s with backoff, honours Retry-After (fails fast past `max_wait`), and stays within a total time budget. |
 | `circuit_breaker.py` | Opens after repeated real outages (timeouts, connection errors, 5xx), fails fast while open, then tries again. 4xx and rate limits never count. |
-| `rate_limiter.py` | `TokenBucket` for outbound calls (waits); `KeyedRateLimiter` for incoming abuse limits per user/IP (never waits; returns the retry time; bounded memory). |
+| `rate_limiter.py` | `TokenBucket` for outbound calls (waits); `KeyedRateLimiter` for incoming abuse limits per user/IP, per process (never waits; returns the retry time; bounded memory). |
 | `context_budget.py` | Token estimate (3.5 characters per token) and `truncate_text`, which records a truncation metric. |
 | `guardrails.py` | `wrap_untrusted` (delimits outside text so it isn't followed as instructions), the allergy-mention check on output, and `validate_output` sanity checks. |
 | `verification.py` | Finds doses, percentages and lab values in an answer that appear in none of its sources, and adds an `UNVERIFIED FIGURES` warning. |
@@ -386,6 +387,8 @@ No log line, span attribute or metric label carries patient data; `tests/unit/in
 | `patient_store.py` | `PatientStore`: `get_patient` (doctor-scoped current view + changes since the last visit); `save_patient` (row lock, 409 on another doctor's ID, medications reconciled, labs appended); `save_visit` (with snapshot); `log_interactions` / `get_interactions`. |
 | `record_changes.py` | `record_snapshot` and `compute_changes`: the facts-only "what changed" comparison (medications started/stopped/changed, new conditions or allergies, newer labs). |
 | `audit_log.py` | `AuditLogStore`: `record()` and `for_patient()` (newest first, paged). |
+| `drafts.py` | Postgres approval drafts: `purge_expired_drafts` (one SQL delete past the TTL) and `delete_drafts_for_patients` (used by retention). |
+| `rate_limits.py` | `PostgresKeyedLimiter`: the abuse-limit token bucket in `rate_limit_buckets` under a row lock, shared by every replica. |
 | `retention.py` | `purge_expired`: opt-in deletion of whole inactive records and old audit entries; dry run by default; audits itself. |
 | `session.py` | `SessionMemory`: sliding-window message buffer for one ReAct run. |
 
@@ -415,7 +418,7 @@ No log line, span attribute or metric label carries patient data; `tests/unit/in
 | `patient_assessment.py` | The core graph: `init_run → triage → parallel specialists → report`. Failure and budget handling; returns `AssessmentOutcome(report, interactions)`; `build_assessment_graph` is reused as a subgraph. |
 | `followup.py` | `load_patient → assessment subgraph → (approval node with interrupt())`. `run_followup` for REST; `draft_followup`, `pending_draft`, `resolve_followup` and `discard_draft` for the WebSocket; progress events. |
 | `drug_check.py` | `load_patient → check_interactions`; returns `DrugCheckOutcome(answer, interactions)`. |
-| `checkpointing.py` | The in-memory checkpointer with an allowlist of types it may save (`_CHECKPOINT_STATE_TYPES`), and `purge_expired_drafts`. |
+| `checkpointing.py` | The checkpointer: in memory (`build_checkpointer`) or Postgres (`open_postgres_checkpointer`, which refuses an out-of-date schema), with an allowlist of types it may save (`_CHECKPOINT_STATE_TYPES`), and `purge_expired_drafts` for the in-memory one. |
 
 ### `api/`: HTTP and WebSocket layer
 
@@ -441,6 +444,7 @@ No log line, span attribute or metric label carries patient data; `tests/unit/in
 | `ops/` | Prometheus scrape config, Grafana data sources and dashboard, Tempo config, Caddyfile (production TLS). |
 | `docker-compose.yml` | Development stack: 9 services, every port bound to 127.0.0.1. |
 | `docker-compose.prod.yml` | Production overlay: Caddy (HTTPS) as the only public service, required secrets, optional Ollama. |
+| `deploy/k8s/` | Kustomize manifests for several replicas: `base/`, `overlays/local/` (kind), `overlays/aws/` (EKS + RDS + ALB). |
 | `Dockerfile` | The app image (CPU-only torch, non-root user). |
 | `scripts/setup_vendor_mcp.sh` | Clones and builds the two MCP servers that come from GitHub into `vendor/`. |
 | `Makefile` | Every developer command (`make pre-commit`, `make eval`, `make serve`...). |

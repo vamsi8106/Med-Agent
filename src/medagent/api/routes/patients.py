@@ -21,7 +21,7 @@ async def agent_run_user(
 ) -> User:
     """The current user, once they are within their agent-run limit. Each run
     spends LLM quota, so one account cannot exhaust it for everyone."""
-    enforce_limit(
+    await enforce_limit(
         state.agent_runs,
         user.id,
         limit="agent_runs",

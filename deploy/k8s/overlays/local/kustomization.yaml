@@ -1,0 +1,46 @@
+# Local test of the multi-replica setup on kind (make k8s-local-up):
+# in-cluster Postgres, 3 app replicas, the mock LLM (no API key, no quota),
+# images built by `docker compose build` and loaded into the cluster.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: medagent-local
+resources:
+  - namespace.yaml
+  - ../../base
+  - postgres.yaml
+secretGenerator:
+  # secrets.env is gitignored; copy secrets.env.example.
+  - name: medagent-secrets
+    envs: [secrets.env]
+  - name: postgres-credentials
+    envs: [postgres.env]
+generatorOptions:
+  disableNameSuffixHash: true
+images:
+  - { name: medagent, newName: medagent-medagent, newTag: latest }
+  - { name: medical-mcp-bridge, newName: medagent-medical-mcp-bridge, newTag: latest }
+  - { name: healthcare-mcp, newName: medagent-healthcare-mcp, newTag: latest }
+  - { name: research-mcp, newName: medagent-research-mcp, newTag: latest }
+patches:
+  - target: { kind: ConfigMap, name: medagent-config }
+    patch: |-
+      - { op: replace, path: /data/APP_ENV, value: development }
+      - { op: replace, path: /data/LLM_PROVIDER, value: mock }
+      - { op: replace, path: /data/FORWARDED_ALLOW_IPS, value: "*" }
+  - target: { kind: Deployment, name: medagent }
+    patch: |-
+      - { op: replace, path: /spec/replicas, value: 3 }
+  - target: { kind: HorizontalPodAutoscaler, name: medagent }
+    patch: |-
+      - { op: replace, path: /spec/minReplicas, value: 3 }
+  # Images come from `kind load`, never a registry.
+  - target: { kind: Deployment }
+    patch: |-
+      - { op: add, path: /spec/template/spec/containers/0/imagePullPolicy, value: Never }
+  - target: { kind: Deployment, name: medagent }
+    patch: |-
+      - { op: add, path: /spec/template/spec/initContainers/0/imagePullPolicy, value: Never }
+  - target: { kind: Service, name: medagent }
+    patch: |-
+      - { op: add, path: /spec/type, value: NodePort }
+      - { op: add, path: /spec/ports/0/nodePort, value: 30080 }

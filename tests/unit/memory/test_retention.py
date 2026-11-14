@@ -145,3 +145,28 @@ async def test_unconfigured_retention_does_nothing(pg_dsn: str) -> None:
 def test_retention_under_a_year_is_refused(field: str) -> None:
     with pytest.raises(ValidationError):
         Settings(_env_file=None, **{field: 30})
+
+
+async def test_purging_a_record_also_deletes_its_approval_drafts(pg_dsn: str) -> None:
+    store = PersistentStore(pg_dsn)
+    await _seed(store, "P-TEST-OLD")
+    await _seed(store, "P-TEST-ACTIVE")
+    await _backdate(store, "P-TEST-OLD", _NOW - timedelta(days=4000))
+    async with store.connect() as conn:
+        for thread in ("U1:P-TEST-OLD", "U1:P-TEST-ACTIVE"):
+            await conn.execute(
+                "INSERT INTO checkpoints (thread_id, checkpoint_id, checkpoint) "
+                "VALUES ($1, 'cp', '{}')",
+                thread,
+            )
+
+    await purge_expired(
+        store, retention_days=3650, audit_retention_days=None, execute=True, now=_NOW
+    )
+
+    async with store.connect() as conn:
+        threads = [
+            row["thread_id"] for row in await conn.fetch("SELECT thread_id FROM checkpoints")
+        ]
+    assert threads == ["U1:P-TEST-ACTIVE"]
+    await store.close()

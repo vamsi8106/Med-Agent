@@ -1,0 +1,126 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: medagent
+  labels:
+    app.kubernetes.io/name: medagent
+spec:
+  replicas: 2
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: medagent
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: medagent
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8000"
+        prometheus.io/path: /metrics
+    spec:
+      # Room for in-flight requests to finish after the load balancer stops
+      # sending new ones (preStop) -- an assessment can take ~60 s.
+      terminationGracePeriodSeconds: 90
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        # Every pod migrates before it starts. migrations/env.py takes a
+        # Postgres advisory lock, so pods starting together queue: the first
+        # applies the migrations, the rest find nothing to do.
+        - name: migrate
+          image: medagent
+          command: ["alembic", "upgrade", "head"]
+          envFrom:
+            - configMapRef:
+                name: medagent-config
+            - secretRef:
+                name: medagent-secrets
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests: { cpu: 50m, memory: 256Mi }
+            limits: { memory: 512Mi }
+      containers:
+        - name: medagent
+          image: medagent
+          command:
+            - uvicorn
+            - medagent.app:app
+            - --host=0.0.0.0
+            - --port=8000
+            - --no-access-log
+            - --proxy-headers
+            - --timeout-graceful-shutdown=60
+          ports:
+            - name: http
+              containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: medagent-config
+            - secretRef:
+                name: medagent-secrets
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            # torch + the embedding model: ~1 GiB resident.
+            requests: { cpu: 250m, memory: 1Gi }
+            limits: { memory: 2Gi }
+          volumeMounts:
+            - { name: cache, mountPath: /cache }
+            - { name: tmp, mountPath: /tmp }
+          # Loads the embedding model on boot: allow up to 5 minutes.
+          startupProbe:
+            httpGet: { path: /health, port: http }
+            periodSeconds: 5
+            failureThreshold: 60
+          # Liveness never depends on other services (restarting cannot fix them).
+          livenessProbe:
+            httpGet: { path: /health, port: http }
+            periodSeconds: 10
+            failureThreshold: 3
+          # 503 only when Postgres is down; degraded dependencies stay ready.
+          readinessProbe:
+            httpGet: { path: /ready, port: http }
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          lifecycle:
+            preStop:
+              exec:
+                # Let the load balancer deregister the pod before uvicorn
+                # stops accepting connections.
+                command: ["sleep", "10"]
+      volumes:
+        - { name: cache, emptyDir: {} }
+        - { name: tmp, emptyDir: {} }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: medagent
+  labels:
+    app.kubernetes.io/name: medagent
+spec:
+  selector:
+    app.kubernetes.io/name: medagent
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http

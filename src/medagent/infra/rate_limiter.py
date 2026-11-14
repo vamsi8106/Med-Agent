@@ -9,6 +9,8 @@ import asyncio
 import time
 from collections.abc import Callable
 
+from medagent.core.interfaces import BaseKeyedLimiter
+
 
 class TokenBucket:
     def __init__(self, rate_per_second: float, capacity: int) -> None:
@@ -49,10 +51,11 @@ class RateLimiter:
         await bucket.acquire(tokens)
 
 
-class KeyedRateLimiter:
+class KeyedRateLimiter(BaseKeyedLimiter):
     """One token bucket per key (a username, a client IP, a user id), created on
     first use. Non-blocking: try_acquire returns None when allowed, otherwise the
-    seconds until a token is available. State is per process.
+    seconds until a token is available. State is per process; with several
+    replicas use memory/rate_limits.py::PostgresKeyedLimiter (STATE_BACKEND).
 
     Buckets that have refilled completely carry no information, so they are
     dropped when the map grows past max_keys -- memory stays bounded even when
@@ -73,7 +76,7 @@ class KeyedRateLimiter:
         # key -> (tokens, updated_at)
         self._buckets: dict[str, tuple[float, float]] = {}
 
-    def try_acquire(self, key: str) -> float | None:
+    async def try_acquire(self, key: str) -> float | None:
         now = self._now()
         tokens = self._tokens(key, now)
         if tokens >= 1:

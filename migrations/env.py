@@ -58,11 +58,24 @@ def run_migrations_offline() -> None:
         context.run_migrations()
 
 
-def do_run_migrations(connection: Connection) -> None:
-    context.configure(connection=connection, target_metadata=target_metadata)
+# Any fixed 64-bit number; every migration runner takes the same lock.
+_MIGRATION_LOCK_ID = 7_410_355_022
 
-    with context.begin_transaction():
-        context.run_migrations()
+
+def do_run_migrations(connection: Connection) -> None:
+    # Several app replicas (or a Kubernetes Job and a replica) may start
+    # `alembic upgrade head` at once. The advisory lock makes them queue: the
+    # first applies the migrations, the rest then find nothing left to do.
+    # Session-level, so it is held across the migration transaction.
+    connection.exec_driver_sql(f"SELECT pg_advisory_lock({_MIGRATION_LOCK_ID})")
+    connection.commit()
+    try:
+        context.configure(connection=connection, target_metadata=target_metadata)
+        with context.begin_transaction():
+            context.run_migrations()
+    finally:
+        connection.exec_driver_sql(f"SELECT pg_advisory_unlock({_MIGRATION_LOCK_ID})")
+        connection.commit()
 
 
 async def run_async_migrations() -> None:

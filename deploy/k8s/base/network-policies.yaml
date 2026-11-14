@@ -1,0 +1,18 @@
+# The MCP servers and ChromaDB accept connections only from the app pods.
+# (Enforced where the cluster's network plugin supports NetworkPolicy -- the
+# VPC CNI on EKS with network policies enabled, Calico, Cilium, recent kindnet.)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: backends-accept-only-medagent
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app.kubernetes.io/name
+        operator: In
+        values: [medical-mcp-bridge, healthcare-mcp, research-mcp, chromadb]
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: { app.kubernetes.io/name: medagent }

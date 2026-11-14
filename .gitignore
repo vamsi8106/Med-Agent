@@ -13,3 +13,5 @@ guidelines_pdf/
 vendor/
 .mypy_cache/
 .import_linter_cache/
+deploy/k8s/overlays/*/secrets.env
+deploy/k8s/overlays/*/postgres.env

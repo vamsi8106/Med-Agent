@@ -51,8 +51,8 @@ async def login(
     # so guessing is capped per account and per source. Behind a reverse proxy,
     # run uvicorn with --proxy-headers so client.host is the real client.
     client_ip = request.client.host if request.client else "unknown"
-    enforce_limit(state.login_by_ip, client_ip, limit="login_ip", message=_LOGIN_LIMITED)
-    enforce_limit(
+    await enforce_limit(state.login_by_ip, client_ip, limit="login_ip", message=_LOGIN_LIMITED)
+    await enforce_limit(
         state.login_by_username,
         form.username.lower(),
         limit="login_username",
@@ -137,7 +137,7 @@ async def change_password(
 ) -> None:
     """Ends every session, including this one: log in again with the new password."""
     # Checking the current password is a guess like a login, so it is limited.
-    enforce_limit(
+    await enforce_limit(
         state.login_by_username,
         user.username.lower(),
         limit="login_username",

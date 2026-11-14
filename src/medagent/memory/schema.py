@@ -189,7 +189,90 @@ REMOVE_USER_MANAGEMENT_STATEMENTS: list[str] = [
     "ALTER TABLE users DROP COLUMN IF EXISTS disabled",
 ]
 
+# Migration 0006: shared state, so several app replicas can serve one
+# deployment (STATE_BACKEND=postgres).
+#
+# rate_limit_buckets backs the abuse limits (memory/rate_limits.py): one token
+# bucket per limiter name + key, updated under a row lock.
+#
+# The checkpoint_* tables are LangGraph's AsyncPostgresSaver schema, holding
+# WebSocket approval drafts (patient data, purged after APPROVAL_DRAFT_TTL_MINUTES
+# by memory/drafts.py). This is a frozen copy of the saver's own MIGRATIONS
+# list (langgraph-checkpoint-postgres 3.2.1) so the schema stays Alembic-owned
+# and setup() never runs at request time. CREATE INDEX drops CONCURRENTLY:
+# Alembic runs inside a transaction, and these tables start empty.
+# checkpoint_migrations records every version, which is how the saver knows
+# its schema is current; tests/unit/memory/test_drafts.py fails if a package
+# upgrade adds a migration this copy lacks.
+CHECKPOINT_SAVER_MIGRATIONS: list[str] = [
+    """CREATE TABLE IF NOT EXISTS checkpoint_migrations (
+    v INTEGER PRIMARY KEY
+)""",
+    """CREATE TABLE IF NOT EXISTS checkpoints (
+    thread_id TEXT NOT NULL,
+    checkpoint_ns TEXT NOT NULL DEFAULT '',
+    checkpoint_id TEXT NOT NULL,
+    parent_checkpoint_id TEXT,
+    type TEXT,
+    checkpoint JSONB NOT NULL,
+    metadata JSONB NOT NULL DEFAULT '{}',
+    PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id)
+)""",
+    """CREATE TABLE IF NOT EXISTS checkpoint_blobs (
+    thread_id TEXT NOT NULL,
+    checkpoint_ns TEXT NOT NULL DEFAULT '',
+    channel TEXT NOT NULL,
+    version TEXT NOT NULL,
+    type TEXT NOT NULL,
+    blob BYTEA,
+    PRIMARY KEY (thread_id, checkpoint_ns, channel, version)
+)""",
+    """CREATE TABLE IF NOT EXISTS checkpoint_writes (
+    thread_id TEXT NOT NULL,
+    checkpoint_ns TEXT NOT NULL DEFAULT '',
+    checkpoint_id TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    idx INTEGER NOT NULL,
+    channel TEXT NOT NULL,
+    type TEXT,
+    blob BYTEA NOT NULL,
+    PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id, task_id, idx)
+)""",
+    "ALTER TABLE checkpoint_blobs ALTER COLUMN blob DROP not null",
+    "SELECT 1",
+    "CREATE INDEX IF NOT EXISTS checkpoints_thread_id_idx ON checkpoints(thread_id)",
+    "CREATE INDEX IF NOT EXISTS checkpoint_blobs_thread_id_idx ON checkpoint_blobs(thread_id)",
+    "CREATE INDEX IF NOT EXISTS checkpoint_writes_thread_id_idx ON checkpoint_writes(thread_id)",
+    "ALTER TABLE checkpoint_writes ADD COLUMN IF NOT EXISTS task_path TEXT NOT NULL DEFAULT ''",
+]
+
+ADD_SHARED_STATE_STATEMENTS: list[str] = [
+    """
+    CREATE TABLE IF NOT EXISTS rate_limit_buckets (
+        key TEXT PRIMARY KEY,
+        tokens DOUBLE PRECISION NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS ix_rate_limit_buckets_updated_at ON rate_limit_buckets(updated_at)",
+    *CHECKPOINT_SAVER_MIGRATIONS,
+    f"""INSERT INTO checkpoint_migrations (v)
+    SELECT generate_series(0, {len(CHECKPOINT_SAVER_MIGRATIONS) - 1}) ON CONFLICT DO NOTHING""",
+]
+
+REMOVE_SHARED_STATE_STATEMENTS: list[str] = [
+    "DROP TABLE IF EXISTS checkpoint_writes",
+    "DROP TABLE IF EXISTS checkpoint_blobs",
+    "DROP TABLE IF EXISTS checkpoints",
+    "DROP TABLE IF EXISTS checkpoint_migrations",
+    "DROP TABLE IF EXISTS rate_limit_buckets",
+]
+
 TABLES_IN_DEPENDENCY_ORDER: list[str] = [
+    "checkpoint_writes",
+    "checkpoint_blobs",
+    "checkpoints",
+    "rate_limit_buckets",
     "audit_log",
     "interactions_log",
     "visits",

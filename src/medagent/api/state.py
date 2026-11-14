@@ -1,5 +1,12 @@
 """AppState: every long-lived client and agent, built once per app."""
 
+from datetime import timedelta
+
+from langgraph.checkpoint.base import BaseCheckpointSaver
+from langgraph.graph.state import CompiledStateGraph
+from psycopg import AsyncConnection
+from psycopg.rows import DictRow
+from psycopg_pool import AsyncConnectionPool
 from starlette.requests import HTTPConnection
 
 from medagent.agents.drug_safety_agent import DrugSafetyAgent
@@ -10,14 +17,17 @@ from medagent.agents.trial_finder_agent import TrialFinderAgent
 from medagent.auth.security import hash_password
 from medagent.auth.store import UserStore
 from medagent.core.config import Settings
-from medagent.core.exceptions import RateLimitedError
+from medagent.core.exceptions import AuthError, RateLimitedError
+from medagent.core.interfaces import BaseKeyedLimiter
 from medagent.infra.logging import get_logger
 from medagent.infra.metrics import abuse_limit_hits_total
 from medagent.infra.rate_limiter import KeyedRateLimiter
 from medagent.llm.registry import ProviderRegistry
+from medagent.memory import drafts
 from medagent.memory.audit_log import AuditLogStore
 from medagent.memory.patient_store import PatientStore
 from medagent.memory.persistent import PersistentStore
+from medagent.memory.rate_limits import PostgresKeyedLimiter
 from medagent.rag.embeddings import EmbeddingModel
 from medagent.rag.retriever import GuidelineRetrieverTool
 from medagent.rag.vector_store import VectorStore
@@ -26,7 +36,11 @@ from medagent.tools.mcp.healthcare import HealthcareMCPClient
 from medagent.tools.mcp.http_base import HttpMCPClient
 from medagent.tools.mcp.medical import MedicalMCPClient
 from medagent.tools.mcp.research import ResearchMCPClient
-from medagent.workflows.checkpointing import build_checkpointer
+from medagent.workflows.checkpointing import (
+    build_checkpointer,
+    open_postgres_checkpointer,
+    purge_expired_drafts,
+)
 from medagent.workflows.followup import build_followup_graph
 
 logger = get_logger(__name__)
@@ -40,15 +54,17 @@ class AppState:
         self.user_store = UserStore(self.persistent_store)
         self.audit_log = AuditLogStore(self.persistent_store)
 
-        # Abuse limits (per process). See Settings for the numbers.
-        self.login_by_username = KeyedRateLimiter(
-            settings.login_attempts_per_minute / 60, settings.login_attempts_burst
+        # Abuse limits: per process, or shared by every replica (STATE_BACKEND).
+        self.login_by_username = self._limiter(
+            "login_user", settings.login_attempts_per_minute / 60, settings.login_attempts_burst
         )
-        self.login_by_ip = KeyedRateLimiter(
-            settings.login_attempts_per_ip_per_minute / 60, settings.login_attempts_per_ip_burst
+        self.login_by_ip = self._limiter(
+            "login_ip",
+            settings.login_attempts_per_ip_per_minute / 60,
+            settings.login_attempts_per_ip_burst,
         )
-        self.agent_runs = KeyedRateLimiter(
-            settings.agent_runs_per_minute / 60, settings.agent_runs_burst
+        self.agent_runs = self._limiter(
+            "agent_runs", settings.agent_runs_per_minute / 60, settings.agent_runs_burst
         )
 
         self.llm = ProviderRegistry.get_provider(settings.llm_provider, settings)
@@ -73,9 +89,22 @@ class AppState:
         self.report = ReportAgent()
 
         # One long-lived graph with a checkpointer: the WebSocket approval flow
-        # pauses in it between the doctor's message and their decision.
-        self.checkpointer = build_checkpointer()
-        self.followup_graph = build_followup_graph(
+        # pauses in it between the doctor's message and their decision. The
+        # Postgres checkpointer needs the event loop, so it is built in init().
+        self._checkpoint_pool: AsyncConnectionPool[AsyncConnection[DictRow]] | None = None
+        self.checkpointer: BaseCheckpointSaver
+        self.followup_graph: CompiledStateGraph
+        if settings.state_backend == "memory":
+            self.checkpointer = build_checkpointer()
+            self.followup_graph = self._build_followup_graph()
+
+    def _limiter(self, name: str, rate_per_second: float, capacity: int) -> BaseKeyedLimiter:
+        if self.settings.state_backend == "postgres":
+            return PostgresKeyedLimiter(self.persistent_store, name, rate_per_second, capacity)
+        return KeyedRateLimiter(rate_per_second, capacity)
+
+    def _build_followup_graph(self) -> CompiledStateGraph:
+        return build_followup_graph(
             self.triage,
             self.drug_safety,
             self.evidence,
@@ -89,7 +118,19 @@ class AppState:
         # Schema is owned by Alembic ("alembic upgrade head"), run before
         # startup in any real deployment; this just opens the connection pool.
         await self.persistent_store.init_schema()
+        if self.settings.state_backend == "postgres":
+            self.checkpointer, self._checkpoint_pool = await open_postgres_checkpointer(
+                self.settings.postgres_dsn
+            )
+            self.followup_graph = self._build_followup_graph()
         await self._bootstrap_admin()
+
+    async def purge_expired_drafts(self) -> None:
+        ttl = timedelta(minutes=self.settings.approval_draft_ttl_minutes)
+        if self.settings.state_backend == "postgres":
+            await drafts.purge_expired_drafts(self.persistent_store, ttl)
+        else:
+            await purge_expired_drafts(self.checkpointer, ttl)
 
     async def _bootstrap_admin(self) -> None:
         """Seed exactly one admin account when the users table is empty.
@@ -105,17 +146,24 @@ class AppState:
         if await self.user_store.count_users() > 0:
             return
 
-        await self.user_store.create_user(username, hash_password(password), role="admin")
+        try:
+            await self.user_store.create_user(username, hash_password(password), role="admin")
+        except AuthError:
+            # Another replica starting at the same moment created it first.
+            logger.info("admin_bootstrap_skipped", reason="already_created")
+            return
         logger.info("admin_bootstrapped", username=username)
 
     async def close(self) -> None:
+        if self._checkpoint_pool is not None:
+            await self._checkpoint_pool.close()
         await self.persistent_store.close()
 
 
-def enforce_limit(limiter: KeyedRateLimiter, key: str, *, limit: str, message: str) -> None:
+async def enforce_limit(limiter: BaseKeyedLimiter, key: str, *, limit: str, message: str) -> None:
     """Raises RateLimitedError (429 + Retry-After) when key is over its limit.
     `limit` names the limit for the metric; the key itself is never recorded."""
-    wait = limiter.try_acquire(key)
+    wait = await limiter.try_acquire(key)
     if wait is not None:
         abuse_limit_hits_total.labels(limit=limit).inc()
         raise RateLimitedError(message, retry_after=wait)

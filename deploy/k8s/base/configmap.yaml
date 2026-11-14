@@ -1,0 +1,25 @@
+# Non-secret settings (see core/config.py and .env.example for every option).
+# Secrets -- POSTGRES_DSN, JWT_SECRET_KEY, ADMIN_BOOTSTRAP_*, GROQ_API_KEY,
+# LLM_API_KEY -- come from the medagent-secrets Secret (secret.example.yaml).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: medagent-config
+data:
+  STATE_BACKEND: postgres
+  APP_ENV: production
+  LOG_LEVEL: INFO
+  LLM_PROVIDER: openai_compatible
+  CHROMA_HOST: chromadb
+  CHROMA_PORT: "8000"
+  MEDICAL_MCP_URL: http://medical-mcp-bridge:8080
+  HEALTHCARE_MCP_URL: http://healthcare-mcp:3000
+  RESEARCH_MCP_URL: http://research-mcp:3000
+  # Per replica: N replicas make N x this many outbound calls per second.
+  MCP_RATE_LIMIT_PER_SECOND: "5"
+  # Who may set X-Forwarded-For (read by uvicorn itself). Set it to the load
+  # balancer's address range in each overlay; "*" is never safe here.
+  FORWARDED_ALLOW_IPS: 127.0.0.1
+  # Embedding model cache and Python: the root filesystem is read-only.
+  HF_HOME: /cache/huggingface
+  PYTHONDONTWRITEBYTECODE: "1"

@@ -1193,3 +1193,50 @@ def test_unknown_user_is_404(pg_dsn: str) -> None:
     with _make_client(pg_dsn) as client:
         response = client.post("/admin/users/dr.ghost/disable", headers=_admin_headers(client))
     assert response.status_code == 404
+
+
+# --- several replicas on one database (STATE_BACKEND=postgres) ---------------------------
+
+
+def test_replicas_share_the_login_limit(pg_dsn: str) -> None:
+    limits = {"login_attempts_burst": 3, "login_attempts_per_minute": 1}
+    with (
+        _make_client(pg_dsn, state_backend="postgres", **limits) as pod_a,
+        _make_client(pg_dsn, state_backend="postgres", **limits) as pod_b,
+    ):
+        codes = [
+            (pod_a if i % 2 == 0 else pod_b)
+            .post("/auth/token", data={"username": _ADMIN_USERNAME, "password": "wrong-guess-123"})
+            .status_code
+            for i in range(5)
+        ]
+
+    # One budget of 3 across both replicas, not 3 each.
+    assert codes == [401, 401, 401, 429, 429]
+
+
+def test_a_websocket_draft_survives_moving_to_another_replica(pg_dsn: str) -> None:
+    with (
+        _make_client(pg_dsn, state_backend="postgres") as pod_a,
+        _make_client(pg_dsn, state_backend="postgres") as pod_b,
+    ):
+        token = _admin_token(pod_a)
+        _create_patient(pod_a, token, "P-TEST-840", "Patient Alpha")
+        with _ws(pod_a, "P-TEST-840", token) as websocket:
+            _, pending = _draft(websocket, "any updates?")
+        # pod A's connection is gone (a restart, or the load balancer moved us)
+        assert _visits(pg_dsn, "P-TEST-840") == []
+
+        with _ws(pod_b, "P-TEST-840", token, resume=True) as websocket:
+            resumed = websocket.receive_json()
+            assert resumed == {
+                "type": "pending_approval",
+                "report": pending["report"],
+                "resumed": True,
+            }
+            websocket.send_text("approve")
+            assert websocket.receive_json()["type"] == "saved"
+
+    visits = _visits(pg_dsn, "P-TEST-840")
+    assert len(visits) == 1
+    assert visits[0].chief_complaint == "any updates?"

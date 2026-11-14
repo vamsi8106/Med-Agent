@@ -38,7 +38,7 @@ src/medagent/
 ├── infra/                       # Phase 1+ — cross-cutting
 │   ├── logging.py               # structlog JSON setup
 │   ├── retry.py                 # @retry: retries only `retryable` UpstreamErrors, honours Retry-After (fails fast past `max_wait`), bounded by a total `budget`
-│   ├── rate_limiter.py          # token-bucket per API source (outbound, waits); KeyedRateLimiter per user/IP (inbound abuse limits, never waits)
+│   ├── rate_limiter.py          # token-bucket per API source (outbound, waits); KeyedRateLimiter per user/IP (inbound abuse limits, never waits, per process)
 │   ├── circuit_breaker.py       # fail fast when a dependency (an MCP server, the LLM) is down; only timeouts/connection/5xx count, never 4xx or rate limits
 │   ├── tracing.py               # OpenTelemetry setup (OTLP to Tempo iff OTEL_EXPORTER_OTLP_ENDPOINT), traced_node helper
 │   ├── metrics.py               # Prometheus catalogue: HTTP, LLM calls/latency/tokens, retries, breaker state, MCP, tool calls, ReAct paths, guardrail flags, truncations
@@ -64,6 +64,8 @@ src/medagent/
 │   ├── patient_store.py         # Postgres CRUD for patient records (per-doctor isolation via doctor_id; saving another doctor's id → PatientOwnershipError 409). Medications/labs are append-only history: reconciled, never deleted; get_patient returns active meds + latest lab per test + changes_since_last_visit. log_interactions / get_interactions: insert-only interactions_log
 │   ├── record_changes.py        # visit snapshot + deterministic diff (meds started/stopped/changed, conditions, allergies, newer labs) -- facts only, no clinical interpretation
 │   ├── audit_log.py             # durable record of every patient-data access and every account change
+│   ├── drafts.py                # Postgres approval drafts: TTL purge, per-patient delete (the saver itself is LangGraph's)
+│   ├── rate_limits.py           # PostgresKeyedLimiter: abuse limits shared by every replica (rate_limit_buckets, row lock)
 │   ├── retention.py             # opt-in purge of whole inactive patient records and old audit entries (RETENTION_DAYS / AUDIT_RETENTION_DAYS)
 │   ├── session.py               # sliding-window conversation buffer (used by ReActAgent)
 │   ├── schema.py                # table DDL + doctor_id statements
@@ -78,7 +80,7 @@ src/medagent/
 ├── workflows/                   # Phase 5
 │   ├── patient_assessment.py    # LangGraph: init_run → triage → parallel specialists → report. A specialist's MedAgentError becomes a recorded failure (degraded report), not an abort; all failing raises AllAgentsFailedError. Embeddable as a subgraph
 │   ├── followup.py              # load patient → assessment subgraph → optional approval node (interrupt()); draft_followup / resolve_followup / pending_draft, progress streaming
-│   ├── checkpointing.py         # in-memory checkpointer (PHI stays in process memory) with a msgpack type allowlist; purge_expired_drafts
+│   ├── checkpointing.py         # in-memory (STATE_BACKEND=memory) or Postgres (postgres) checkpointer with a msgpack type allowlist; purge_expired_drafts
 │   └── drug_check.py            # enumerate pairs → check → aggregate
 ├── cli.py                       # `medagent ingest-guideline` (RAG ingestion), `medagent purge-expired` (retention); separate process from the server
 ├── api/                         # HTTP + WebSocket layer
@@ -90,7 +92,7 @@ src/medagent/
 └── app.py                       # Phase 6 — create_app(): lifespan, middleware, routers
 ```
 
-Outside `src/`: `migrations/` (Alembic), `docker/` (MCP server images), `ops/` (Prometheus/Grafana/Tempo/Caddy config), `docker-compose.prod.yml` (production overlay: Caddy TLS, no other public ports, required secrets, optional Ollama), `docs/deployment.md` (production runbook), `tests/eval/` (live golden-dataset evals).
+Outside `src/`: `migrations/` (Alembic), `docker/` (MCP server images), `ops/` (Prometheus/Grafana/Tempo/Caddy config), `docker-compose.prod.yml` (production overlay: Caddy TLS, no other public ports, required secrets, optional Ollama), `docs/deployment.md` (production runbook), `deploy/k8s/` (Kustomize: base, `overlays/local` for kind, `overlays/aws` for EKS + RDS + ALB), `tests/eval/` (live golden-dataset evals).
 
 `tests/` mirrors `src/` 1:1. `docs/glossary.md` for canonical terms; `docs/info.md` explains every concept and flow; `docs/code-walkthrough.md` traces each request through the files and describes every module. Architecture decisions and their rationale live in commit messages and the README.
 
@@ -196,7 +198,9 @@ Tools available: `search-drugs`, `get-drug-details`, `search-drug-nomenclature`,
 - `APP_ENV=production` refuses weak secrets at startup, hides the API docs and adds HSTS. The WebSocket authenticates with its first message (`{"type":"auth","token":...}`), never a URL token.
 - Account changes (disable, password reset/change, revoke) bump the user's `token_version`; every token carries the version it was issued with, so old tokens stop working at once. All account changes are audited.
 - Workflows return their structured results (`AssessmentOutcome`, `FollowupOutcome`, `DrugCheckOutcome`); persisting them (visits, `interactions_log`) is the API layer's job, so workflows never import `memory/`.
-- Retention deletes only when configured, whole records only, and audits itself. Never add another code path that deletes patient data.
+- State shared between replicas goes through `STATE_BACKEND`: `postgres` keeps approval drafts (LangGraph checkpointer) and abuse limits (`memory/rate_limits.py`) in the database. Anything else held in process memory must be per-pod by design (circuit breakers, outbound MCP buckets) or go through it. Migrations take a Postgres advisory lock (`migrations/env.py`), so concurrent `alembic upgrade head` is safe.
+- The `checkpoint_*` schema is a frozen copy of the saver's migrations in `memory/schema.py`; after upgrading `langgraph-checkpoint-postgres`, `tests/unit/memory/test_drafts.py` (and the app at startup) tell you to add an Alembic migration.
+- Retention deletes only when configured, whole records only (drafts included), and audits itself. Never add another code path that deletes patient data.
 - `make deps-audit` (pip-audit) must stay clean; an ignored advisory needs a reason in the Makefile and is removed when a fix ships.
 - `/health` is liveness (Docker uses it; must not flap on dependencies). `/ready` is readiness: Postgres down -> 503, other dependencies -> `degraded`; it never exposes hostnames or error text and never calls the LLM.
 - Metric labels must come from a small fixed set -- never a patient id, query text, error message, or a name the model chose.
@@ -226,6 +230,7 @@ make docker-up       # full stack incl. the app; make docker-down / docker-logs
 make db-upgrade      # alembic upgrade head (db-downgrade, db-revision name=... also exist)
 make ingest-guideline file=... source=...   # RAG ingestion via the CLI
 make purge-expired   # retention dry run (counts only); --execute via the CLI deletes
+make k8s-local-up    # kind cluster, 3 replicas on deploy/k8s/overlays/local (make k8s-local-down)
 docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d   # production (see docs/deployment.md)
 ```
 

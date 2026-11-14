@@ -1,0 +1,16 @@
+# Base for every environment: the app (several replicas sharing state through
+# Postgres, STATE_BACKEND=postgres), the three MCP servers and ChromaDB.
+# Postgres itself is NOT here: an overlay supplies it (in-cluster for `local`,
+# RDS for `aws`) through POSTGRES_DSN in the medagent-secrets Secret.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: medagent
+resources:
+  - configmap.yaml
+  - medagent.yaml
+  - autoscaling.yaml
+  - mcp-servers.yaml
+  - chromadb.yaml
+  - network-policies.yaml

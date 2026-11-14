@@ -82,6 +82,9 @@ Canonical names for every domain concept in MedAgent. Use these exact terms in c
 | **Golden Dataset** | Hand-written cases with known-correct expectations (`tests/eval/`), run by `make eval` against the real Groq model and real MCP servers. Unit tests use mocks and cannot see model-behavior or response-shape regressions. |
 | **Integration tests** | `tests/integration/`, run by `make integration` (and `make test`): the real embedding model, a throwaway Postgres container and the medical-mcp bridge, no LLM. Each test skips when its dependency is unavailable. Narrower than the golden dataset, which also uses the real model. |
 | **Interactions log** | The `interactions_log` table: one insert-only row per drug pair each time an interaction check runs (drugs, severity, description, source, time; `doctor_id` from the patient). Written by the API layer from a workflow outcome (`AssessmentOutcome` / `FollowupOutcome` / `DrugCheckOutcome`), read via `GET /patients/{id}/interactions`. A rejected WebSocket draft records nothing. |
+| **State backend** | `STATE_BACKEND`: where state shared between app replicas lives. `memory` (default, one process) or `postgres` (WebSocket approval drafts in LangGraph's Postgres checkpointer, abuse limits in `rate_limit_buckets`). Circuit breakers and outbound MCP rate limits stay per process either way. |
+| **Shared limiter** | `memory/rate_limits.py::PostgresKeyedLimiter`: the abuse-limit token bucket kept in Postgres under a row lock, so every replica enforces one limit. Same interface (`core/interfaces.py::BaseKeyedLimiter`) as the per-process `KeyedRateLimiter`. |
+| **Migration lock** | The Postgres advisory lock `migrations/env.py` takes, so app pods that run `alembic upgrade head` at once queue and only one applies the migrations. |
 | **Eval vs Unit Test** | Unit tests prove the code calls the right things; evals prove the real model/servers produce correct output. Runs on PRs into `main`. |
 
 ## Memory & RAG

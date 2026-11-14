@@ -3,7 +3,8 @@
 Opt-in and conservative. Nothing is deleted unless RETENTION_DAYS /
 AUDIT_RETENTION_DAYS are set; a dry run (the default) only counts. A patient
 record expires as a whole -- patient, medications, labs, visits, interactions
--- once its last activity (the record's update time or newest visit) is older
+-- and any approval drafts
+for it, once its last activity (the record's update time or newest visit) is older
 than the cutoff; deleting part of a record would corrupt its history. Audit
 entries are kept independently (they must outlive the data they describe),
 and every purge writes an audit entry of its own.
@@ -13,6 +14,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 from medagent.memory.audit_log import AuditLogStore
+from medagent.memory.drafts import delete_drafts_for_patients
 from medagent.memory.persistent import PersistentStore
 
 _EXPIRED_PATIENTS = """
@@ -56,6 +58,7 @@ async def purge_expired(
                             f"DELETE FROM {table} WHERE patient_id = ANY($1::text[])", ids
                         )
                     await conn.execute("DELETE FROM patients WHERE id = ANY($1::text[])", ids)
+                    await delete_drafts_for_patients(conn, ids)
             patients = len(ids)
 
         if audit_retention_days is not None:
