@@ -117,10 +117,10 @@ class Settings(BaseSettings):
     # migration 0006). Circuit breakers and outbound MCP rate limits stay per
     # process either way.
     state_backend: Literal["memory", "postgres"] = "memory"
-    # ChromaDB runs as its own server container so a persist-dir volume can be
-    # shared safely across multiple app replicas instead of embedded per-pod.
-    chroma_host: str = "chromadb"
-    chroma_port: int = 8000
+    # Guideline search: pgvector in this same Postgres (migration 0007). With
+    # RAG_HYBRID, keyword (full-text) results are fused with vector results.
+    # Default and gain measured by `make rag-eval` (docs/info.md section 13.1).
+    rag_hybrid: bool = False
     # Second retrieval stage: a cross-encoder re-scores RAG_RERANK_CANDIDATES
     # nearest guideline chunks and keeps the best. Empty = vector search only.
     # Choice and gain measured by `make rag-eval` (docs/info.md section 13.1).

@@ -1,5 +1,6 @@
 # Base for every environment: the app (several replicas sharing state through
-# Postgres, STATE_BACKEND=postgres), the three MCP servers and ChromaDB.
+# Postgres, STATE_BACKEND=postgres) and the three MCP servers. Guideline
+# vectors live in Postgres too (pgvector).
 # Postgres itself is NOT here: an overlay supplies it (in-cluster for `local`,
 # RDS for `aws`) through POSTGRES_DSN in the medagent-secrets Secret.
 apiVersion: kustomize.config.k8s.io/v1beta1
@@ -12,5 +13,4 @@ resources:
   - medagent.yaml
   - autoscaling.yaml
   - mcp-servers.yaml
-  - chromadb.yaml
   - network-policies.yaml

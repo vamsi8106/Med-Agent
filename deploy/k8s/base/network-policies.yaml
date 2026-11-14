@@ -1,4 +1,4 @@
-# The MCP servers and ChromaDB accept connections only from the app pods.
+# The MCP servers accept connections only from the app pods.
 # (Enforced where the cluster's network plugin supports NetworkPolicy -- the
 # VPC CNI on EKS with network policies enabled, Calico, Cilium, recent kindnet.)
 apiVersion: networking.k8s.io/v1
@@ -10,7 +10,7 @@ spec:
     matchExpressions:
       - key: app.kubernetes.io/name
         operator: In
-        values: [medical-mcp-bridge, healthcare-mcp, research-mcp, chromadb]
+        values: [medical-mcp-bridge, healthcare-mcp, research-mcp]
   policyTypes: [Ingress]
   ingress:
     - from:
@@ -21,7 +21,7 @@ spec:
 # NLM/NCBI/PubMed, ClinicalTrials.gov, WHO, medRxiv -- docs/deployment.md,
 # "Outbound network traffic"), so they may reach DNS and TCP 443 on public
 # addresses, never the cluster's private ranges (no lateral movement to
-# Postgres, ChromaDB or other workloads). NetworkPolicy cannot match host
+# Postgres or other workloads). NetworkPolicy cannot match host
 # names; for a host allowlist use an egress proxy, AWS Network Firewall or
 # Cilium FQDN policies.
 apiVersion: networking.k8s.io/v1
@@ -49,14 +49,3 @@ spec:
             except: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16]
       ports:
         - { protocol: TCP, port: 443 }
----
-# ChromaDB only answers the app; it has no reason to open connections.
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: chromadb-no-egress
-spec:
-  podSelector:
-    matchLabels: { app.kubernetes.io/name: chromadb }
-  policyTypes: [Egress]
-  egress: []

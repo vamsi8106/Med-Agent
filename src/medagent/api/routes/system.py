@@ -23,7 +23,6 @@ async def ready(state: AppState = Depends(get_state)) -> JSONResponse:
         circuits["llm"] = llm_circuit
     result = await check_readiness(
         postgres=state.persistent_store.ping,
-        chroma=state.vector_store.ping,
         mcp={name: client.probe for name, client in state.mcp_clients.items()},
         circuits=circuits,
     )

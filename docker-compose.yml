@@ -3,7 +3,8 @@
 # compose network. In production only a TLS reverse proxy should be public.
 services:
   postgres:
-    image: postgres:16-alpine
+    # Postgres 16 + pgvector: also holds the guideline embeddings (migration 0007).
+    image: pgvector/pgvector:0.8.7-pg16
     environment:
       POSTGRES_USER: medagent
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-medagent}
@@ -15,25 +16,6 @@ services:
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U medagent"]
       interval: 5s
-      timeout: 5s
-      retries: 10
-
-  chromadb:
-    # Must track the chromadb Python client's major version (pyproject.toml
-    # pins chromadb>=1.5.9) -- confirmed against a real run that 0.5.20's
-    # older server API breaks the 1.5.x client ("KeyError('_type')" on
-    # collection creation).
-    image: chromadb/chroma:1.5.9
-    ports:
-      - "127.0.0.1:8001:8000"
-    volumes:
-      - chroma-data:/data
-    healthcheck:
-      # chromadb/chroma's image ships neither curl/wget nor python3 (confirmed
-      # against a real container) -- bash's /dev/tcp is the one thing every
-      # variant of this image has had so far.
-      test: ["CMD", "bash", "-c", "echo > /dev/tcp/localhost/8000"]
-      interval: 10s
       timeout: 5s
       retries: 10
 
@@ -97,10 +79,9 @@ services:
       AUDIT_RETENTION_DAYS: ${AUDIT_RETENTION_DAYS:-}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       POSTGRES_DSN: postgresql://medagent:${POSTGRES_PASSWORD:-medagent}@postgres:5432/medagent
-      CHROMA_HOST: chromadb
-      CHROMA_PORT: 8000
       RAG_RERANKER_MODEL: ${RAG_RERANKER_MODEL:-}
       RAG_RERANK_CANDIDATES: ${RAG_RERANK_CANDIDATES:-20}
+      RAG_HYBRID: ${RAG_HYBRID:-false}
       MEDICAL_MCP_URL: http://medical-mcp-bridge:8080
       HEALTHCARE_MCP_URL: http://healthcare-mcp:3000
       RESEARCH_MCP_URL: http://research-mcp:3000
@@ -126,8 +107,6 @@ services:
       ADMIN_BOOTSTRAP_PASSWORD: ${ADMIN_BOOTSTRAP_PASSWORD:-change-me-before-first-deploy}
     depends_on:
       postgres:
-        condition: service_healthy
-      chromadb:
         condition: service_healthy
       healthcare-mcp:
         condition: service_healthy
@@ -186,7 +165,6 @@ services:
 
 volumes:
   postgres-data:
-  chroma-data:
   prometheus-data:
   grafana-data:
   tempo-data:

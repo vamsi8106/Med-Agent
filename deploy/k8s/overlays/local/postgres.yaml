@@ -15,7 +15,8 @@ spec:
     spec:
       containers:
         - name: postgres
-          image: postgres:16-alpine
+          # Postgres 16 + pgvector (guideline embeddings, migration 0007).
+          image: pgvector/pgvector:0.8.7-pg16
           envFrom:
             - secretRef: { name: postgres-credentials }
           env:

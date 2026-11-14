@@ -268,7 +268,55 @@ REMOVE_SHARED_STATE_STATEMENTS: list[str] = [
     "DROP TABLE IF EXISTS rate_limit_buckets",
 ]
 
+# Migration 0007: guideline search in Postgres (pgvector replaces ChromaDB).
+# guideline_documents holds one version row per ingested document: the hash of
+# its extracted text plus the embedding model and chunker that produced its
+# chunks, so an unchanged document is not re-embedded. guideline_chunks ids are
+# sha256(source, position, text), so re-ingesting identical text writes
+# nothing. `search` is the full-text index for hybrid (keyword + vector)
+# retrieval. Guideline text is not patient data: no doctor_id, no retention.
+EMBEDDING_DIMENSIONS = 384  # all-MiniLM-L6-v2; another model size needs a migration
+
+ADD_GUIDELINE_VECTOR_STATEMENTS: list[str] = [
+    "CREATE EXTENSION IF NOT EXISTS vector",
+    """
+    CREATE TABLE IF NOT EXISTS guideline_documents (
+        source TEXT PRIMARY KEY,
+        content_hash TEXT NOT NULL,
+        embedding_model TEXT NOT NULL,
+        chunker_version TEXT NOT NULL,
+        chunk_count INTEGER NOT NULL,
+        ingested_at TIMESTAMPTZ NOT NULL
+    )
+    """,
+    f"""
+    CREATE TABLE IF NOT EXISTS guideline_chunks (
+        id TEXT PRIMARY KEY,
+        source TEXT NOT NULL REFERENCES guideline_documents(source) ON DELETE CASCADE,
+        position INTEGER NOT NULL,
+        section TEXT,
+        text TEXT NOT NULL,
+        embedding vector({EMBEDDING_DIMENSIONS}) NOT NULL,
+        search tsvector GENERATED ALWAYS AS (
+            to_tsvector('english', coalesce(section, '') || ' ' || text)
+        ) STORED,
+        UNIQUE (source, position)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS ix_guideline_chunks_embedding "
+    "ON guideline_chunks USING hnsw (embedding vector_cosine_ops)",
+    "CREATE INDEX IF NOT EXISTS ix_guideline_chunks_search ON guideline_chunks USING gin (search)",
+]
+
+# The extension stays: other objects may use it, and dropping it needs superuser.
+REMOVE_GUIDELINE_VECTOR_STATEMENTS: list[str] = [
+    "DROP TABLE IF EXISTS guideline_chunks",
+    "DROP TABLE IF EXISTS guideline_documents",
+]
+
 TABLES_IN_DEPENDENCY_ORDER: list[str] = [
+    "guideline_chunks",
+    "guideline_documents",
     "checkpoint_writes",
     "checkpoint_blobs",
     "checkpoints",

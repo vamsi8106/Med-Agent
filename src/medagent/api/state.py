@@ -70,7 +70,8 @@ class AppState:
 
         self.llm = ProviderRegistry.get_provider(settings.llm_provider, settings)
         embeddings = EmbeddingModel()
-        self.vector_store = VectorStore(settings.chroma_host, settings.chroma_port)
+        # Guideline vectors live in Postgres (pgvector) and share its pool.
+        self.vector_store = VectorStore(self.persistent_store)
         medical_client = MedicalMCPClient(settings)
         healthcare_client = HealthcareMCPClient(settings)
         research_client = ResearchMCPClient(settings)
@@ -95,6 +96,7 @@ class AppState:
                     else None
                 ),
                 candidates=settings.rag_rerank_candidates,
+                hybrid=settings.rag_hybrid,
             ),
         )
         self.trial_finder = TrialFinderAgent(self.llm, healthcare_client)

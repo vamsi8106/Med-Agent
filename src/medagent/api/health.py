@@ -34,12 +34,12 @@ async def _probe(probe: Probe) -> str:
 
 
 async def check_readiness(
-    *, postgres: Probe, chroma: Probe, mcp: dict[str, Probe], circuits: dict[str, str]
+    *, postgres: Probe, mcp: dict[str, Probe], circuits: dict[str, str]
 ) -> Readiness:
-    """Postgres is required (down -> the instance is not ready, 503). Everything
-    else degrades: guideline search, an MCP server, or the LLM being unavailable
-    yields partial reports rather than no service."""
-    probes: dict[str, Probe] = {"postgres": postgres, "chroma": chroma, **mcp}
+    """Postgres is required (down -> the instance is not ready, 503); it also
+    holds the guideline vectors. Everything else degrades: an MCP server or the
+    LLM being unavailable yields partial reports rather than no service."""
+    probes: dict[str, Probe] = {"postgres": postgres, **mcp}
     results = await asyncio.gather(*(_probe(p) for p in probes.values()))
     checks = dict(zip(probes, results, strict=True))
     for name, state in circuits.items():

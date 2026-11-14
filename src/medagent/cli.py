@@ -32,6 +32,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     ingest.add_argument("--file", required=True, type=Path, help="Path to a .pdf or .txt file")
     ingest.add_argument(
+        "--force",
+        action="store_true",
+        help="Re-chunk and re-embed even if this exact text was already ingested",
+    )
+    ingest.add_argument(
         "--source", required=True, help="Source label stored with each chunk, e.g. 'ada-2024'"
     )
 
@@ -76,33 +81,38 @@ async def purge_expired_records(execute: bool) -> int:
     return 0
 
 
-async def ingest_guideline(file_path: Path, source_name: str) -> int:
+async def ingest_guideline(file_path: Path, source_name: str, force: bool = False) -> int:
     if not file_path.exists():
         logger.error("ingest_file_not_found", file=str(file_path))
         return 1
 
-    settings = get_settings()
-    pipeline = IngestionPipeline(
-        embeddings=EmbeddingModel(),
-        vector_store=VectorStore(settings.chroma_host, settings.chroma_port),
-    )
-
-    if file_path.suffix.lower() == ".pdf":
-        chunk_count = await pipeline.ingest_pdf(str(file_path), source_name)
-    else:
-        text = file_path.read_text()
-        chunk_count = await pipeline.ingest_text(text, source_name)
+    store = PersistentStore(get_settings().postgres_dsn)
+    pipeline = IngestionPipeline(embeddings=EmbeddingModel(), vector_store=VectorStore(store))
+    try:
+        if file_path.suffix.lower() == ".pdf":
+            result = await pipeline.ingest_pdf(str(file_path), source_name, force=force)
+        else:
+            result = await pipeline.ingest_text(file_path.read_text(), source_name, force=force)
+    finally:
+        await store.close()
 
     logger.info(
         "guideline_ingestion_complete",
         file=str(file_path),
         source=source_name,
-        chunk_count=chunk_count,
+        chunk_count=result.chunks,
+        skipped=result.skipped,
     )
     # Deliberate stdout confirmation for the human running this CLI
     # interactively -- structlog's JSON log line above is for log aggregation,
     # not for reading in a terminal.
-    print(f"Ingested {chunk_count} chunks from {file_path} (source={source_name})")
+    if result.skipped:
+        print(
+            f"{source_name} is unchanged ({result.chunks} chunks); nothing to do "
+            "(--force re-ingests)"
+        )
+    else:
+        print(f"Ingested {result.chunks} chunks from {file_path} (source={source_name})")
     return 0
 
 
@@ -114,7 +124,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if args.command == "ingest-guideline":
-        return asyncio.run(ingest_guideline(args.file, args.source))
+        return asyncio.run(ingest_guideline(args.file, args.source, args.force))
     if args.command == "purge-expired":
         return asyncio.run(purge_expired_records(args.execute))
 

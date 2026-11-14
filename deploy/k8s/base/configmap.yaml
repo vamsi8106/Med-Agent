@@ -10,12 +10,11 @@ data:
   APP_ENV: production
   LOG_LEVEL: INFO
   LLM_PROVIDER: openai_compatible
-  CHROMA_HOST: chromadb
-  CHROMA_PORT: "8000"
   # Optional re-ranker (docs/info.md 13.1): off when empty; on a GPU node set
   # cross-encoder/ms-marco-MiniLM-L6-v2. Each pod downloads it at startup.
   RAG_RERANKER_MODEL: ""
   RAG_RERANK_CANDIDATES: "20"
+  RAG_HYBRID: "false"
   MEDICAL_MCP_URL: http://medical-mcp-bridge:8080
   HEALTHCARE_MCP_URL: http://healthcare-mcp:3000
   RESEARCH_MCP_URL: http://research-mcp:3000

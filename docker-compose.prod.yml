@@ -49,10 +49,6 @@ services:
     environment:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
 
-  chromadb:
-    restart: unless-stopped
-    ports: !reset []
-
   healthcare-mcp:
     restart: unless-stopped
     ports: !reset []

@@ -82,7 +82,7 @@ The application cannot encrypt its own disk. Do one of the following:
 - Put Docker's data directory, or at least the `postgres-data` volume, on an encrypted disk: LUKS/dm-crypt on your own hardware, or encrypted block storage from your cloud provider (AWS EBS encryption, GCP CMEK, Azure Disk Encryption).
 - Run Postgres as a managed service with encryption at rest, and point `POSTGRES_DSN` at it.
 
-ChromaDB holds only guideline text (no patient data). Tempo, Prometheus and logs contain no patient data by design, which is enforced by `tests/unit/infra/test_no_phi_in_telemetry.py`.
+Postgres also holds the guideline vectors (no patient data), so the same disk encryption and backups cover them. Tempo, Prometheus and logs contain no patient data by design, which is enforced by `tests/unit/infra/test_no_phi_in_telemetry.py`.
 
 **Backups.** They contain everything, so encrypt them and test restores:
 
@@ -103,7 +103,9 @@ docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
 
 Migrations (`alembic upgrade head`) run automatically when `medagent` starts. Take a backup first. Every migration has a downgrade (`docker compose exec medagent alembic downgrade -1`).
 
-Run `make deps-audit` regularly. CI runs it on every push. When ChromaDB publishes fixes for the advisories listed in the `Makefile`, upgrade the `chromadb` image and package and remove those ignores.
+Run `make deps-audit` and `make mcp-audit` regularly. CI runs both on every push.
+
+**Moving an existing database to pgvector.** Postgres now runs the `pgvector/pgvector:0.8.7-pg16` image (Debian). A data volume created by the old `postgres:16-alpine` image must not be reused: the two images use different C libraries, so text indexes may sort differently. `pg_dump` the old database, start the new image on a fresh volume, `pg_restore`, then `alembic upgrade head` and re-ingest the guidelines. On **RDS** (PostgreSQL 15.2+ or 16) nothing moves: migration 0007 runs `CREATE EXTENSION IF NOT EXISTS vector`, which needs `rds_superuser`. If the app's user lacks it, a DBA runs `CREATE EXTENSION vector;` once.
 
 ## 7. Retention (decision required)
 
@@ -172,7 +174,7 @@ Kept **per pod** on purpose:
 ```
 deploy/k8s/
   base/                 app Deployment (2 replicas, probes, non-root, read-only root fs), Service,
-                        HPA (2–6 on CPU), PodDisruptionBudget, MCP servers, ChromaDB StatefulSet,
+                        HPA (2–6 on CPU), PodDisruptionBudget, MCP servers,
                         NetworkPolicies, ConfigMap; secret.example.yaml (not applied)
   overlays/local/       kind: in-cluster Postgres, 3 replicas, mock LLM, NodePort → localhost:18080
   overlays/aws/         EKS: ALB Ingress (ACM certificate, HTTPS only, 3600 s idle timeout for
@@ -228,7 +230,7 @@ Patient data is stored only in Postgres, but several components call services ou
 | `medical-mcp-bridge` | api.fda.gov, rxnav.nlm.nih.gov, eutils.ncbi.nlm.nih.gov / pubmed / www.ncbi.nlm.nih.gov, ghoapi.azureedge.net (WHO), clinicaltrials.gov; its unused tools also reach scholar.google.com and cochranelibrary.com | drug names, literature search terms |
 | `healthcare-mcp` | clinicaltrials.gov, clinicaltables.nlm.nih.gov, api.fda.gov, NCBI, odphp.health.gov, medRxiv | conditions, search terms |
 | `research-mcp` | api.fda.gov, eutils.ncbi.nlm.nih.gov, clinicaltrials.gov | drug pairs |
-| Postgres, ChromaDB | nothing | — |
+| Postgres (records and guideline vectors) | nothing | — |
 
 **Search queries are stripped of identifiers.** Every PubMed query goes through `infra/guardrails.py::outbound_search_query`, on the ReAct path and the fallback. It removes:
 - the patient's name and record ID;
@@ -237,7 +239,7 @@ Patient data is stored only in Postgres, but several components call services ou
 It keeps clinical terms such as `SGLT2` or `eGFRcr-cys`, and caps the query at 12 words. Redactions are counted in `medagent_guardrail_flags_total{kind="outbound_query_redacted"}`. The guard only recognises what the record or a pattern identifies, so a name the doctor types that isn't the patient's (a relative, a colleague) would still pass. **Doctors should not type identifiers into questions.** The trial finder sends only the first recorded condition; drug checks send drug names.
 
 **Restricting egress:**
-- **Kubernetes:** `deploy/k8s/base/network-policies.yaml` already allows the MCP pods only DNS and TCP 443 to public addresses (no private ranges), and gives ChromaDB no egress at all. This needs a network plugin that enforces NetworkPolicy (section 13).
+- **Kubernetes:** `deploy/k8s/base/network-policies.yaml` already allows the MCP pods only DNS and TCP 443 to public addresses (no private ranges). This needs a network plugin that enforces NetworkPolicy (section 13).
 - **A host-name allowlist:** NetworkPolicy can't match host names. Allowlist the hosts above with an egress proxy, AWS Network Firewall domain lists, or Cilium FQDN policies.
 - **Model downloads:** pre-download the Hugging Face models into the app image, so app pods need egress only to the LLM endpoint and the collector.
 
@@ -260,5 +262,5 @@ The MCP servers are third-party code with internet access, so they're pinned and
 - Circuit breakers and outbound MCP rate limits are kept per process (by design, see section 10). With `STATE_BACKEND=memory`, abuse limits and drafts are per process too, so use `postgres` with more than one replica.
 - With `STATE_BACKEND=memory`, a restart discards pending WebSocket drafts.
 - The embedding model is downloaded from Hugging Face when a pod starts, so pods need egress to it (or bake the model into the image).
-- The NetworkPolicies (only app pods may reach the MCP servers, ChromaDB and the in-cluster Postgres) take effect only where the network plugin enforces them: on EKS, enable network policies in the VPC CNI (or use Calico or Cilium). The default kind network plugin used by `make k8s-local-up` did not enforce them in testing.
+- The NetworkPolicies (only app pods may reach the MCP servers and the in-cluster Postgres) take effect only where the network plugin enforces them: on EKS, enable network policies in the VPC CNI (or use Calico or Cilium). The default kind network plugin used by `make k8s-local-up` did not enforce them in testing.
 - The checks in this runbook cover the application. A real deployment handling patient data also needs an organisational review: access policy, incident response, and the regulations that apply to you, such as HIPAA or GDPR.

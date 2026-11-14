@@ -25,7 +25,3 @@ patches:
       - { op: add, path: /data/LLM_MODEL, value: "<model name>" }
       # Traces to an OpenTelemetry collector (e.g. the ADOT collector -> X-Ray / Tempo).
       - { op: add, path: /data/OTEL_EXPORTER_OTLP_ENDPOINT, value: "http://<otel-collector>:4318" }
-  # ChromaDB volume on gp3 EBS (encrypted by the StorageClass).
-  - target: { kind: StatefulSet, name: chromadb }
-    patch: |-
-      - { op: add, path: /spec/volumeClaimTemplates/0/spec/storageClassName, value: gp3 }

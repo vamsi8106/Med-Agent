@@ -57,9 +57,6 @@ class _FakeVectorStore:
     async def query(self, *args: object, **kwargs: object) -> list[dict[str, object]]:
         return []
 
-    async def ping(self) -> bool:
-        return True
-
 
 def _settings(pg_dsn: str, **overrides: Any) -> Settings:
     # Abuse limits are generous by default so tests that log in or assess many

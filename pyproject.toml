@@ -10,7 +10,6 @@ requires-python = ">=3.12"
 dependencies = [
     "alembic>=1.20.0",
     "asyncpg>=0.31.0",
-    "chromadb>=1.5.9",
     "fastapi>=0.141.1",
     "groq>=1.7.0",
     "httpx>=0.28.1",
@@ -48,7 +47,6 @@ dev = [
     "pip-audit>=2.10.1",
     "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0",
-    "rank-bm25>=0.2.2",
     "ruff>=0.16.7",
 ]
 
@@ -90,7 +88,7 @@ warn_redundant_casts = true
 warn_unused_ignores = true
 warn_unreachable = true
 no_implicit_optional = true
-# Third-party medical/ML/agent libs here (chromadb, sentence-transformers,
+# Third-party medical/ML/agent libs here (sentence-transformers,
 # groq, mcp, langgraph) ship no stubs -- ignore missing imports globally
 # rather than maintaining a growing per-package allowlist.
 ignore_missing_imports = true

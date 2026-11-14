@@ -42,12 +42,6 @@ type-check:
 import-check:
 	uv run lint-imports
 
-# Known-vulnerability scan of the locked runtime dependencies. torch is skipped
-# by pip-audit (the CPU wheel is not on PyPI). The ignored chromadb advisories
-# have no fixed release yet and concern the Chroma *server* (we use the package
-# as an HTTP client); the server container is reachable only on the compose
-# network / localhost. Remove each ignore as soon as a fix ships.
-CHROMADB_UNFIXED := PYSEC-2026-311 PYSEC-2026-3813 PYSEC-2026-3814 PYSEC-2026-3815
 # npm audit over the three MCP servers' committed lockfiles (docker/*/), the
 # exact dependencies their images install with `npm ci --omit=dev`. Fails on
 # high or critical. Vendored servers are pinned in scripts/setup_vendor_mcp.sh.
@@ -58,10 +52,11 @@ mcp-audit:
 	  (cd $$dir && npm audit --omit=dev --audit-level=high) || exit 1; \
 	done
 
+# Known-vulnerability scan of the locked runtime dependencies. torch is skipped
+# by pip-audit (the CPU wheel is not on PyPI). No advisories are ignored.
 deps-audit:
 	uv export --frozen --no-dev --no-hashes --no-emit-project --quiet \
-	  | uv run pip-audit --disable-pip --no-deps --progress-spinner off -r /dev/stdin \
-	    $(foreach id,$(CHROMADB_UNFIXED),--ignore-vuln $(id))
+	  | uv run pip-audit --disable-pip --no-deps --progress-spinner off -r /dev/stdin
 
 pre-commit: format-fix lint-fix lint-check type-check import-check unit-tests
 
@@ -75,7 +70,7 @@ serve:
 # host (`make serve`) for fast reload. Point .env at the host-port URLs in
 # .env.example's "Bare local dev alternative" section when using this.
 docker-up-deps:
-	docker compose up -d --build postgres chromadb healthcare-mcp research-mcp medical-mcp-bridge
+	docker compose up -d --build postgres healthcare-mcp research-mcp medical-mcp-bridge
 
 # Full stack in Docker, medagent included -- closest to production topology.
 docker-up:

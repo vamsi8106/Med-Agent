@@ -2,15 +2,13 @@
 
 Uses the real local sentence-transformers model, a real (throwaway) Postgres
 container (via the shared `pg_dsn` fixture in tests/conftest.py -- skipped if
-Docker isn't available), and a real in-memory ChromaDB instance -- not
+Docker isn't available), with guideline vectors in that Postgres (pgvector) -- not
 mocked -- since this exercises the actual RAG pipeline end to end. Set
 HF_HUB_OFFLINE so it never reaches out to the network if the model is already
 cached locally.
 """
 
 import os
-
-import chromadb
 
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 
@@ -40,8 +38,8 @@ async def test_followup_visit_recalls_patient_and_retrieves_guidelines(pg_dsn: s
     await patient_store.save_patient(context)
 
     embeddings = EmbeddingModel()
-    # An in-memory chromadb client: this test has no running Chroma server.
-    vector_store = VectorStore(host="unused", port=0, client=chromadb.EphemeralClient())
+    # Guideline vectors in the same throwaway pgvector Postgres as the patient.
+    vector_store = VectorStore(persistent)
     pipeline = IngestionPipeline(embeddings=embeddings, vector_store=vector_store)
     await pipeline.ingest_text(
         "# Pharmacotherapy\nMetformin is recommended as first-line therapy for "

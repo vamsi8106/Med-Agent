@@ -43,6 +43,9 @@ _HEADER_PATTERN = re.compile(
 # all-MiniLM-L6-v2: 256 tokens minus [CLS] and [SEP]. The pipeline passes the
 # loaded model's own limit; these defaults only apply when no model is involved.
 CHUNK_SIZE_TOKENS = 254
+# Bump when chunking changes what a document becomes: ingestion re-chunks and
+# re-embeds every document whose stored version has another chunker version.
+CHUNKER_VERSION = "2026-11-14"
 CHUNK_OVERLAP_TOKENS = 32
 
 TokenCounter = Callable[[list[str]], list[int]]

@@ -26,7 +26,6 @@ async def _hangs() -> bool:
 async def _ready(**overrides):
     kwargs = {
         "postgres": _ok,
-        "chroma": _ok,
         "mcp": {"medical_mcp": _ok, "research_mcp": _ok},
         "circuits": {"llm": "closed", "medical_mcp": "closed"},
     }
@@ -50,7 +49,6 @@ async def test_postgres_down_means_not_ready() -> None:
 @pytest.mark.parametrize(
     "overrides",
     [
-        {"chroma": _down},
         {"mcp": {"medical_mcp": _down, "research_mcp": _ok}},
         {"circuits": {"llm": "open", "medical_mcp": "closed"}},
         {"circuits": {"llm": "half_open", "medical_mcp": "closed"}},
@@ -59,15 +57,15 @@ async def test_postgres_down_means_not_ready() -> None:
 async def test_a_non_essential_dependency_problem_degrades_but_does_not_fail(
     overrides: dict,
 ) -> None:
-    """Guideline search, an MCP server, or the LLM being out yields partial
+    """An MCP server or the LLM being out yields partial
     reports, not no service -- so the instance stays in rotation."""
     assert (await _ready(**overrides)).status == "degraded"
 
 
 async def test_a_probe_that_raises_is_down_and_its_error_text_is_never_reported() -> None:
-    result = await _ready(chroma=_explodes)
+    result = await _ready(mcp={"medical_mcp": _explodes})
 
-    assert result.checks["chroma"] == "down"
+    assert result.checks["medical_mcp"] == "down"
     assert "hunter2" not in repr(result)
     assert "internal-db" not in repr(result)
 
@@ -78,9 +76,9 @@ async def test_a_hung_dependency_times_out_instead_of_hanging_the_probe(
     monkeypatch.setattr(health, "PROBE_TIMEOUT_SECONDS", 0.05)
 
     started = asyncio.get_running_loop().time()
-    result = await _ready(chroma=_hangs)
+    result = await _ready(mcp={"medical_mcp": _hangs})
 
-    assert result.checks["chroma"] == "down"
+    assert result.checks["medical_mcp"] == "down"
     assert asyncio.get_running_loop().time() - started < 1.0
 
 
@@ -91,7 +89,7 @@ async def test_probes_run_concurrently(monkeypatch: pytest.MonkeyPatch) -> None:
 
     started = asyncio.get_running_loop().time()
     result = await _ready(
-        postgres=slow_ok, chroma=slow_ok, mcp={"a": slow_ok, "b": slow_ok, "c": slow_ok}
+        postgres=slow_ok, mcp={"a": slow_ok, "b": slow_ok, "c": slow_ok, "d": slow_ok}
     )
 
     assert result.status == "ok"

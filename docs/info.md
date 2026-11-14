@@ -37,11 +37,11 @@ MedAgent is a clinical decision-support assistant for doctors. It:
 - finds clinical trials,
 - remembers each patient across visits.
 
-Medical data comes from free, open APIs, reached through three MCP servers (see [section 2](#2-the-big-picture)). Patient records stay on your own infrastructure (Postgres and ChromaDB). Demos and tests use **synthetic patients only** ("Patient Alpha", IDs like `P-TEST-001`).
+Medical data comes from free, open APIs, reached through three MCP servers (see [section 2](#2-the-big-picture)). Patient records stay on your own infrastructure (Postgres). Demos and tests use **synthetic patients only** ("Patient Alpha", IDs like `P-TEST-001`).
 
 It is a decision-*support* tool: it drafts reports for a doctor to review, and the WebSocket flow requires the doctor to approve before anything is saved.
 
-**Stack:** Python 3.12, FastAPI, LangGraph, pydantic v2, structlog, httpx, asyncpg + Alembic, ChromaDB, sentence-transformers (`all-MiniLM-L6-v2`, CPU-only), Prometheus, Grafana, OpenTelemetry, Tempo. The LLM is chosen with `LLM_PROVIDER`: Groq (cloud, for synthetic demos) or any self-hosted model behind an OpenAI-style API (Ollama, vLLM, LM Studio), so patient data can stay on your machines.
+**Stack:** Python 3.12, FastAPI, LangGraph, pydantic v2, structlog, httpx, asyncpg + Alembic, pgvector, sentence-transformers (`all-MiniLM-L6-v2`, CPU-only), Prometheus, Grafana, OpenTelemetry, Tempo. The LLM is chosen with `LLM_PROVIDER`: Groq (cloud, for synthetic demos) or any self-hosted model behind an OpenAI-style API (Ollama, vLLM, LM Studio), so patient data can stay on your machines.
 
 ## 2. The big picture
 
@@ -66,7 +66,7 @@ It is a decision-*support* tool: it drafts reports for a doctor to review, and t
                  ┌─────────▼───┐   ┌───▼─────────────────┐
                  │ Agents       │   │ Memory              │
                  │ (ReAct loop) │   │ Postgres (records)  │
-                 └──┬───────┬───┘   │ ChromaDB (RAG)      │
+                 └──┬───────┬───┘   │ pgvector (RAG)      │
                     │       │       └─────────────────────┘
            ┌────────▼──┐  ┌─▼──────────────────────────────┐
            │ LLM       │  │ Tools                           │
@@ -295,12 +295,13 @@ RAG (retrieval-augmented generation) lets the agent answer from documents you su
 **Ingestion** (`rag/pipeline.py`, run with `make ingest-guideline file=... source=...`):
 
 ```
-PDF/text → extract text (pypdf) → chunk → embed (local model) → store in ChromaDB
+PDF/text → extract text (pypdf) → chunk → embed (local model, batches of 256) → store in Postgres (pgvector)
 ```
 
 - **Chunker** (`rag/chunker.py`): splits text into sections, then into windows sized to the **embedding model's token limit** (254 tokens for MiniLM, counted with the model's own tokenizer, 32-token overlap). Each chunk carries a **context prefix** (`<source> › <section>`) that is embedded with it but not stored as its text. Reference-list chunks (journal citations, `et al.`) are left out. A line counts as a section header if it is a markdown `# heading`, a numbered heading such as `2.2 Risk prediction in people with CKD`, or an ALL-CAPS title of two or more real words. Table labels (`CKD G1`, `NA/NA`) and lone words do not qualify.
 - **Embeddings** (`rag/embeddings.py`): `all-MiniLM-L6-v2` running locally on CPU. No patient text or guideline text goes to an external embedding service. Encodes are serialised for safe concurrent use.
-- **Vector store** (`rag/vector_store.py`): a ChromaDB server in its own container. Each chunk keeps its `source`, `section`, `embedding_model` and `ingestion_id`. Re-ingesting a source **replaces** its chunks: the new ones are added first, then the older ingestion's are deleted.
+- **Vector store** (`rag/vector_store.py`): **pgvector** in the same Postgres, so there's one database to secure, back up and scale (RDS supports it). `guideline_chunks` has a `vector(384)` column with an **HNSW** index for cosine search and a generated `tsvector` with a GIN index for keyword search.
+- **Document versions** (`guideline_documents`): each document stores the hash of its extracted text, the embedding model and the `CHUNKER_VERSION`. Ingesting an unchanged document is **skipped** (nothing embedded); a changed one is replaced in **one transaction**. Chunk IDs are `sha256(source, position, text)`, so unchanged chunks keep their IDs and aren't rewritten. `--force` re-ingests anyway.
 
 **Retrieval** (`rag/retriever.py`, the `guideline_retriever` tool): embed the query, fetch the top-k nearest chunks, return them as evidence with source and title. The evidence agent calls it as `search_guidelines`. Optionally (`RAG_RERANKER_MODEL`), a **cross-encoder re-ranker** (`rag/reranker.py`) re-scores the `RAG_RERANK_CANDIDATES` nearest chunks and keeps the best: two-stage retrieval. It is off by default because of CPU latency (see 13.1).
 
@@ -332,7 +333,7 @@ What the numbers teach:
 - **Context prefixes and dropping reference lists each recover recall** after shrinking chunks: citation titles otherwise outrank the recommendations.
 - **The bottleneck is now ranking.** The answer is often in the top 5 but not the top 3.
 
-**Ranking (steps 4–5), measured on 2026-11-14 on chunking 4, CPU with 4 threads:**
+**Ranking (steps 4–5), measured on 2026-11-14 on chunking 4, CPU with 4 threads (ChromaDB; pgvector reproduces the vector-only and re-ranked rows exactly, see below):**
 
 | Configuration | recall@1 | recall@5 | MRR | Reaches model | ms/query |
 |---|---|---|---|---|---|
@@ -347,9 +348,10 @@ What these numbers teach:
 - **Re-ranking is the big win:** it moves the right chunk to the top (recall@1 38 % → 62 %), so far more answers survive the agent's top-3 cut (57 % → 76 %). The cost is latency: a cross-encoder reads every (question, passage) pair, about 1 s for 20 candidates on this CPU, and a few tens of milliseconds on a GPU.
 - **A domain model is not automatically better.** MedCPT finds more answers somewhere in the top 5, but ranks fewer first, and is about 9× slower (a BERT-base model on 512-token pairs).
 - **Hybrid search alone did not help here.** BM25 on its own adds noise to vector search; combined with re-ranking it reached the best score (81 %), one question more than MiniLM re-ranking alone, at 9 s per query. With 21 questions, one question is about 5 points, so differences that small are within noise. Hybrid search is therefore not worth building yet; revisit it with pgvector (Postgres full-text search) and a larger question set.
+- **pgvector (step 3), measured on 2026-11-15:** configurations 1–5 give exactly the same recall, MRR and reaches-model as ChromaDB (same embeddings; the HNSW index found the same neighbours), at 50–120 ms per search. Hybrid search through **Postgres full-text search** fused with vector results by reciprocal rank fusion (`RAG_HYBRID`) made things worse: reaches model 57 % → 43 % without re-ranking, and 76 % → 71 % with it. Questions phrased in plain words match many chunks through keywords, which dilutes the vector ranking. `RAG_HYBRID` therefore stays **off**; it's there to re-measure with a larger question set or a better keyword query.
 - **Decision:** the re-ranker ships **off**, because about 1 s per guideline search on CPU (up to three searches per ReAct run) missed the 300 ms target. Turn it on with `RAG_RERANKER_MODEL=cross-encoder/ms-marco-MiniLM-L6-v2` on a GPU host, or on CPU if the extra seconds per assessment are acceptable; `RAG_RERANK_CANDIDATES=10` halves the cost for 71 %.
 
-`make rag-eval` takes about 15 minutes on CPU (the MedCPT configurations dominate); the re-ranker models download from Hugging Face on first run. `tests/eval/test_retrieval_eval.py` keeps the current configuration above floors just under these numbers and skips when the PDFs are absent.
+`make rag-eval` takes about 8 minutes on CPU; it starts a throwaway pgvector Postgres in Docker (each chunking configuration gets its own database) and downloads the re-ranker from Hugging Face on first run. `tests/eval/test_retrieval_eval.py` keeps the current configuration above floors just under these numbers and skips when the PDFs are absent.
 
 ## 14. Memory and storage
 
@@ -361,7 +363,7 @@ Agent memory is often described with four types borrowed from cognitive science:
 |---|---|---|
 | **Working** | what the agent holds for the current task | LangGraph run state, the ReAct message buffer (`memory/session.py`) and the prompt. Lasts one request (approval drafts: up to 30 minutes). Bounded by the context budgets. |
 | **Episodic** | specific past events | the `visits` table: each visit's question, report, date and a **snapshot of the record**. Recent visits are replayed as short summaries; the snapshot is the baseline for "what changed". The `interactions_log` keeps every drug-interaction check (one row per pair, with severity and source). The audit log also records events, for accountability only. |
-| **Semantic** | facts | the patient record (conditions, allergies, medications, labs) in Postgres; guidelines in ChromaDB; FDA/PubMed/RxNorm/trial data from the MCP servers. |
+| **Semantic** | facts | the patient record (conditions, allergies, medications, labs) in Postgres; guidelines in Postgres (pgvector); FDA/PubMed/RxNorm/trial data from the MCP servers. |
 | **Procedural** | how to do things | prompts, graph structure, triage rules, tools, guardrails. **Fixed in code on purpose**: an agent that rewrote its own clinical rules from feedback would change behaviour without review or tests. Doctor edits are logged (`report_edited`) for people to review. |
 
 Principles the design follows:
@@ -377,7 +379,7 @@ Principles the design follows:
 - **Session buffer** (`memory/session.py`): a sliding window of conversation messages used by the ReAct agent.
 - **Checkpoints** (LangGraph): in memory, or the `checkpoint_*` tables with `STATE_BACKEND=postgres` ([section 7](#7-graph-engineering-langgraph)).
 - **Rate-limit buckets**: `rate_limit_buckets` with `STATE_BACKEND=postgres`, so abuse limits hold across replicas.
-- **ChromaDB**: guideline embeddings.
+- **pgvector** (same Postgres): guideline embeddings, full-text index and document versions.
 
 ### 14.3 History is kept (append-only facts)
 
@@ -427,7 +429,7 @@ The schema change is migration `5b1e7c2d9a40` (adds `visits.record_snapshot` and
 - **Audit log.** Every patient-data access is recorded (created, viewed, assessed, follow-up, drug check, draft, approve, edit, reject) with the user and time, and is itself readable only for patients you own.
 - **No patient data in telemetry.** Traces, logs and metric labels never carry a patient id, name, medication, allergy, or prompt/response text. Correlation uses `request_id`, `trace_id` and `run_id`. `tests/unit/infra/test_no_phi_in_telemetry.py` fails the build if a distinctive patient string appears in any span or log line.
 - **Error hygiene.** Clients see fixed wording for upstream failures, not raw upstream text.
-- **Local data.** Patient data stays in your Postgres and ChromaDB. The uvicorn access log is disabled (`--no-access-log`) because it prints raw URL paths.
+- **Local data.** Patient data stays in your Postgres. The uvicorn access log is disabled (`--no-access-log`) because it prints raw URL paths.
 - **LangSmith warning.** LangChain's tracing (`LANGCHAIN_TRACING_V2`) is **off by default** because it would send prompts, which contain patient data, to a third party. If turned on, the app logs a warning at startup.
 - **Outbound queries.** Search terms sent to external medical APIs (PubMed via the MCP servers) pass through `outbound_search_query`, which strips the patient's name and record ID, dates, numbers, e-mail addresses, phone numbers and URLs. The LLM guard doesn't cover that traffic. Which hosts each container calls, and how to restrict egress, is in `docs/deployment.md` §11.
 - **MCP supply chain.** The vendored MCP servers are pinned to commits, install our audited lockfiles, and `make mcp-audit` (CI) fails on high or critical npm advisories (`docs/deployment.md` §12).
@@ -437,7 +439,7 @@ The schema change is migration `5b1e7c2d9a40` (adds `visits.record_snapshot` and
 - **Security headers.** Every response carries `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer` and `Cache-Control: no-store` (responses contain patient data). HSTS is added in production.
 - **Production mode.** `APP_ENV=production` refuses to start with the placeholder or a short `JWT_SECRET_KEY` (32+ characters) or a bootstrap password under 12 characters, and hides `/docs` and `/openapi.json`. In development the app logs a warning when the placeholder secret is in use.
 - **Container and network.** The app container runs as a non-root user. Docker Compose publishes every port on `127.0.0.1` only.
-- **Dependencies.** `make deps-audit` scans the locked dependencies (pip-audit), locally and in CI. Four ChromaDB advisories have no fixed release yet; they concern the Chroma server, which is reachable only on the compose network, and are ignored with that reason in the Makefile until a fix ships.
+- **Dependencies.** `make deps-audit` scans the locked dependencies (pip-audit), locally and in CI. No advisories are ignored (the four unfixed ChromaDB advisories went with ChromaDB).
 - **Where prompts go.** Prompts contain patient data. `LLM_PROVIDER=openai_compatible` points the app at a model you host (Ollama, vLLM, LM Studio) through an OpenAI-style API, so nothing leaves your infrastructure. In production, the app refuses to start with Groq, or with an `openai_compatible` endpoint on a public host, unless `ALLOW_EXTERNAL_LLM_WITH_PHI=true` asserts a data-processing agreement. "Local" means localhost, a private or loopback IP, or a single-label compose service name such as `ollama`.
 - **Accounts.** Admins can list users, disable or enable them, reset passwords and revoke all of a user's sessions; any user can change their own password. Each token carries the user's *token version*; disabling, password reset or change, and revoke-tokens bump it, so existing tokens stop working immediately. A disabled user's login gets the same answer as a wrong password. An admin cannot disable their own account. Every account change is audited.
 - **Retention.** `medagent purge-expired` deletes whole patient records whose last activity is older than `RETENTION_DAYS`, and audit entries older than `AUDIT_RETENTION_DAYS`. Nothing is deleted unless these are set; values under 365 days are refused; it is a dry run unless `--execute` is passed; and each purge writes its own audit entry.
@@ -497,7 +499,7 @@ POST /patients/{patient_id}/assess          (HTTP span)
 ### 16.4 Health
 
 - **`/health`** — liveness. "The process is up." Docker uses it; it does not depend on other services, so a down dependency never causes a restart loop.
-- **`/ready`** — readiness (no auth). Checks Postgres (`SELECT 1`), ChromaDB (heartbeat), and each MCP server's health endpoint, and reports LLM and MCP breaker state. Returns `ok`, `degraded` (HTTP 200) or `down` (HTTP 503, only when Postgres is down). It shows only status words, never hostnames or error text, and it does **not** call the LLM (no token spend).
+- **`/ready`** — readiness (no auth). Checks Postgres (`SELECT 1`; it also holds the guideline vectors) and each MCP server's health endpoint, and reports LLM and MCP breaker state. Returns `ok`, `degraded` (HTTP 200) or `down` (HTTP 503, only when Postgres is down). It shows only status words, never hostnames or error text, and it does **not** call the LLM (no token spend).
 
 ## 17. Testing strategy
 
@@ -515,13 +517,12 @@ Commands: `make pre-commit` (format, lint, mypy, import check, unit tests) befor
 
 ## 18. Deployment and operations
 
-`docker compose up -d --build` starts nine services:
+`docker compose up -d --build` starts eight services:
 
 | Service | Role |
 |---|---|
 | `medagent` | the API (runs `alembic upgrade head`, then uvicorn) |
-| `postgres` | records, users, audit log |
-| `chromadb` | guideline vectors |
+| `postgres` | records, users, audit log, guideline vectors (`pgvector/pgvector` image) |
 | `medical-mcp-bridge`, `healthcare-mcp`, `research-mcp` | the three MCP servers |
 | `prometheus` | scrapes `/metrics` |
 | `tempo` | receives OTLP traces |
@@ -563,7 +564,8 @@ All settings come from environment variables or `.env` through `Settings`. New s
 | `AGENT_VISIT_SUMMARY_MAX_TOKENS` | 250 | per stored-visit summary |
 | `AGENT_LOOP_TIMEOUT_SECONDS` | 40 | whole ReAct loop deadline |
 | `APPROVAL_DRAFT_TTL_MINUTES` | 30 | how long an unapproved draft is kept |
-| `POSTGRES_DSN`, `CHROMA_HOST`, `CHROMA_PORT` | local defaults | storage |
+| `POSTGRES_DSN` | local default | storage (records and guideline vectors) |
+| `RAG_HYBRID` | false | fuse Postgres full-text results with vector results (measured: worse here, see §13.1) |
 | `MEDICAL_MCP_URL`, `HEALTHCARE_MCP_URL`, `RESEARCH_MCP_URL` | Docker service names | MCP endpoints |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | unset | enables trace export |
 | `OTEL_CONSOLE_EXPORTER`, `OTEL_SAMPLE_RATIO` | false, 1.0 | debug output, sampling |

@@ -3,7 +3,7 @@
 Not part of the unit suite: needs a live GROQ_API_KEY and a reachable
 medical-mcp-bridge. Run deliberately via `make eval`, never as part of
 `make pre-commit`/CI. guideline_retriever is faked (empty results) --
-RAG/ChromaDB retrieval quality is a separate concern already covered by
+RAG retrieval quality is a separate concern already covered by
 tests/integration/test_followup_recall.py, kept out of this eval's
 dependency footprint on purpose.
 """

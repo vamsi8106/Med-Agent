@@ -12,12 +12,14 @@ import os
 import subprocess
 import uuid
 from collections.abc import Iterator
+from contextlib import contextmanager
 
 import asyncpg
 import pytest
 
 from medagent.memory.schema import (
     ADD_DOCTOR_ID_STATEMENTS,
+    ADD_GUIDELINE_VECTOR_STATEMENTS,
     ADD_RECORD_HISTORY_STATEMENTS,
     ADD_SHARED_STATE_STATEMENTS,
     ADD_USER_MANAGEMENT_STATEMENTS,
@@ -70,17 +72,22 @@ async def _wait_until_ready_and_apply_schema(dsn: str) -> None:
             *ADD_RECORD_HISTORY_STATEMENTS,
             *ADD_USER_MANAGEMENT_STATEMENTS,
             *ADD_SHARED_STATE_STATEMENTS,
+            *ADD_GUIDELINE_VECTOR_STATEMENTS,
         ]:
             await conn.execute(statement)
     finally:
         await conn.close()
 
 
-@pytest.fixture(scope="session")
-def postgres_dsn() -> Iterator[str]:
+@contextmanager
+def throwaway_postgres() -> Iterator[str | None]:
+    """A fresh pgvector Postgres in Docker with the app's schema applied; yields
+    its DSN (None when Docker is unavailable) and removes the container after.
+    Used by the DB-backed tests and by the retrieval eval."""
     working_host = _find_working_docker_host()
     if working_host is None:
-        pytest.skip("Docker is not available; skipping Postgres-backed tests")
+        yield None
+        return
 
     env = os.environ.copy()
     if working_host:
@@ -103,7 +110,8 @@ def postgres_dsn() -> Iterator[str]:
             "POSTGRES_DB=medagent_test",
             "-p",
             "0:5432",
-            "postgres:16-alpine",
+            # Postgres 16 + the vector extension (guideline search).
+            "pgvector/pgvector:0.8.7-pg16",
         ],
         env=env,
         check=True,
@@ -124,6 +132,14 @@ def postgres_dsn() -> Iterator[str]:
         yield dsn
     finally:
         subprocess.run(["docker", "rm", "-f", container_name], env=env, capture_output=True)
+
+
+@pytest.fixture(scope="session")
+def postgres_dsn() -> Iterator[str]:
+    with throwaway_postgres() as dsn:
+        if dsn is None:
+            pytest.skip("Docker is not available; skipping Postgres-backed tests")
+        yield dsn
 
 
 @pytest.fixture

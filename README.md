@@ -1,10 +1,10 @@
 # MedAgent
 
-Clinical decision-support agent for doctors: checks drug interactions (including against recorded allergies), retrieves treatment evidence tailored to the patient's conditions, finds clinical trials, and flags abnormal labs — with each doctor scoped to only their own patients. Built on LangGraph, FastAPI, Postgres, and ChromaDB, with all medical data sourced from free MCP servers (FDA/WHO/RxNorm/PubMed, ICD-10/trials/calculators, cross-database analysis).
+Clinical decision-support agent for doctors: checks drug interactions (including against recorded allergies), retrieves treatment evidence tailored to the patient's conditions, finds clinical trials, and flags abnormal labs — with each doctor scoped to only their own patients. Built on LangGraph, FastAPI and Postgres (with pgvector for guideline search), with all medical data sourced from free MCP servers (FDA/WHO/RxNorm/PubMed, ICD-10/trials/calculators, cross-database analysis).
 
 Two ways to run it locally:
 
-- **[Option A — Hybrid local dev](#option-a-hybrid-local-dev)**: the app runs bare on your host (fast reload via `uvicorn --reload`), backing services (Postgres, ChromaDB, the 3 MCP servers) run in Docker.
+- **[Option A — Hybrid local dev](#option-a-hybrid-local-dev)**: the app runs bare on your host (fast reload via `uvicorn --reload`), backing services (Postgres with pgvector, the 3 MCP servers) run in Docker.
 - **[Option B — Full Docker stack](#option-b-full-docker-stack)**: everything, including the app itself, runs in Docker — closest to the production topology.
 
 Both are exercised with the same `curl` walkthrough below.
@@ -44,7 +44,7 @@ ADMIN_BOOTSTRAP_PASSWORD=some-password-you-choose
 Backing services in Docker, the app itself bare on the host for fast-reload development.
 
 ```bash
-# 1. Start Postgres, ChromaDB, and the 3 MCP servers (published on host ports)
+# 1. Start Postgres (with pgvector) and the 3 MCP servers (published on host ports)
 make docker-up-deps
 
 # 2. Point .env at their host-port addresses instead of the container-DNS
@@ -52,8 +52,6 @@ make docker-up-deps
 #      MEDICAL_MCP_URL=http://localhost:8081
 #      HEALTHCARE_MCP_URL=http://localhost:3001
 #      RESEARCH_MCP_URL=http://localhost:3002
-#      CHROMA_HOST=localhost
-#      CHROMA_PORT=8001
 #      POSTGRES_DSN=postgresql://medagent:medagent@localhost:5432/medagent
 
 # 3. Apply migrations
@@ -69,13 +67,13 @@ The API is now at `http://localhost:8000`. Tear down the backing services with `
 
 ## Option B: Full Docker stack
 
-Everything — Postgres, ChromaDB, all 3 MCP servers, and the app — runs in containers.
+Everything — Postgres (with pgvector), all 3 MCP servers, and the app — runs in containers.
 
 ```bash
 make docker-up
 ```
 
-This builds and starts 9 services: `postgres`, `chromadb`, `healthcare-mcp`, `research-mcp`, `medical-mcp-bridge`, `medagent`, `prometheus`, `grafana`, `tempo`. The app runs its own `alembic upgrade head` on startup. Give it a minute — `medagent`'s healthcheck has a 120s start period since it loads a local sentence-transformers model on boot.
+This builds and starts 8 services: `postgres` (the `pgvector/pgvector` image), `healthcare-mcp`, `research-mcp`, `medical-mcp-bridge`, `medagent`, `prometheus`, `grafana`, `tempo`. The app runs its own `alembic upgrade head` on startup. Give it a minute — `medagent`'s healthcheck has a 120s start period since it loads a local sentence-transformers model on boot.
 
 ```bash
 docker compose ps        # check all services are "healthy"
@@ -307,7 +305,7 @@ Connecting *without* `resume=1` discards any stale draft, so a fresh question is
 
 ### Guideline RAG (optional)
 
-The evidence agent's `search_guidelines` tool searches guidelines you ingest into ChromaDB (`.pdf` or `.txt`). The chunker splits on section headers (markdown, numbered like `3.1.2 Title`, or all-caps multi-word lines), then sizes each chunk to the embedding model's token limit, adds a `<source> › <section>` context prefix for embedding, and drops reference-list chunks. Re-ingesting a source replaces its chunks, so **re-ingest guidelines that were ingested before this change** (their chunks were too long to embed fully). An optional cross-encoder re-ranker (`RAG_RERANKER_MODEL`, off by default for CPU latency) raised the share of answers reaching the model from 57 % to 76 %. `make rag-eval` measures retrieval quality over your PDFs ([docs/info.md §13.1](docs/info.md#131-measuring-retrieval-make-rag-eval)). A synthetic demo guideline is included:
+The evidence agent's `search_guidelines` tool searches guidelines you ingest into Postgres with pgvector (`.pdf` or `.txt`). The chunker splits on section headers (markdown, numbered like `3.1.2 Title`, or all-caps multi-word lines), then sizes each chunk to the embedding model's token limit, adds a `<source> › <section>` context prefix for embedding, and drops reference-list chunks. Each document is versioned (text hash, embedding model, chunker version): ingesting an unchanged document does nothing, a changed one replaces its chunks in one transaction, and `--force` re-ingests. Guidelines ingested into the old ChromaDB store must be ingested again. An optional cross-encoder re-ranker (`RAG_RERANKER_MODEL`, off by default for CPU latency) raised the share of answers reaching the model from 57 % to 76 %. `make rag-eval` measures retrieval quality over your PDFs ([docs/info.md §13.1](docs/info.md#131-measuring-retrieval-make-rag-eval)). A synthetic demo guideline is included:
 
 ```bash
 make ingest-guideline file=docs/demo/synthetic-t2dm-guideline.txt source=synthetic-t2dm

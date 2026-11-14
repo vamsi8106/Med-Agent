@@ -13,18 +13,18 @@ pytestmark = pytest.mark.skipif(
 _PRODUCTION = [config for config in CONFIGS if config.production]
 
 
-async def test_production_chunking_retrieves_and_delivers_the_answer() -> None:
-    [report] = await evaluate(_PRODUCTION)
+async def test_production_chunking_retrieves_and_delivers_the_answer(postgres_dsn: str) -> None:
+    [report] = await evaluate(postgres_dsn, _PRODUCTION)
 
     assert report.beyond_limit == 0, "chunks exceed the embedding model's token limit"
     assert report.recall(5) >= 0.66, report.misses  # measured 0.71
     assert report.reaches_model >= 0.52  # measured 0.57
 
 
-async def test_reranking_lifts_what_reaches_the_model() -> None:
+async def test_reranking_lifts_what_reaches_the_model(postgres_dsn: str) -> None:
     """The optional RAG_RERANKER_MODEL path (off by default for CPU latency)."""
     [reranked] = await evaluate(
-        [c for c in CONFIGS if c.reranker == GENERAL_RERANKER and not c.hybrid]
+        postgres_dsn, [c for c in CONFIGS if c.reranker == GENERAL_RERANKER and not c.hybrid]
     )
 
     assert reranked.reaches_model >= 0.71  # measured 0.76; vector only 0.57

@@ -177,7 +177,7 @@ END  →  AssessmentOutcome(report, interactions)
 
 - **Evidence** (`agents/evidence_agent.py`):
   1. Builds a patient preamble: conditions, allergies, medications, recent visits, and changes since the last visit, all wrapped as untrusted text.
-  2. Runs a ReAct loop (`agents/base.py::ReActAgent`, max 3 turns) over two tools: `search_medical_literature` (`tools/mcp/medical.py` → PubMed; the query first passes `outbound_search_query`, which strips patient identifiers, as does the fallback's) and `search_guidelines` (`rag/retriever.py` → ChromaDB, local).
+  2. Runs a ReAct loop (`agents/base.py::ReActAgent`, max 3 turns) over two tools: `search_medical_literature` (`tools/mcp/medical.py` → PubMed; the query first passes `outbound_search_query`, which strips patient identifiers, as does the fallback's) and `search_guidelines` (`rag/retriever.py` → pgvector in Postgres, local).
   3. If the model retrieves nothing or the loop fails, it falls back to the fixed retrieve-then-summarize pipeline.
   4. Every answer goes through the figure check (`infra/verification.py`) and the allergy cross-check (`infra/guardrails.py`).
 
@@ -283,7 +283,7 @@ The route records the pairs in `interactions_log` and the audit entry `drug_chec
 
 | Command | Flow | Output |
 |---|---|---|
-| `ingest-guideline --file X --source Y` | read the PDF (`pypdf`) or text → `rag/pipeline.py`: `rag/chunker.py` (section headers, chunks sized to the model's token limit, context prefix, reference lists dropped) → `rag/embeddings.py` → `rag/vector_store.py` (ChromaDB) | chunk count on the terminal; chunks in ChromaDB |
+| `ingest-guideline --file X --source Y` | read the PDF (`pypdf`) or text → `rag/pipeline.py`: `rag/chunker.py` (section headers, chunks sized to the model's token limit, context prefix, reference lists dropped) → `rag/embeddings.py` (batches of 256) → `rag/vector_store.py` (pgvector, one transaction per document; an unchanged document is skipped) | chunk count, or "unchanged", on the terminal; chunks in Postgres |
 | `purge-expired [--execute]` | `memory/retention.py::purge_expired`: does nothing unless `RETENTION_DAYS` / `AUDIT_RETENTION_DAYS` are set (minimum 365). Dry run by default. `--execute` deletes whole inactive records and old audit entries, and audits the purge. | counts only on the terminal, never names or IDs |
 
 ---
@@ -298,7 +298,7 @@ The route records the pairs in `interactions_log` and the audit entry `drug_chec
 | Interaction checks | `memory/patient_store.py::log_interactions` | Postgres `interactions_log` |
 | Audit entries | `memory/audit_log.py` | Postgres `audit_log` |
 | Users | `auth/store.py` | Postgres `users` |
-| Guideline chunks | `rag/pipeline.py` (CLI) | ChromaDB |
+| Guideline chunks and versions | `rag/pipeline.py` (CLI) | Postgres (`guideline_chunks`, `guideline_documents`) |
 | Logs | `infra/logging.py` (structlog JSON) | stdout → `docker compose logs` |
 | Traces | `infra/tracing.py` (OTLP) | Tempo → Grafana |
 | Metrics | `infra/metrics.py` (`/metrics`) | Prometheus → Grafana |
@@ -374,8 +374,8 @@ No log line, span attribute or metric label carries patient data; `tests/unit/in
 |---|---|
 | `chunker.py` | Splits text on section headers (markdown, numbered `3.1.2 Title`, all-caps multi-word lines), then into windows that fit the embedding model (token counts from its tokenizer, 32-token overlap). Each chunk has a `<source> › <section>` context prefix for embedding; `is_reference_list` drops bibliography chunks. |
 | `embeddings.py` | `EmbeddingModel`: sentence-transformers `all-MiniLM-L6-v2` on CPU; one encode at a time so it can be shared safely. `max_tokens` (the model's limit) and `count_tokens` size the chunks. |
-| `vector_store.py` | `VectorStore`: ChromaDB client (add, query, `delete_source`); accepts an injected client for tests and the retrieval eval. |
-| `pipeline.py` | `IngestionPipeline`: text → chunks → embeddings (with context) → ChromaDB; re-ingesting a source replaces its chunks. |
+| `vector_store.py` | `VectorStore` on pgvector, sharing the app's Postgres pool: `query` (cosine, HNSW), `keyword_query` (full-text), `document` (stored version), `replace_document` (one transaction; unchanged chunks keep their IDs). |
+| `pipeline.py` | `IngestionPipeline`: text → chunks → embeddings (with context, batches of 256) → pgvector. Versioned: an unchanged document (same text hash, model, chunker) is skipped; `chunk_id` = sha256(source, position, text). |
 | `retriever.py` | `GuidelineRetrieverTool`: query → top-k `ClinicalEvidence` passages; with a re-ranker, fetches `RAG_RERANK_CANDIDATES` nearest chunks and returns the re-ranker's top k. |
 | `reranker.py` | `CrossEncoderReranker`: scores (question, passage) pairs in one batched call, under a lock (shared across requests); keeps the best `top_n`. |
 
@@ -428,7 +428,7 @@ No log line, span attribute or metric label carries patient data; `tests/unit/in
 | `state.py` | `AppState` (section 3), `get_state` (works for HTTP and WebSocket), `enforce_limit` (429 + metric). |
 | `errors.py` | `medagent_error_handler`, `error_payload`, `retry_after`, `doctor_scope` (doctor → own id, admin → no filter), `require_doctor_id`. |
 | `schemas.py` | Request and response bodies: login token, user creation, passwords, assess and drug-check bodies, with size limits; `MAX_MESSAGE_CHARS`. |
-| `health.py` | `check_readiness`: probes Postgres, ChromaDB and each MCP server (with a timeout) and reads the breaker states; ok / degraded / down; never hostnames or error text. |
+| `health.py` | `check_readiness`: probes Postgres (which also holds the guideline vectors) and each MCP server (with a timeout) and reads the breaker states; ok / degraded / down; never hostnames or error text. |
 | `routes/system.py` | `GET /health` (liveness), `GET /ready` (readiness; 503 when Postgres is down), `GET /metrics`. |
 | `routes/auth.py` | `POST /auth/token`, `POST /auth/change-password`, `POST /admin/users`, `GET /admin/users`, `/admin/users/{username}/disable`, `/enable`, `/reset-password`, `/revoke-tokens`. |
 | `routes/patients.py` | `POST /patients`, `GET /patients/{id}`, `GET /patients/{id}/audit-log`, `GET /patients/{id}/interactions`, `POST /patients/{id}/assess`, `POST /patients/{id}/followup`, `POST /drug-check`. |

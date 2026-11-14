@@ -1,11 +1,11 @@
 # MedAgent
 
-Clinical decision support agent for doctors. Checks drug interactions, retrieves treatment evidence, finds clinical trials, tracks patient history across sessions. All medical data from free open APIs via MCP servers. Patient data stays local (Postgres + ChromaDB). Synthetic data only for demos.
+Clinical decision support agent for doctors. Checks drug interactions, retrieves treatment evidence, finds clinical trials, tracks patient history across sessions. All medical data from free open APIs via MCP servers. Patient data stays local (Postgres). Synthetic data only for demos.
 
 **Stack:** Python 3.12+, uv, ruff, mypy, pytest, pydantic v2, structlog, httpx, FastAPI, LangGraph, asyncpg + Alembic.
 **LLM:** `LLM_PROVIDER`: `groq` (cloud; demos with synthetic data), `openai_compatible` (a self-hosted model via an OpenAI-style API: Ollama, vLLM, LM Studio), `mock` (tests). Production refuses a third-party model unless `ALLOW_EXTERNAL_LLM_WITH_PHI=true`. No Groq imports outside `llm/groq_provider.py`.
 **MCP:** medical-mcp (FDA/WHO/RxNorm/PubMed), healthcare-mcp (ICD-10/trials/calculator), med-research-mcp-suite (cross-DB analysis). All run locally, no API keys.
-**Storage:** Postgres (patients, meds, labs, visits, users, audit log; schema owned by Alembic in `migrations/`), ChromaDB (guideline embeddings, its own container), sentence-transformers `all-MiniLM-L6-v2` (local, CPU-only torch).
+**Storage:** Postgres (patients, meds, labs, visits, users, audit log; schema owned by Alembic in `migrations/`), pgvector in the same Postgres (guideline embeddings + full-text index, versioned per document), sentence-transformers `all-MiniLM-L6-v2` (local, CPU-only torch).
 
 # User Flows
 
@@ -72,7 +72,7 @@ src/medagent/
 │   └── persistent.py            # asyncpg pool + connection handling
 ├── rag/                         # Phase 4
 │   ├── embeddings.py            # sentence-transformers (local)
-│   ├── vector_store.py          # ChromaDB adapter (re-ingesting a source replaces its chunks)
+│   ├── vector_store.py          # pgvector store in Postgres: cosine search (HNSW), keyword search (full-text), versioned replace_document
 │   ├── chunker.py               # section-header-aware; chunks sized to the embedding model's token limit, context prefix, reference lists dropped
 │   ├── pipeline.py              # PDF → chunk → embed → store
 │   ├── reranker.py              # CrossEncoderReranker: second retrieval stage (RAG_RERANKER_MODEL), re-scores the nearest chunks
@@ -151,6 +151,8 @@ medications (id, patient_id FK, doctor_id, name, brand_name, dose, frequency, ro
 lab_results (id, patient_id FK, doctor_id, test_name, value, unit, reference_low, reference_high, is_abnormal, collected_at)
 visits      (id, patient_id FK, doctor_id, visit_date, chief_complaint, assessment, plan, agent_session_id, record_snapshot JSONB, created_at)
 interactions_log (id, patient_id FK, doctor_id, drug_a, drug_b, severity, description, source, checked_at)
+guideline_documents (source PK, content_hash, embedding_model, chunker_version, chunk_count, ingested_at)
+guideline_chunks    (id = sha256(source, position, text), source FK, position, section, text, embedding vector(384) HNSW, search tsvector GIN)
 ```
 
 # MCP Server Config
@@ -201,11 +203,12 @@ Tools available: `search-drugs`, `get-drug-details`, `search-drug-nomenclature`,
 - Workflows return their structured results (`AssessmentOutcome`, `FollowupOutcome`, `DrugCheckOutcome`); persisting them (visits, `interactions_log`) is the API layer's job, so workflows never import `memory/`.
 - State shared between replicas goes through `STATE_BACKEND`: `postgres` keeps approval drafts (LangGraph checkpointer) and abuse limits (`memory/rate_limits.py`) in the database. Anything else held in process memory must be per-pod by design (circuit breakers, outbound MCP buckets) or go through it. Migrations take a Postgres advisory lock (`migrations/env.py`), so concurrent `alembic upgrade head` is safe.
 - The `checkpoint_*` schema is a frozen copy of the saver's migrations in `memory/schema.py`; after upgrading `langgraph-checkpoint-postgres`, `tests/unit/memory/test_drafts.py` (and the app at startup) tell you to add an Alembic migration.
+- Guideline vectors are `vector(384)` (`EMBEDDING_DIMENSIONS`, all-MiniLM-L6-v2): another embedding size needs a migration. Bump `CHUNKER_VERSION` when chunking changes what a document becomes, so ingestion re-embeds instead of skipping it as unchanged.
 - A change to chunking, the embedding model, re-ranking or retrieval needs `make rag-eval` before and after; report the numbers, including ms/query. Chunks must fit the embedding model's token limit (`EmbeddingModel.max_tokens`), or the rest of the chunk is silently not embedded.
 - Retention deletes only when configured, whole records only (drafts included), and audits itself. Never add another code path that deletes patient data.
 - `make deps-audit` (pip-audit) must stay clean; an ignored advisory needs a reason in the Makefile and is removed when a fix ships. `make mcp-audit` (npm audit over `docker/*/package-lock.json`) must stay clean of high/critical.
 - Vendored MCP servers are pinned to commits in `scripts/setup_vendor_mcp.sh` and install our overlay lockfiles (`docker/<server>/`); an upgrade changes the commit, regenerates the overlay and re-runs `make mcp-audit` (`docs/deployment.md` §12).
-- Any query sent to an external medical API goes through `infra/guardrails.py::outbound_search_query` (strips the patient's name and id, dates, numbers, contact details). Local searches (ChromaDB) don't need it.
+- Any query sent to an external medical API goes through `infra/guardrails.py::outbound_search_query` (strips the patient's name and id, dates, numbers, contact details). Local searches (guideline pgvector) don't need it.
 - `/health` is liveness (Docker uses it; must not flap on dependencies). `/ready` is readiness: Postgres down -> 503, other dependencies -> `degraded`; it never exposes hostnames or error text and never calls the LLM.
 - Metric labels must come from a small fixed set -- never a patient id, query text, error message, or a name the model chose.
 - Anything shared across requests (`AppState` clients, models) is used concurrently -- `HttpMCPClient` is re-entrant and `EmbeddingModel` serializes encodes for this reason. A new shared resource must be safe under overlapping use, with a test that overlaps it.
@@ -230,7 +233,7 @@ make mcp-audit       # npm audit over the MCP servers' committed lockfiles (also
 make pre-commit      # format-fix + lint-fix + lint-check + type-check + import-check + unit-tests
 make ci-check        # format-check + lint-check + type-check + import-check + unit-tests (what CI runs; no auto-fix)
 make serve           # uv run uvicorn medagent.app:app --reload
-make docker-up-deps  # backing services only (postgres, chromadb, 3 MCP servers) for bare-host dev
+make docker-up-deps  # backing services only (postgres with pgvector, 3 MCP servers) for bare-host dev
 make docker-up       # full stack incl. the app; make docker-down / docker-logs
 make db-upgrade      # alembic upgrade head (db-downgrade, db-revision name=... also exist)
 make ingest-guideline file=... source=...   # RAG ingestion via the CLI

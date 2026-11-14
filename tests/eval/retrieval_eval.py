@@ -1,9 +1,10 @@
 """Retrieval eval: how often does guideline search put the right passage on top?
 
-Builds an in-memory ChromaDB index from the local guideline PDFs per chunking
-configuration, asks every question in retrieval_golden_dataset.py, and reports
-recall@k and MRR. Run `make rag-eval` before and after any change to chunking,
-the embedding model or retrieval, and compare.
+Builds a pgvector index from the local guideline PDFs per chunking
+configuration (each in its own database of a throwaway Postgres container),
+asks every question in retrieval_golden_dataset.py, and reports recall@k and MRR.
+Run `make rag-eval` before and after any change to chunking, the embedding
+model or retrieval, and compare.
 
 - recall@k: share of questions whose answer passage is in the top k results.
 - MRR (mean reciprocal rank): average of 1/rank of the first correct result
@@ -17,47 +18,44 @@ the embedding model or retrieval, and compare.
 - beyond limit: share of embedded tokens past the model's limit, which the
   model silently ignores.
 
-Configurations 1-4 compare chunking; 5-8 compare ranking on chunking 4:
-re-ranking with a cross-encoder (rag/reranker.py, what production can switch
-on) and hybrid keyword + vector search. Hybrid uses an in-memory BM25 here to
-measure whether it is worth building (in production it needs a keyword index,
-e.g. Postgres full-text search with pgvector).
+Configurations 1-4 compare chunking; 5-7 compare ranking on chunking 4:
+re-ranking with a cross-encoder (rag/reranker.py, RAG_RERANKER_MODEL) and hybrid
+keyword + vector search (Postgres full-text search fused by RRF, RAG_HYBRID) --
+the exact retriever production runs.
 
-Needs the PDFs in guidelines_pdf/ (gitignored), the local embedding model and,
-for 5-8, the re-ranker models (downloaded from Hugging Face on first use).
+Needs the PDFs in guidelines_pdf/ (gitignored), Docker (for the throwaway
+pgvector Postgres), the local embedding model and, for 5 and 7, the re-ranker
+model (downloaded from Hugging Face on first use).
 """
 
 import asyncio
-import re
 import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Protocol
+from urllib.parse import urlsplit, urlunsplit
 
-import chromadb
+import asyncpg
 from pypdf import PdfReader
-from rank_bm25 import BM25Okapi
 
 from medagent.core.config import get_settings
-from medagent.core.models import ClinicalEvidence
 from medagent.infra.context_budget import truncate_text
-from medagent.rag.chunker import CHUNK_OVERLAP_TOKENS, Chunk, chunk_text
+from medagent.memory.persistent import PersistentStore
+from medagent.memory.schema import ADD_GUIDELINE_VECTOR_STATEMENTS
+from medagent.rag.chunker import CHUNK_OVERLAP_TOKENS, CHUNKER_VERSION, Chunk, chunk_text
 from medagent.rag.embeddings import EmbeddingModel
-from medagent.rag.pipeline import IngestionPipeline
+from medagent.rag.pipeline import IngestionPipeline, chunk_id
 from medagent.rag.reranker import CrossEncoderReranker
 from medagent.rag.retriever import GuidelineRetrieverTool
-from medagent.rag.vector_store import VectorStore
+from medagent.rag.vector_store import StoredChunk, VectorStore
 from tests.eval.retrieval_golden_dataset import CASES, SOURCES, RetrievalCase
 
 GUIDELINES_DIR = Path(__file__).resolve().parents[2] / "guidelines_pdf"
 TOP_K = 5
 AGENT_TOP_K = 3  # agents/evidence_agent.py: search_guidelines
 CANDIDATES = 20  # first-stage results handed to a re-ranker / fused in hybrid
-RRF_K = 60  # reciprocal rank fusion constant (the usual default)
 
 GENERAL_RERANKER = "cross-encoder/ms-marco-MiniLM-L6-v2"  # Apache-2.0
-MEDICAL_RERANKER = "ncbi/MedCPT-Cross-Encoder"  # public domain (NIH/NCBI)
 
 
 @dataclass(frozen=True)
@@ -89,21 +87,17 @@ CONFIGS = [
     Config("2 fit to model (254 tokens)", FITTED),
     Config("3 + context prefix", WITH_CONTEXT),
     Config("4 + no reference lists", PRODUCTION_CHUNKING, production=True),
-    Config("5 4 + re-rank (general MiniLM)", PRODUCTION_CHUNKING, reranker=GENERAL_RERANKER),
-    Config("6 4 + re-rank (medical MedCPT)", PRODUCTION_CHUNKING, reranker=MEDICAL_RERANKER),
-    Config("7 4 + hybrid BM25 + vector", PRODUCTION_CHUNKING, hybrid=True),
-    Config("8 7 + re-rank (MedCPT)", PRODUCTION_CHUNKING, MEDICAL_RERANKER, hybrid=True),
+    Config("5 4 + re-rank (MiniLM)", PRODUCTION_CHUNKING, reranker=GENERAL_RERANKER),
+    Config("6 4 + hybrid (full-text + vector)", PRODUCTION_CHUNKING, hybrid=True),
+    Config("7 6 + re-rank (MiniLM)", PRODUCTION_CHUNKING, GENERAL_RERANKER, hybrid=True),
 ]
-
-
-class Retriever(Protocol):
-    async def run(self, query: str, top_k: int = 5) -> list[ClinicalEvidence]: ...
 
 
 @dataclass
 class Index:
     store: VectorStore
-    chunks: list[tuple[str, Chunk]]  # (source, chunk), the indexed corpus
+    persistent: PersistentStore
+    chunks: int
     beyond_limit: float
 
 
@@ -163,75 +157,63 @@ def _chunks(chunking: Chunking, model: EmbeddingModel, text: str, source: str) -
     )
 
 
-async def _build_index(chunking: Chunking, model: EmbeddingModel, texts: dict[str, str]) -> Index:
-    store = VectorStore("unused", 0, f"eval-{uuid.uuid4().hex}", client=chromadb.EphemeralClient())
-    corpus: list[tuple[str, Chunk]] = []
-    total = beyond = 0
+def _database_dsn(dsn: str, name: str) -> str:
+    return urlunsplit(urlsplit(dsn)._replace(path=f"/{name}"))
+
+
+async def _fresh_database(dsn: str) -> str:
+    """A new database in the same server with the guideline tables, so each
+    chunking configuration is indexed on its own."""
+    name = f"rag_eval_{uuid.uuid4().hex[:12]}"
+    admin = await asyncpg.connect(dsn)
+    try:
+        await admin.execute(f"CREATE DATABASE {name}")
+    finally:
+        await admin.close()
+    database = _database_dsn(dsn, name)
+    conn = await asyncpg.connect(database)
+    try:
+        for statement in ADD_GUIDELINE_VECTOR_STATEMENTS:
+            await conn.execute(statement)
+    finally:
+        await conn.close()
+    return database
+
+
+async def _build_index(
+    chunking: Chunking, model: EmbeddingModel, texts: dict[str, str], dsn: str
+) -> Index:
+    persistent = PersistentStore(await _fresh_database(dsn))
+    store = VectorStore(persistent)
+    count = total = beyond = 0
     for source, text in texts.items():
         chunks = _chunks(chunking, model, text, source)
         for chunk in chunks:
             tokens = sum(model.count_tokens(chunk.embedding_text.split()))
             total += tokens
             beyond += max(0, tokens - model.max_tokens)
-        corpus.extend((source, chunk) for chunk in chunks)
+        count += len(chunks)
         if chunking == PRODUCTION_CHUNKING:
             # Exactly the app's ingestion path.
             await IngestionPipeline(model, store).ingest_text(text, source)
         else:
             vectors = await model.embed([c.embedding_text for c in chunks])
-            await store.add(
-                ids=[str(uuid.uuid4()) for _ in chunks],
-                documents=[c.text for c in chunks],
-                embeddings=vectors,
-                metadatas=[{"source": source, "section": c.section or ""} for c in chunks],
+            await store.replace_document(
+                source,
+                content_hash=source,
+                embedding_model=model.model_name,
+                chunker_version=CHUNKER_VERSION,
+                chunks=[
+                    StoredChunk(chunk_id(source, i, c.text), i, c.section, c.text, vector)
+                    for i, (c, vector) in enumerate(zip(chunks, vectors, strict=True))
+                ],
             )
-    return Index(store, corpus, beyond / max(1, total))
+    return Index(store, persistent, count, beyond / max(1, total))
 
 
-_WORD = re.compile(r"[a-z0-9]+(?:[.-][a-z0-9]+)*")
-
-
-def _words(text: str) -> list[str]:
-    return _WORD.findall(text.lower())
-
-
-class HybridRetriever:
-    """Vector and BM25 keyword results merged by reciprocal rank fusion
-    (score = sum of 1 / (RRF_K + rank) over both lists), optionally re-ranked.
-    Keyword search catches exact terms -- drug names, "eGFRcr-cys", "SGLT2i" --
-    that embeddings blur; RRF needs no score calibration between the two."""
-
-    def __init__(
-        self, model: EmbeddingModel, index: Index, reranker: CrossEncoderReranker | None
-    ) -> None:
-        self._vector = GuidelineRetrieverTool(model, index.store)
-        self._corpus = [
-            ClinicalEvidence(title=chunk.section or source, summary=chunk.text, source=source)
-            for source, chunk in index.chunks
-        ]
-        self._bm25 = BM25Okapi([_words(chunk.embedding_text) for _, chunk in index.chunks])
-        self._reranker = reranker
-
-    async def run(self, query: str, top_k: int = 5) -> list[ClinicalEvidence]:
-        vector_hits = await self._vector.run(query=query, top_k=CANDIDATES)
-        scores = self._bm25.get_scores(_words(query))
-        keyword_hits = [
-            self._corpus[i]
-            for i in sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[:CANDIDATES]
-        ]
-        fused: dict[str, float] = {}
-        by_text: dict[str, ClinicalEvidence] = {}
-        for hits in (vector_hits, keyword_hits):
-            for rank, hit in enumerate(hits, start=1):
-                fused[hit.summary] = fused.get(hit.summary, 0.0) + 1 / (RRF_K + rank)
-                by_text[hit.summary] = hit
-        merged = [by_text[text] for text in sorted(fused, key=lambda t: fused[t], reverse=True)]
-        if self._reranker is None:
-            return merged[:top_k]
-        return await self._reranker.rerank(query, merged[:CANDIDATES], top_k)
-
-
-async def _score(retriever: Retriever, case: RetrievalCase) -> tuple[int | None, bool, float]:
+async def _score(
+    retriever: GuidelineRetrieverTool, case: RetrievalCase
+) -> tuple[int | None, bool, float]:
     """(rank of the first passage containing the answer, whether the answer
     survives into the text the evidence agent gives the LLM, seconds taken)."""
     started = time.perf_counter()
@@ -252,34 +234,38 @@ async def _score(retriever: Retriever, case: RetrievalCase) -> tuple[int | None,
 
 
 async def evaluate(
-    configs: list[Config] = CONFIGS, model: EmbeddingModel | None = None
+    dsn: str, configs: list[Config] = CONFIGS, model: EmbeddingModel | None = None
 ) -> list[Report]:
+    """`dsn`: any Postgres with pgvector where the user may create databases
+    (the eval never touches existing data)."""
     model = model or EmbeddingModel()
     texts = load_texts()
     indexes: dict[Chunking, Index] = {}
     rerankers: dict[str, CrossEncoderReranker] = {}
     reports = []
-    for config in configs:
-        if config.chunking not in indexes:
-            indexes[config.chunking] = await _build_index(config.chunking, model, texts)
-        index = indexes[config.chunking]
-        reranker = None
-        if config.reranker:
-            reranker = rerankers.setdefault(config.reranker, CrossEncoderReranker(config.reranker))
-        retriever: Retriever
-        if config.hybrid:
-            retriever = HybridRetriever(model, index, reranker)
-        else:
+    try:
+        for config in configs:
+            if config.chunking not in indexes:
+                indexes[config.chunking] = await _build_index(config.chunking, model, texts, dsn)
+            index = indexes[config.chunking]
+            reranker = None
+            if config.reranker:
+                reranker = rerankers.setdefault(
+                    config.reranker, CrossEncoderReranker(config.reranker)
+                )
             retriever = GuidelineRetrieverTool(
-                model, index.store, reranker=reranker, candidates=CANDIDATES
+                model, index.store, reranker=reranker, candidates=CANDIDATES, hybrid=config.hybrid
             )
-        await retriever.run(query="warm-up", top_k=1)  # first call loads lazily
-        report = Report(config, len(index.chunks), index.beyond_limit)
-        for case in CASES:
-            rank, reached, seconds = await _score(retriever, case)
-            report.ranks[case.id], report.reached[case.id] = rank, reached
-            report.seconds.append(seconds)
-        reports.append(report)
+            await retriever.run(query="warm-up", top_k=1)  # first call loads lazily
+            report = Report(config, index.chunks, index.beyond_limit)
+            for case in CASES:
+                rank, reached, seconds = await _score(retriever, case)
+                report.ranks[case.id], report.reached[case.id] = rank, reached
+                report.seconds.append(seconds)
+            reports.append(report)
+    finally:
+        for index in indexes.values():
+            await index.persistent.close()
     return reports
 
 
@@ -303,8 +289,13 @@ def format_reports(reports: list[Report]) -> str:
 
 
 if __name__ == "__main__":
+    from tests.conftest import throwaway_postgres
+
     if not available():
         raise SystemExit(
             f"Guideline PDFs missing from {GUIDELINES_DIR}: {sorted(SOURCES.values())}"
         )
-    print(format_reports(asyncio.run(evaluate())))
+    with throwaway_postgres() as postgres:
+        if postgres is None:
+            raise SystemExit("Docker is needed for the throwaway pgvector Postgres")
+        print(format_reports(asyncio.run(evaluate(postgres))))

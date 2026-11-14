@@ -1,7 +1,10 @@
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
 
 from medagent.cli import build_arg_parser, ingest_guideline, main
+from medagent.rag.pipeline import IngestResult
 
 
 def test_build_arg_parser_parses_ingest_guideline() -> None:
@@ -12,6 +15,16 @@ def test_build_arg_parser_parses_ingest_guideline() -> None:
     assert args.command == "ingest-guideline"
     assert args.file == Path("guideline.pdf")
     assert args.source == "ada-2024"
+    assert args.force is False
+    assert parser.parse_args(
+        ["ingest-guideline", "--file", "g.pdf", "--source", "s", "--force"]
+    ).force
+
+
+def _store() -> MagicMock:
+    store = MagicMock()
+    store.close = AsyncMock()
+    return store
 
 
 async def test_ingest_guideline_missing_file_returns_error(tmp_path: Path) -> None:
@@ -25,18 +38,19 @@ async def test_ingest_guideline_text_file_calls_pipeline(tmp_path: Path) -> None
     text_file.write_text("Metformin is first-line therapy.")
 
     fake_pipeline = AsyncMock()
-    fake_pipeline.ingest_text.return_value = 3
+    fake_pipeline.ingest_text.return_value = IngestResult(chunks=3, skipped=False)
 
     with (
         patch("medagent.cli.EmbeddingModel"),
         patch("medagent.cli.VectorStore"),
+        patch("medagent.cli.PersistentStore", return_value=_store()),
         patch("medagent.cli.IngestionPipeline", return_value=fake_pipeline),
     ):
         result = await ingest_guideline(text_file, "internal-notes")
 
     assert result == 0
     fake_pipeline.ingest_text.assert_awaited_once_with(
-        "Metformin is first-line therapy.", "internal-notes"
+        "Metformin is first-line therapy.", "internal-notes", force=False
     )
 
 
@@ -45,17 +59,18 @@ async def test_ingest_guideline_pdf_file_calls_pipeline(tmp_path: Path) -> None:
     pdf_file.write_bytes(b"%PDF-1.4 fake")
 
     fake_pipeline = AsyncMock()
-    fake_pipeline.ingest_pdf.return_value = 5
+    fake_pipeline.ingest_pdf.return_value = IngestResult(chunks=5, skipped=False)
 
     with (
         patch("medagent.cli.EmbeddingModel"),
         patch("medagent.cli.VectorStore"),
+        patch("medagent.cli.PersistentStore", return_value=_store()),
         patch("medagent.cli.IngestionPipeline", return_value=fake_pipeline),
     ):
         result = await ingest_guideline(pdf_file, "ada-2024")
 
     assert result == 0
-    fake_pipeline.ingest_pdf.assert_awaited_once_with(str(pdf_file), "ada-2024")
+    fake_pipeline.ingest_pdf.assert_awaited_once_with(str(pdf_file), "ada-2024", force=False)
 
 
 def test_main_dispatches_to_ingest_guideline(tmp_path: Path) -> None:
@@ -84,3 +99,22 @@ def test_purge_without_retention_configured_is_a_noop(capsys: object) -> None:
 
     with patch("medagent.cli.get_settings", return_value=Settings(_env_file=None)):
         assert main(["purge-expired", "--execute"]) == 0
+
+
+async def test_an_unchanged_guideline_is_reported_as_skipped(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    text_file = tmp_path / "notes.txt"
+    text_file.write_text("Unchanged.")
+    fake_pipeline = AsyncMock()
+    fake_pipeline.ingest_text.return_value = IngestResult(chunks=4, skipped=True)
+
+    with (
+        patch("medagent.cli.EmbeddingModel"),
+        patch("medagent.cli.VectorStore"),
+        patch("medagent.cli.PersistentStore", return_value=_store()),
+        patch("medagent.cli.IngestionPipeline", return_value=fake_pipeline),
+    ):
+        assert await ingest_guideline(text_file, "notes", force=False) == 0
+
+    assert "unchanged (4 chunks)" in capsys.readouterr().out

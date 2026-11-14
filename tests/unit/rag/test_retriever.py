@@ -52,3 +52,36 @@ async def test_without_a_reranker_it_fetches_only_top_k() -> None:
     await GuidelineRetrieverTool(embeddings, vector_store, candidates=20).run(query="q", top_k=3)
 
     vector_store.query.assert_awaited_once_with([0.1, 0.2], top_k=3)
+
+
+def _match(text: str) -> dict:
+    return {"document": text, "metadata": {"source": "kdigo", "section": "3.7"}, "distance": 0.0}
+
+
+async def test_hybrid_fuses_vector_and_keyword_results_without_duplicates() -> None:
+    embeddings = AsyncMock()
+    embeddings.embed.return_value = [[0.1, 0.2]]
+    vector_store = AsyncMock()
+    vector_store.query.return_value = [_match("both"), _match("vector only")]
+    vector_store.keyword_query.return_value = [_match("keyword only"), _match("both")]
+
+    tool = GuidelineRetrieverTool(embeddings, vector_store, candidates=20, hybrid=True)
+    evidence = await tool.run(query="SGLT2i", top_k=3)
+
+    # "both" is in each list, so it ranks first; then rank 1 of keyword (1/61)
+    # beats rank 2 of vector (1/62).
+    assert [e.summary for e in evidence] == ["both", "keyword only", "vector only"]
+    vector_store.keyword_query.assert_awaited_once_with("SGLT2i", top_k=20)
+
+
+def test_reciprocal_rank_fusion_rewards_agreement() -> None:
+    from medagent.core.models import ClinicalEvidence
+    from medagent.rag.retriever import reciprocal_rank_fusion
+
+    def hits(*texts: str) -> list[ClinicalEvidence]:
+        return [ClinicalEvidence(title=t, summary=t, source="s") for t in texts]
+
+    fused = reciprocal_rank_fusion([hits("a", "b", "c"), hits("c", "d")])
+
+    assert [h.summary for h in fused][:2] == ["c", "a"]
+    assert len(fused) == 4
