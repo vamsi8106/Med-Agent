@@ -7,7 +7,7 @@ Two ways to run it locally:
 - **[Option A — Hybrid local dev](#option-a-hybrid-local-dev)**: the app runs bare on your host (fast reload via `uvicorn --reload`), backing services (Postgres with pgvector, the 3 MCP servers) run in Docker.
 - **[Option B — Full Docker stack](#option-b-full-docker-stack)**: everything, including the app itself, runs in Docker — closest to the production topology.
 
-Both are exercised with the same `curl` walkthrough below.
+Both are exercised with the same `curl` walkthrough below. **[docs/running.md](docs/running.md)** has every stage's commands in one place: local, Docker, Kubernetes on kind, and AWS.
 
 ## Prerequisites
 
@@ -357,6 +357,7 @@ make pre-commit    # format + lint + type-check + import-check + unit-tests, run
 
 - [`docs/info.md`](docs/info.md): complete guide to the concepts and flows (workflow, agents, MCP, harness, observability, memory, security).
 - [`docs/code-walkthrough.md`](docs/code-walkthrough.md): how the code runs (entry points, every request flow, where output goes) and what each file does.
+- [`docs/running.md`](docs/running.md): commands for each stage, local → Docker → kind → AWS.
 - [`docs/deployment.md`](docs/deployment.md): production runbook.
 - [`AGENTS.md`](AGENTS.md): architecture, phase breakdown, dependency rules, and the MCP server contracts.
 - [`docs/glossary.md`](docs/glossary.md): canonical terms.
