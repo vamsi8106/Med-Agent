@@ -445,7 +445,8 @@ No log line, span attribute or metric label carries patient data; `tests/unit/in
 | `ops/` | Prometheus scrape config, Grafana data sources and dashboard, Tempo config, Caddyfile (production TLS). |
 | `docker-compose.yml` | Development stack: 9 services, every port bound to 127.0.0.1. |
 | `docker-compose.prod.yml` | Production overlay: Caddy (HTTPS) as the only public service, required secrets, optional Ollama. |
-| `deploy/k8s/` | Kustomize manifests for several replicas: `base/`, `overlays/local/` (kind), `overlays/aws/` (EKS + RDS + ALB). |
+| `deploy/k8s/` | Kustomize manifests for several replicas: `base/`, `overlays/local/` (kind), `overlays/aws/` (EKS + RDS + ALB, placeholders), `components/aws/` (namespace + Ingress), `components/vllm/` (in-cluster model). |
+| `deploy/terraform/` | AWS infrastructure for the EKS route; `scripts/render_aws_overlay.sh` turns its outputs into `overlays/aws-generated/`. |
 | `Dockerfile` | The app image (CPU-only torch, non-root user). |
 | `scripts/setup_vendor_mcp.sh` | Fetches the two MCP servers that come from GitHub into `vendor/` at pinned commits and lays our audited dependency overlay (`docker/<server>/package*.json`) over each. |
 | `Makefile` | Every developer command (`make pre-commit`, `make eval`, `make serve`...). |

@@ -1,14 +1,16 @@
 # AWS: EKS + RDS for PostgreSQL + an ALB (AWS Load Balancer Controller) with an
 # ACM certificate. Assumes the cluster, the RDS instance, the certificate and
 # the ECR repositories already exist (docs/deployment.md, "Kubernetes and AWS").
-# Replace every <...> placeholder before applying.
+# Replace every <...> placeholder here and in components/aws/ingress.yaml
+# before applying -- or create it all with deploy/terraform and use
+# scripts/render_aws_overlay.sh, which writes overlays/aws-generated instead.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 namespace: medagent
 resources:
-  - namespace.yaml
   - ../../base
-  - ingress.yaml
+components:
+  - ../../components/aws # namespace + ALB Ingress (its <...> are in components/aws/ingress.yaml)
 images:
   - { name: medagent, newName: <account>.dkr.ecr.<region>.amazonaws.com/medagent, newTag: <version> }
   - { name: medical-mcp-bridge, newName: <account>.dkr.ecr.<region>.amazonaws.com/medical-mcp-bridge, newTag: <version> }

@@ -1,0 +1,13 @@
+# An in-cluster model for the AWS overlay: vLLM on the GPU node group that
+# deploy/terraform creates with enable_gpu_model = true. Prompts (patient
+# data) never leave the cluster. The app reaches it as http://vllm:8000/v1,
+# a single-label name, which production accepts as self-hosted.
+# Included by scripts/render_aws_overlay.sh; the model comes from Terraform.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+resources:
+  - vllm.yaml
+patches:
+  - target: { kind: ConfigMap, name: medagent-config }
+    patch: |-
+      - { op: add, path: /data/LLM_BASE_URL, value: "http://vllm:8000/v1" }

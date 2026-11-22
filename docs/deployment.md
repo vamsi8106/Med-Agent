@@ -177,6 +177,9 @@ deploy/k8s/
                         HPA (2–6 on CPU), PodDisruptionBudget, MCP servers,
                         NetworkPolicies, ConfigMap; secret.example.yaml (not applied)
   overlays/local/       kind: in-cluster Postgres, 3 replicas, mock LLM, NodePort → localhost:18080
+  components/aws/       namespace + ALB Ingress, shared by the two AWS overlays
+  components/vllm/      in-cluster model on a GPU node (vLLM), for the Terraform route
+  overlays/aws-generated/  written by scripts/render_aws_overlay.sh from deploy/terraform (gitignored)
   overlays/aws/         EKS: ALB Ingress (ACM certificate, HTTPS only, 3600 s idle timeout for
                         WebSockets, /metrics → 404), RDS via POSTGRES_DSN, ECR images
 ```
@@ -195,14 +198,20 @@ make k8s-local-down
 
 ### Deploy on AWS
 
-The overlay assumes these exist already; it does not create them:
+Step by step, with every command: [running.md](running.md) stage 4 (by hand: eksctl + the AWS CLI) and stage 5 (Terraform).
+
+**With Terraform:** `deploy/terraform/` creates everything listed below: the VPC, EKS (NetworkPolicy enforcement on), RDS, ECR, ACM, the Secrets Manager secret, the ALB controller and External Secrets, and optionally a GPU node for vLLM. `make aws-overlay` then writes a filled-in overlay from its outputs. The runbook and costs are in [deploy/terraform/README.md](../deploy/terraform/README.md).
+- **State:** Terraform state is in an S3 bucket created by `deploy/terraform/bootstrap` (versioned, KMS, TLS only, S3-native locking).
+- **No passwords in state:** they're ephemeral and write-only, and rotate when you bump `secrets_version`.
+
+**By hand**, on infrastructure you already have: the overlay assumes these exist; it does not create them:
 - an **EKS** cluster with the **AWS Load Balancer Controller**;
 - **RDS for PostgreSQL** in the same VPC, with encryption at rest and automated backups;
 - an **ACM** certificate for your domain;
 - **ECR** repositories for the four images.
 
 1. **Build and push the images** (`medagent`, `medical-mcp-bridge`, `healthcare-mcp`, `research-mcp`) to ECR.
-2. **Fill in every `<...>` placeholder** in `deploy/k8s/overlays/aws/`:
+2. **Fill in every `<...>` placeholder** in `deploy/k8s/overlays/aws/` and `deploy/k8s/components/aws/ingress.yaml`:
    - image URIs;
    - `FORWARDED_ALLOW_IPS` (the VPC CIDR, so only the ALB can set the client IP);
    - the model endpoint;

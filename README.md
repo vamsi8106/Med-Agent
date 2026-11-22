@@ -104,6 +104,7 @@ The provisioned **MedAgent Overview** dashboard shows, from `/metrics`: HTTP rat
 - **Retention:** `make purge-expired` (dry run) / `python -m medagent.cli purge-expired --execute`, only when `RETENTION_DAYS` / `AUDIT_RETENTION_DAYS` are set.
 - **Production:** `docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build` — Caddy with automatic HTTPS as the only public service, required secrets, optional Ollama. Full runbook (secrets, model choice, encrypted disks and backups, upgrades, retention schedule, accounts): [docs/deployment.md](docs/deployment.md).
 - **Kubernetes / several replicas:** `deploy/k8s/` (Kustomize). `STATE_BACKEND=postgres` shares drafts and abuse limits through the database; `make k8s-local-up` runs 3 replicas on kind; `overlays/aws` targets EKS + RDS + ALB ([docs/deployment.md](docs/deployment.md#10-kubernetes-and-aws-several-replicas)).
+- **AWS infrastructure:** `deploy/terraform/` creates the VPC, EKS, RDS, ECR, the certificate and the secrets (`make tf-apply`), and `make aws-overlay` turns its outputs into a ready overlay. Steps and costs are in [deploy/terraform/README.md](deploy/terraform/README.md).
 
 **Prompt tracing (Langfuse, optional).** Tempo shows timings and outcomes but never prompt text. To see what each agent sent the model and what it answered, create a project at [cloud.langfuse.com](https://cloud.langfuse.com) (or self-host Langfuse) and set in `.env`:
 

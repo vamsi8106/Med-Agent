@@ -1,4 +1,4 @@
-.PHONY: purge-expired deps-audit mcp-audit import-check install test unit-tests eval integration rag-eval agent-eval lint-check lint-fix format-fix format-check type-check pre-commit ci-check serve docker-up-deps docker-up docker-down docker-logs db-upgrade db-downgrade db-revision ingest-guideline k8s-local-up k8s-local-down
+.PHONY: purge-expired deps-audit mcp-audit import-check install test unit-tests eval integration rag-eval agent-eval lint-check lint-fix format-fix format-check type-check pre-commit ci-check serve docker-up-deps docker-up docker-down docker-logs db-upgrade db-downgrade db-revision ingest-guideline k8s-local-up k8s-local-down tf-bootstrap tf-init tf-plan tf-apply tf-destroy tf-check aws-overlay aws-overlay-check tf-down aws-wait-alb aws-leftovers
 
 install:
 	uv sync
@@ -119,3 +119,75 @@ k8s-local-up:
 
 k8s-local-down:
 	kind delete cluster --name medagent
+
+# AWS infrastructure (deploy/terraform): VPC, EKS, RDS, ECR, ACM, Secrets
+# Manager, the ALB controller and External Secrets. Needs AWS credentials and
+# Terraform >= 1.11. TF_ENV picks deploy/terraform/$(TF_ENV).tfvars (copy the
+# .example) and the state key. Runbook: deploy/terraform/README.md.
+TF := terraform -chdir=deploy/terraform
+TF_ENV ?= demo
+AWS_REGION ?= us-east-1
+TRIVY_IMAGE := aquasec/trivy:0.76.1
+
+tf-bootstrap:  # once per account: the state bucket
+	terraform -chdir=deploy/terraform/bootstrap init
+	terraform -chdir=deploy/terraform/bootstrap apply -var region=$(AWS_REGION)
+
+tf-init:
+	@test -n "$(TF_STATE_BUCKET)" || { echo "set TF_STATE_BUCKET (make tf-bootstrap prints it)"; exit 1; }
+	$(TF) init -reconfigure \
+	  -backend-config="bucket=$(TF_STATE_BUCKET)" -backend-config="key=medagent/$(TF_ENV).tfstate" \
+	  -backend-config="region=$(AWS_REGION)" -backend-config="encrypt=true" -backend-config="use_lockfile=true"
+
+tf-plan:
+	$(TF) plan -var-file=$(TF_ENV).tfvars -out=$(TF_ENV).tfplan
+
+tf-apply:
+	$(TF) apply $(TF_ENV).tfplan
+
+tf-destroy:
+	$(TF) destroy -var-file=$(TF_ENV).tfvars
+
+# The whole stage-5 teardown, in the order that leaves nothing billing: the
+# app first (so the controller deletes the ALB), wait until the ALB is gone,
+# destroy the infrastructure, then list anything left.
+tf-down:
+	-kubectl delete -k deploy/k8s/overlays/aws-generated --ignore-not-found
+	scripts/aws_teardown.sh wait-alb medagent-$(TF_ENV)
+	$(TF) destroy -var-file=$(TF_ENV).tfvars
+	@# EKS can write its log group again while the cluster shuts down.
+	-aws logs delete-log-group --log-group-name /aws/eks/medagent-$(TF_ENV)/cluster 2>/dev/null
+	scripts/aws_teardown.sh leftovers medagent-$(TF_ENV) $(domain)
+
+# Teardown helpers for either AWS stage (cluster=medagent-manual or medagent-<env>).
+aws-wait-alb:
+	@test -n "$(cluster)" || { echo "usage: make aws-wait-alb cluster=<name>"; exit 1; }
+	scripts/aws_teardown.sh wait-alb $(cluster)
+
+aws-leftovers:
+	@test -n "$(cluster)" || { echo "usage: make aws-leftovers cluster=<name> [domain=<host>]"; exit 1; }
+	scripts/aws_teardown.sh leftovers $(cluster) $(domain)
+
+# Offline (no AWS): formatting, validation, and a security scan of the config.
+tf-check:
+	terraform -chdir=deploy/terraform fmt -check -recursive
+	terraform -chdir=deploy/terraform/bootstrap init -backend=false -input=false >/dev/null
+	terraform -chdir=deploy/terraform/bootstrap validate
+	$(TF) init -backend=false -input=false >/dev/null
+	$(TF) validate
+	docker run --rm -v "$(CURDIR)/deploy/terraform:/src:ro" $(TRIVY_IMAGE) config --exit-code 1 --severity HIGH,CRITICAL --skip-dirs "**/.terraform" /src
+
+# overlays/aws-generated from terraform output; version = the image tag pushed.
+aws-overlay:
+	@test -n "$(version)" || { echo "usage: make aws-overlay version=<image tag>"; exit 1; }
+	scripts/render_aws_overlay.sh $(version)
+
+# The renderer against fixed outputs (demo with Groq, production with vLLM):
+# every placeholder filled, and the manifests build.
+aws-overlay-check:
+	@set -e; dir=deploy/k8s/overlays/aws-generated-check; for case in demo production-gpu; do \
+	  TF_OUTPUTS=deploy/terraform/testdata/outputs-$$case.json OUT_DIR=$$dir scripts/render_aws_overlay.sh check >/dev/null 2>&1; \
+	  kubectl kustomize $$dir > $$dir.yaml; \
+	  if grep -n '<' $$dir.yaml; then echo "$$case: placeholder left"; exit 1; fi; \
+	  echo "$$case: ok"; rm -rf $$dir $$dir.yaml; \
+	done

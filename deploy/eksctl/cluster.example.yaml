@@ -1,0 +1,50 @@
+# Stage 4 of docs/running.md (AWS by hand): the EKS cluster, created with
+#   eksctl create cluster -f deploy/eksctl/cluster.yaml
+# eksctl builds the VPC too (public subnets for the ALB, private ones for the
+# nodes, one NAT gateway). Copy this file to cluster.yaml (gitignored) and set
+# the <...> values. Stage 5 (deploy/terraform) creates the same thing as code.
+apiVersion: eksctl.io/v1alpha5
+kind: ClusterConfig
+
+metadata:
+  name: medagent-manual
+  region: us-east-1
+  version: "1.36"
+
+vpc:
+  cidr: 10.30.0.0/16
+  nat: { gateway: Single }        # HighlyAvailable: one per AZ, survives an AZ outage
+  clusterEndpoints: { publicAccess: true, privateAccess: true }
+  # Who may run kubectl: your IP (curl -s https://checkip.amazonaws.com).
+  publicAccessCIDRs: ["<your ip>/32"]
+
+addons:
+  # NetworkPolicy enforcement: deploy/k8s/base relies on it.
+  - name: vpc-cni
+    configurationValues: '{"enableNetworkPolicy": "true"}'
+  - name: coredns
+  - name: kube-proxy
+  - name: eks-pod-identity-agent
+
+iam:
+  # An IAM role for the AWS Load Balancer Controller (creates the ALB from the
+  # Ingress), via Pod Identity: no keys in the cluster.
+  podIdentityAssociations:
+    - namespace: kube-system
+      serviceAccountName: aws-load-balancer-controller
+      wellKnownPolicies: { awsLoadBalancerController: true }
+
+managedNodeGroups:
+  - name: general
+    instanceType: t3.large
+    minSize: 2
+    desiredCapacity: 2
+    maxSize: 4
+    amiFamily: AmazonLinux2023
+    privateNetworking: true       # nodes get no public IP
+    disableIMDSv1: true
+
+cloudWatch:
+  clusterLogging:
+    enableTypes: ["api", "audit", "authenticator"]
+    logRetentionInDays: 30

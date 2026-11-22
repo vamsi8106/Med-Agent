@@ -93,7 +93,7 @@ src/medagent/
 └── app.py                       # Phase 6 — create_app(): lifespan, middleware, routers
 ```
 
-Outside `src/`: `migrations/` (Alembic), `docker/` (MCP server images, with each server's audited `package.json` / `package-lock.json`), `ops/` (Prometheus/Grafana/Tempo/Caddy config), `docker-compose.prod.yml` (production overlay: Caddy TLS, no other public ports, required secrets, optional Ollama), `docs/deployment.md` (production runbook), `deploy/k8s/` (Kustomize: base, `overlays/local` for kind, `overlays/aws` for EKS + RDS + ALB), `tests/eval/` (live evals: agent eval + retrieval eval; how to run them on their own in `tests/eval/README.md`).
+Outside `src/`: `migrations/` (Alembic), `docker/` (MCP server images, with each server's audited `package.json` / `package-lock.json`), `ops/` (Prometheus/Grafana/Tempo/Caddy config), `docker-compose.prod.yml` (production overlay: Caddy TLS, no other public ports, required secrets, optional Ollama), `docs/deployment.md` (production runbook), `deploy/k8s/` (Kustomize: base, `overlays/local` for kind, `overlays/aws` for EKS + RDS + ALB, `components/aws` + `components/vllm`, `overlays/aws-generated` rendered by `scripts/render_aws_overlay.sh`), `deploy/eksctl/` (the cluster for AWS by hand, `docs/running.md` stage 4), `deploy/terraform/` (stage 5, AWS infrastructure: VPC, EKS, RDS, ECR, ACM, Secrets Manager, add-ons; `bootstrap/` state bucket; no secrets in state; runbook in its README), `tests/eval/` (live evals: agent eval + retrieval eval; how to run them on their own in `tests/eval/README.md`).
 
 `tests/` mirrors `src/` 1:1. `docs/glossary.md` for canonical terms; `docs/info.md` explains every concept and flow; `docs/code-walkthrough.md` traces each request through the files and describes every module; `docs/running.md` has the commands to run it locally, in Docker, on kind and on AWS. Architecture decisions and their rationale live in commit messages and the README.
 
@@ -241,7 +241,12 @@ make ingest-guideline file=... source=...   # RAG ingestion via the CLI
 make rag-eval        # retrieval eval over guidelines_pdf/: recall@k, MRR, reaches-model, per chunking config
 make purge-expired   # retention dry run (counts only); --execute via the CLI deletes
 make k8s-local-up    # kind cluster, 3 replicas on deploy/k8s/overlays/local (make k8s-local-down)
+make tf-check        # offline: terraform fmt + validate + Trivy scan of deploy/terraform (also in CI)
+make tf-bootstrap / tf-init / tf-plan / tf-apply / tf-destroy   # AWS infrastructure (TF_ENV=demo|production, TF_STATE_BUCKET)
+make tf-down         # full stage-5 teardown: app, wait for the ALB, terraform destroy, leftovers check
+make aws-leftovers cluster=... [domain=...]   # lists anything still billing (exit 1); aws-wait-alb waits for the ALB to go
+make aws-overlay version=...   # overlays/aws-generated from terraform output; aws-overlay-check renders it from fixtures (CI)
 docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d   # production (see docs/deployment.md)
 ```
 
-CI: `ci-check` on every push; the live eval and Docker builds on PRs into `main` only.
+CI: `ci-check`, `mcp-audit` and `terraform` (`tf-check` + `aws-overlay-check`, offline) on every push; the live eval and Docker builds on PRs into `main` only.

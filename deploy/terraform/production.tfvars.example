@@ -1,0 +1,21 @@
+# cp production.tfvars.example production.tfvars (gitignored), then fill in.
+# Read docs/deployment.md (model, encryption and backups, retention) first.
+env         = "production"
+region      = "us-east-1"
+domain_name = "medagent.example.org"
+# route53_zone_id = "Z0123456789ABCDEFGHIJ"
+
+cluster_public_access_cidrs = ["203.0.113.0/24"] # your office / VPN, never 0.0.0.0/0
+
+node_instance_type       = "m6i.large"
+node_count               = 3
+db_instance_class        = "db.m7g.large"
+db_allocated_storage     = 50
+db_multi_az              = true
+db_backup_retention_days = 30
+single_nat_gateway       = false
+deletion_protection      = true
+
+# Patient data: the model runs inside this account.
+enable_gpu_model = true
+model_name       = "Qwen/Qwen2.5-7B-Instruct"

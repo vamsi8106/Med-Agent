@@ -1,0 +1,24 @@
+# cp demo.tfvars.example demo.tfvars (gitignored), then fill in.
+# Roughly USD 150-250/month while up; `make tf-destroy` removes everything.
+# Synthetic patient data only: the model is Groq unless enable_gpu_model.
+env         = "demo"
+region      = "us-east-1"
+domain_name = "medagent-demo.example.org"
+# route53_zone_id = "Z0123456789ABCDEFGHIJ"   # automatic certificate validation
+
+# Who may run kubectl / terraform against the cluster (required): your IP.
+# curl -s https://checkip.amazonaws.com
+cluster_public_access_cidrs = ["203.0.113.10/32"]
+
+node_instance_type  = "t3.large"
+node_count          = 2
+db_instance_class   = "db.t4g.small"
+db_multi_az         = false
+single_nat_gateway  = true
+deletion_protection = false
+
+# A model inside the VPC instead of Groq: about USD 1/hour extra.
+enable_gpu_model = false
+# model_name     = "Qwen/Qwen2.5-7B-Instruct"
+
+# Groq key: export TF_VAR_groq_api_key=... before the first apply (never here).

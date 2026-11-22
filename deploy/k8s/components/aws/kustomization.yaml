@@ -1,0 +1,9 @@
+# What every AWS deployment adds to base: the namespace and the ALB Ingress
+# (ACM certificate, HTTPS only, /metrics not public). Shared by
+# overlays/aws (placeholders you fill in by hand) and overlays/aws-generated
+# (filled in from deploy/terraform by scripts/render_aws_overlay.sh).
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+resources:
+  - namespace.yaml
+  - ingress.yaml
