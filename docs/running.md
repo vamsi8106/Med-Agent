@@ -79,6 +79,7 @@ Only ingest documents you are licensed to use (see `docs/info.md` §13).
 ```bash
 make integration                 # real embeddings + Postgres + medical-mcp bridge
 make eval                        # real Groq + real MCP servers (needs GROQ_API_KEY)
+make agent-eval                  # agent eval report (args="--category safety" for a quick run)
 make rag-eval                    # retrieval quality over guidelines_pdf/ (starts its own Postgres)
 ```
 
@@ -117,6 +118,7 @@ make docker-logs                 # follow the logs of every service
 
 - Grafana: `http://localhost:3000` (user `admin`, password `GRAFANA_ADMIN_PASSWORD`). The **MedAgent Overview** dashboard shows requests, LLM calls, MCP calls and guardrails. Traces: *Explore* → *Tempo*.
 - Prometheus: `http://localhost:9090`.
+- Langfuse (optional): the same `.env` settings as stage 1 are passed to the container; prompts appear in your Langfuse project.
 
 - Langfuse (optional): the same `.env` settings as stage 1 are passed to the container; prompts appear in your Langfuse project.
 **Add a guideline (optional)**

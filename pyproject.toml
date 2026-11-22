@@ -80,7 +80,7 @@ explicit = true
 
 [tool.mypy]
 python_version = "3.12"
-files = ["src/medagent"]
+files = ["src/medagent", "tests/eval", "tests/unit/eval"]
 disallow_untyped_defs = true
 disallow_incomplete_defs = true
 check_untyped_defs = true

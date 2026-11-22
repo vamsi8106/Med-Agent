@@ -1,5 +1,6 @@
 """AppState: every long-lived client and agent, built once per app."""
 
+from dataclasses import dataclass
 from datetime import timedelta
 
 from langgraph.checkpoint.base import BaseCheckpointSaver
@@ -18,7 +19,7 @@ from medagent.auth.security import hash_password
 from medagent.auth.store import UserStore
 from medagent.core.config import Settings
 from medagent.core.exceptions import AuthError, RateLimitedError
-from medagent.core.interfaces import BaseKeyedLimiter
+from medagent.core.interfaces import BaseKeyedLimiter, BaseLLMProvider
 from medagent.infra.logging import get_logger
 from medagent.infra.metrics import abuse_limit_hits_total
 from medagent.infra.rate_limiter import KeyedRateLimiter
@@ -45,6 +46,51 @@ from medagent.workflows.checkpointing import (
 from medagent.workflows.followup import build_followup_graph
 
 logger = get_logger(__name__)
+
+
+@dataclass(frozen=True)
+class Specialists:
+    triage: TriageAgent
+    drug_safety: DrugSafetyAgent
+    evidence: EvidenceAgent
+    trial_finder: TrialFinderAgent
+    report: ReportAgent
+
+
+def build_specialists(
+    settings: Settings,
+    llm: BaseLLMProvider,
+    vector_store: VectorStore,
+    embeddings: EmbeddingModel,
+    *,
+    medical: MedicalMCPClient,
+    healthcare: HealthcareMCPClient,
+    research: ResearchMCPClient,
+) -> Specialists:
+    """The agents and how they are wired: the app builds them here, and so
+    does the agent eval (with its recording LLM and spy MCP clients), so the
+    eval measures exactly what the app runs."""
+    return Specialists(
+        triage=TriageAgent(),
+        drug_safety=DrugSafetyAgent(llm, InteractionCheckerTool(research)),
+        evidence=EvidenceAgent(
+            llm,
+            medical,
+            GuidelineRetrieverTool(
+                embeddings,
+                vector_store,
+                reranker=(
+                    CrossEncoderReranker(settings.rag_reranker_model)
+                    if settings.rag_reranker_model
+                    else None
+                ),
+                candidates=settings.rag_rerank_candidates,
+                hybrid=settings.rag_hybrid,
+            ),
+        ),
+        trial_finder=TrialFinderAgent(llm, healthcare),
+        report=ReportAgent(),
+    )
 
 
 class AppState:
@@ -82,25 +128,20 @@ class AppState:
             "research_mcp": research_client,
         }
 
-        self.triage = TriageAgent()
-        self.drug_safety = DrugSafetyAgent(self.llm, InteractionCheckerTool(research_client))
-        self.evidence = EvidenceAgent(
+        specialists = build_specialists(
+            settings,
             self.llm,
-            medical_client,
-            GuidelineRetrieverTool(
-                embeddings,
-                self.vector_store,
-                reranker=(
-                    CrossEncoderReranker(settings.rag_reranker_model)
-                    if settings.rag_reranker_model
-                    else None
-                ),
-                candidates=settings.rag_rerank_candidates,
-                hybrid=settings.rag_hybrid,
-            ),
+            self.vector_store,
+            embeddings,
+            medical=medical_client,
+            healthcare=healthcare_client,
+            research=research_client,
         )
-        self.trial_finder = TrialFinderAgent(self.llm, healthcare_client)
-        self.report = ReportAgent()
+        self.triage = specialists.triage
+        self.drug_safety = specialists.drug_safety
+        self.evidence = specialists.evidence
+        self.trial_finder = specialists.trial_finder
+        self.report = specialists.report
 
         # One long-lived graph with a checkpointer: the WebSocket approval flow
         # pauses in it between the doctor's message and their decision. The

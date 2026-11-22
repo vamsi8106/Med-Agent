@@ -425,7 +425,7 @@ No log line, span attribute or metric label carries patient data; `tests/unit/in
 
 | File | Does |
 |---|---|
-| `state.py` | `AppState` (section 3), `get_state` (works for HTTP and WebSocket), `enforce_limit` (429 + metric). |
+| `state.py` | `AppState` (section 3), `build_specialists` (the five agents and their wiring; the agent eval builds them through it too), `get_state` (works for HTTP and WebSocket), `enforce_limit` (429 + metric). |
 | `errors.py` | `medagent_error_handler`, `error_payload`, `retry_after`, `doctor_scope` (doctor → own id, admin → no filter), `require_doctor_id`. |
 | `schemas.py` | Request and response bodies: login token, user creation, passwords, assess and drug-check bodies, with size limits; `MAX_MESSAGE_CHARS`. |
 | `health.py` | `check_readiness`: probes Postgres (which also holds the guideline vectors) and each MCP server (with a timeout) and reads the breaker states; ok / degraded / down; never hostnames or error text. |

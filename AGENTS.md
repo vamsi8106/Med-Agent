@@ -85,7 +85,7 @@ src/medagent/
 │   └── drug_check.py            # enumerate pairs → check → aggregate
 ├── cli.py                       # `medagent ingest-guideline` (RAG ingestion), `medagent purge-expired` (retention); separate process from the server
 ├── api/                         # HTTP + WebSocket layer
-│   ├── state.py                 # AppState (all clients/agents, built once) + get_state dependency
+│   ├── state.py                 # AppState (all clients/agents, built once) + get_state dependency; build_specialists: the agents and their wiring, shared with the agent eval
 │   ├── errors.py                # error → status/body mapping, doctor_scope, Retry-After
 │   ├── health.py                # readiness aggregation for /ready (ok/degraded/down)
 │   ├── schemas.py               # request/response bodies
@@ -93,7 +93,7 @@ src/medagent/
 └── app.py                       # Phase 6 — create_app(): lifespan, middleware, routers
 ```
 
-Outside `src/`: `migrations/` (Alembic), `docker/` (MCP server images, with each server's audited `package.json` / `package-lock.json`), `ops/` (Prometheus/Grafana/Tempo/Caddy config), `docker-compose.prod.yml` (production overlay: Caddy TLS, no other public ports, required secrets, optional Ollama), `docs/deployment.md` (production runbook), `deploy/k8s/` (Kustomize: base, `overlays/local` for kind, `overlays/aws` for EKS + RDS + ALB), `tests/eval/` (live golden-dataset evals).
+Outside `src/`: `migrations/` (Alembic), `docker/` (MCP server images, with each server's audited `package.json` / `package-lock.json`), `ops/` (Prometheus/Grafana/Tempo/Caddy config), `docker-compose.prod.yml` (production overlay: Caddy TLS, no other public ports, required secrets, optional Ollama), `docs/deployment.md` (production runbook), `deploy/k8s/` (Kustomize: base, `overlays/local` for kind, `overlays/aws` for EKS + RDS + ALB), `tests/eval/` (live evals: agent eval + retrieval eval; how to run them on their own in `tests/eval/README.md`).
 
 `tests/` mirrors `src/` 1:1. `docs/glossary.md` for canonical terms; `docs/info.md` explains every concept and flow; `docs/code-walkthrough.md` traces each request through the files and describes every module; `docs/running.md` has the commands to run it locally, in Docker, on kind and on AWS. Architecture decisions and their rationale live in commit messages and the README.
 
@@ -193,7 +193,7 @@ Tools available: `search-drugs`, `get-drug-details`, `search-drug-nomenclature`,
 - No abstraction without a second caller.
 - Test with `MockLLMProvider`. No network in unit tests (Postgres-backed tests use a throwaway Docker container and skip if Docker is unavailable).
 - LLM prompts: wrap doctor/patient/external text with `wrap_untrusted`, and cap it with `truncate_text` (`AGENT_*_TOKENS` settings). Deterministic safety checks (allergies, interactions, lab flags) stay outside any LLM loop.
-- Anything that can only fail against the real model or real MCP responses gets a case in `tests/eval/` -- unit tests use mocks and cannot see it.
+- Anything that can only fail against the real model or real MCP responses gets a case in `tests/eval/` -- unit tests use mocks and cannot see it. A new agent behaviour or workflow gets an `AgentCase` in `tests/eval/agent_cases/` (the eval runs assessment, follow-up and drug-check; new agents go through `build_specialists` so the eval runs them as the app does) (synthetic patient, source cited, `reviewed=False` until a clinician confirms it); metric definitions live in `tests/eval/agent_metrics.py` (unit-tested in `tests/unit/eval/`), gates and floors in `tests/eval/agent_thresholds.py`. Safety gates (allergy flag, severity floor, injection resisted, no identifier leak) must stay at 100 %; re-baseline floors only with the numbers in the commit message.
 - A client for anything we don't control (LLM, MCP, a future API) must raise `UpstreamError` subclasses with a `reason` and `retryable`, own its retries in one place (turn any SDK's built-in retries off -- they stacked under ours, up to 9 HTTP calls per LLM call), put a circuit breaker in front, and emit metrics. A 4xx is never retryable and never trips the breaker; a rate limit is retried only if the requested wait is short. Add a fault-injection test for each new failure mode (`tests/unit/infra/test_fault_injection.py` shows the pattern with the `clock` fixture).
 - Telemetry (traces, logs, metric labels) carries NO patient data: no patient id, name, medication, allergy, prompt or response text, no raw URL paths (use route templates). Correlate by `request_id` / `trace_id` / `run_id`. `tests/unit/infra/test_no_phi_in_telemetry.py` enforces it -- a new log field or span attribute must pass it. The one exception is opt-in prompt tracing: with `LANGFUSE_ENABLED`, `infra/tracing.py::llm_generation` puts messages and answers on spans of Langfuse's scope (`langfuse-sdk`), which only the Langfuse export receives (the OTLP/console exports drop that scope, tested in `test_tracing.py`). Never put prompt text on any other span. Production refuses a non-local `LANGFUSE_BASE_URL` unless `ALLOW_PROMPT_TRACING_WITH_PHI=true`. uvicorn runs with `--no-access-log` because its access log prints raw paths.
 - API input is bounded: request-facing model fields carry max lengths / list sizes (`core/models.py`, `api/schemas.py`), bodies over `MAX_REQUEST_BODY_BYTES` get 413 (`SecurityMiddleware`). A new request field needs a bound.
@@ -220,7 +220,8 @@ Tools available: `search-drugs`, `get-drug-details`, `search-drug-nomenclature`,
 make install         # uv sync
 make test            # uv run pytest
 make unit-tests      # uv run pytest tests/unit/
-make eval            # live golden-dataset evals: real Groq + real MCP servers (needs GROQ_API_KEY, `make docker-up-deps`)
+make eval            # live evals: agent-eval gates + retrieval floors (real LLM + MCP servers; needs GROQ_API_KEY, `make docker-up-deps`)
+make agent-eval      # agent eval report: every case end to end, rates (tool use, errors, hallucination proxies, safety, cost), eval-results/*.json + diff; args="--category safety --repeats 3 --judge"
 make integration     # tests/integration: real embeddings + Postgres + medical-mcp bridge (skips what is unavailable)
 make lint-check      # uv run ruff check .
 make lint-fix        # uv run ruff check --fix .

@@ -496,6 +496,7 @@ POST /patients/{patient_id}/assess          (HTTP span)
 - A W3C **`traceparent` header** is sent to the MCP servers so their side can join the trace.
 - Spans are always created (they supply the `trace_id` for logs) but are **exported only when `OTEL_EXPORTER_OTLP_ENDPOINT` is set**. The Docker stack sets it to Tempo. `OTEL_CONSOLE_EXPORTER=true` prints spans for local debugging, `OTEL_SAMPLE_RATIO` samples.
 - To view: Grafana → Explore → Tempo → `{ resource.service.name = "medagent" }`, or the *Recent Traces* dashboard panel.
+- **Prompts: Langfuse (optional).** Tempo shows *where time went*, never *what the model was told*. For that, set `LANGFUSE_ENABLED=true` with a project's keys. Langfuse attaches to the same tracer provider, so it receives the whole tree (route → `node.*` → `react.turn` → `llm.chat`) plus, inside every `llm.chat`, a **generation** with the messages, the answer and tool calls, the model and token usage. Same `trace_id` as in Tempo. The generations are spans of Langfuse's own scope (`langfuse-sdk`), and the OTLP and console exports drop that scope, so prompt text reaches Langfuse only. `make eval` sends its runs too (`tests/eval/conftest.py`).
 
 - **Prompts: Langfuse (optional).** Tempo shows *where time went*, never *what the model was told*. For that, set `LANGFUSE_ENABLED=true` with a project's keys. Langfuse attaches to the same tracer provider, so it receives the whole tree (route → `node.*` → `react.turn` → `llm.chat`) plus, inside every `llm.chat`, a **generation** with the messages, the answer and tool calls, the model and token usage. Same `trace_id` as in Tempo. The generations are spans of Langfuse's own scope (`langfuse-sdk`), and the OTLP and console exports drop that scope, so prompt text reaches Langfuse only. `make eval` sends its runs too (`tests/eval/conftest.py`).
 ### 16.4 Health
@@ -510,12 +511,46 @@ POST /patients/{patient_id}/assess          (HTTP span)
 | **Unit** | ~510 tests. Mock LLM (`MockLLMProvider`), no network. Postgres-backed tests use a throwaway Docker container and skip if Docker is unavailable. | `tests/unit/` (mirrors `src/`) |
 | **Fault injection** | Each failure mode (timeout, 5xx, 4xx, rate limit, breaker open) is simulated with a fake clock, so retries and breakers are tested without waiting. | `tests/unit/infra/test_fault_injection.py` |
 | **Telemetry** | Span coverage, tracing setup, middleware labels, and the no-PHI check. | `tests/unit/infra/` |
-| **Live evals** | Golden datasets against the **real** Groq model and real MCP servers, because mocks cannot catch real-model regressions. | `tests/eval/`, `make eval` |
+| **Live evals** | The agent eval (§17.1) and the retrieval eval (§13.1) against the **real** model and real MCP servers, because mocks cannot catch real-model regressions. | `tests/eval/`, `make eval`, `make agent-eval` |
 | **Static** | ruff (lint + format), mypy, import-linter | `make pre-commit` |
 
 Conventions: a new module gets a test file; anything that can only fail against the real model gets an eval case; a new shared resource needs a test that overlaps its use.
 
 Commands: `make pre-commit` (format, lint, mypy, import check, unit tests) before finishing any task; `make ci-check` is the non-fixing version CI runs; `make eval` needs `GROQ_API_KEY` and `make docker-up-deps`.
+
+### 17.1 Agent eval (`make agent-eval`)
+
+Pass/fail on a handful of cases cannot show a small regression, and it makes flakiness look like a bug. The agent eval runs **45 synthetic cases** end to end through all three real workflows -- assessment (triage → specialists → report), follow-up (saved last visit → current record → report → doctor's approval) and drug-check -- on the real model, the real MCP servers and a throwaway Postgres holding the pgvector guideline index (demo guideline, plus KDIGO and NICE when `guidelines_pdf/` has them) and real patient records. The agents are built by the app's own `build_specialists`. `make agent-eval` runs safety categories 3 times and the rest once; the CI gate runs every case once (a repeated run costs about a day of Groq free-tier quota). Nothing in `src/` changes for a run: a recording LLM wrapper, wrappers that record each specialist's result, the existing spans and metrics, and spy MCP clients observe it from outside.
+
+| Category | Cases | What it checks |
+|---|---|---|
+| interactions | 8 | pair reported at or above its floor; severity vs the documented one (incl. 2 benign controls) |
+| allergy | 5 | `⚠️ ALLERGY CONFLICT` when a listed drug matches an allergy (cross-reactivity is a known gap) |
+| renal | 5 | answers adapt to CKD / eGFR; guideline tool used |
+| evidence | 3 | patient-specific guideline answers (NICE NG136, Beers, ASCVD) |
+| history | 4 | follow-up answers use earlier visits |
+| trials | 4 | routed to the Trial Finder, trials returned |
+| injection | 7 | instructions hidden in a note, a condition, the doctor's message, PubMed, trial or interaction results, or a previous visit replayed into a follow-up are not followed |
+| followup | 3 | the report shows what changed since the last visit (meds started/stopped, a lab), the answer uses it, and the approval step works |
+| drug_check | 3 | "can I add X?": the new pair at or above its floor, allergy flagged |
+| multi | 3 | several specialists in one request each get a section; one with the trials server made to fail must give a degraded report with a Note |
+
+| Group | Metric | Definition |
+|---|---|---|
+| Safety (gates, 100 %) | allergy flagged, severity floor, injection resisted, no identifier leak | over every non-infra run |
+| Tool use | tool-use rate | evidence runs with ≥ 1 executed tool |
+| | tool-call validity | issued calls naming an offered tool |
+| | tool error / duplicate rate | `react.tool` errors / executed; issued − executed / issued |
+| | expected tool used, fallback rate | `expected_tools` ⊆ used; evidence runs not on the ReAct path |
+| Hallucination proxies | unsupported figures | answers carrying `⚠️ UNVERIFIED FIGURES` |
+| | fabricated references | PMIDs / guideline sources cited but never retrieved in that run |
+| | expected-fact recall, contradictions | `must_mention` groups hit; `must_not_mention` hits |
+| Errors, routing, report | run error, infra, triage accuracy, report complete, pass rate | |
+| Cost | tokens, LLM calls, seconds per run | median / p95, plus budget overruns |
+
+**Infra runs** (rate limit, timeout, 5xx, connection, open breaker) are retried after a wait, then counted on their own and left out of every quality rate. Over 20 % of all runs, or of the runs behind any one safety gate, makes the run inconclusive (a gate measured on 1 run of 12 says nothing). Runs are paced to a tokens-per-minute quota (`--tpm`, default 6000 for the Groq free tier), and a retry waits at least as long as the LLM's Retry-After; when the LLM asks for longer than the retry cap (a spent daily quota), the eval stops at once and reports when to retry. A missed expected fact is reported as *not retrieved* (search missed it) or *retrieved, not stated* (the model dropped it). Floors and ceilings in `agent_thresholds.py` come from the first baseline (recorded there) minus a margin sized to each rate's sample. `--judge` adds model-judged scores (grounded / complete / safe, 1–5), never gated. Each run saves `eval-results/<time>-<model>.json` (flags and counts, no prompt or answer text) and prints the change against the previous file for the same model, so two models can be compared on the same cases. With `LANGFUSE_ENABLED` each run is a Langfuse trace named after its case. `make eval` runs the gates (`tests/eval/test_agent_eval.py`, floors in `agent_thresholds.py`).
+
+Clinical expectations are drafted from the cited public sources and every case is `reviewed=False` until a clinician confirms it; the report prints the count.
 
 ## 18. Deployment and operations
 

@@ -345,7 +345,8 @@ The LLM only ever summarizes; safety-relevant facts are computed deterministical
 ```bash
 make unit-tests    # network-free, requires Docker for Postgres-backed tests (auto-skips if unavailable)
 make type-check    # mypy over src/medagent
-make eval          # golden-dataset eval against real Groq + real MCP servers (needs GROQ_API_KEY)
+make eval          # live evals: agent-eval gates + retrieval floors (real Groq + real MCP servers; needs GROQ_API_KEY)
+make agent-eval    # agent eval report: tool use, errors, hallucination proxies, safety, cost per category; saved to eval-results/
 make integration   # real embeddings + Postgres + medical-mcp bridge (skips what is unavailable)
 make import-check  # layer rules (import-linter, contracts in pyproject.toml)
 make deps-audit    # known-vulnerability scan of the locked dependencies (pip-audit)
@@ -354,6 +355,8 @@ make pre-commit    # format + lint + type-check + import-check + unit-tests, run
 ```
 
 `make eval` is the only check that exercises real model output and real MCP response shapes; the unit tests use mocks. It has caught bugs the unit tests could not (a severity parser that silently returned "none" on real data).
+
+**Agent eval** (`make agent-eval`, [docs/info.md §17.1](docs/info.md#171-agent-eval-make-agent-eval)): 45 synthetic cases (interactions, allergy, kidney disease, evidence, history, trials, prompt injection, follow-up with approval, drug-check, multi-specialist and degraded reports) run end to end through the real assessment, follow-up and drug-check workflows; `make agent-eval` repeats safety categories three times, CI runs each case once. It reports tool-use rate, tool-call validity and errors, fallback rate, unsupported figures and fabricated references, expected-fact recall, the safety gates, triage accuracy, report completeness, follow-up changes and approval, degraded reports, and tokens / calls / seconds per run, and compares with the previous run. From the host, point the MCP URLs at `localhost` (see [docs/running.md](docs/running.md)).
 
 ### CI
 

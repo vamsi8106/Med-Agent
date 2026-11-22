@@ -1,4 +1,4 @@
-.PHONY: purge-expired deps-audit mcp-audit import-check install test unit-tests eval integration rag-eval lint-check lint-fix format-fix format-check type-check pre-commit ci-check serve docker-up-deps docker-up docker-down docker-logs db-upgrade db-downgrade db-revision ingest-guideline k8s-local-up k8s-local-down
+.PHONY: purge-expired deps-audit mcp-audit import-check install test unit-tests eval integration rag-eval agent-eval lint-check lint-fix format-fix format-check type-check pre-commit ci-check serve docker-up-deps docker-up docker-down docker-logs db-upgrade db-downgrade db-revision ingest-guideline k8s-local-up k8s-local-down
 
 install:
 	uv sync
@@ -23,6 +23,11 @@ integration:
 # and after changing chunking, the embedding model or retrieval.
 rag-eval:
 	HF_HUB_OFFLINE=1 uv run python -m tests.eval.retrieval_eval
+
+# Agent eval: every case end to end (real LLM + MCP + pgvector), rates and a
+# saved report in eval-results/. args="--category safety", "--case rn-02 --repeats 5 --judge".
+agent-eval:
+	HF_HUB_OFFLINE=1 uv run python -m tests.eval.agent_eval $(args)
 
 lint-check:
 	uv run ruff check .
