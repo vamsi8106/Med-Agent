@@ -6,6 +6,7 @@ from itertools import combinations
 from typing import Any
 
 from medagent.core.config import get_settings
+from medagent.core.exceptions import UpstreamError
 from medagent.core.models import DrugInteraction, Medication
 from medagent.core.types import InteractionSeverity
 from medagent.infra.context_budget import truncate_text
@@ -128,11 +129,15 @@ class InteractionCheckerTool(BaseTool):
         try:
             interactions = await self._check_all_pairs(medications)
         except Exception as exc:  # noqa: BLE001 - boundary: convert to ToolResult
+            upstream = exc if isinstance(exc, UpstreamError) else None
             return ToolResult(
                 tool_name=self.name,
                 success=False,
                 error=str(exc),
                 error_type=type(exc).__name__,
+                reason=upstream.reason if upstream else None,
+                retryable=upstream.retryable if upstream else False,
+                retry_after=upstream.retry_after if upstream else None,
             )
         return ToolResult(tool_name=self.name, success=True, data=interactions)
 

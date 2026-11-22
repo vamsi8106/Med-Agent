@@ -44,7 +44,7 @@ src/medagent/
 │   ├── metrics.py               # Prometheus catalogue: HTTP, LLM calls/latency/tokens, retries, breaker state, MCP, tool calls, ReAct paths, guardrail flags, truncations
 │   ├── middleware.py            # request id, request logging, metrics + HTTP span (route templates only); SecurityMiddleware: body-size cap (413) + security headers
 │   ├── context_budget.py        # token estimate (3.5 chars/token) + truncate_text for prompt inputs
-│   ├── guardrails.py            # wrap_untrusted (prompt-injection delimiting), allergy output check, output sanity checks, outbound_search_query (identifiers out of external API queries)
+│   ├── guardrails.py            # wrap_untrusted (removes instruction-like sentences, then delimits), allergy output check, output sanity checks, outbound_search_query (identifiers out of external API queries)
 │   ├── verification.py          # deterministic check of an answer's numeric claims (doses, %, lab values) against its sources
 │   └── agent_run.py             # AgentRunTracker: per-run token budget + step trace
 ├── tools/                       # Phase 2

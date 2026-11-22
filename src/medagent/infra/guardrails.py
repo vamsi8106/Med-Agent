@@ -5,7 +5,14 @@ fields (conditions, allergies, visit history) are interpolated directly into
 prompts. patient.conditions/allergies are especially notable -- they're
 stored and replayed into every future visit's prompt, not just used once, so
 an injected instruction there would persist across sessions. wrap_untrusted
-delimits that text and tells the model not to treat it as instructions.
+delimits that text and tells the model not to treat it as instructions -- but
+asking is not enforcing: the agent eval showed the model following an
+instruction planted in a PubMed result. So wrap_untrusted first runs
+neutralize_instructions, which removes every sentence that reads as an
+instruction to the model (a fixed pattern list) before the model sees it.
+That is a deterministic layer for the common forms, not a proof: a reworded
+instruction can still get through, which is what the agent eval's injection
+cases measure.
 
 Output side: the deterministic allergy-conflict check in drug_safety_agent
 only looks at the drug names a caller explicitly asked to check. It says
@@ -48,10 +55,53 @@ _LEAK_MARKERS = (
 )
 
 
+INSTRUCTION_REMOVED = "[instruction-like text removed]"
+
+# Phrases addressed to the model, not to a clinician. Kept narrow on purpose:
+# every pattern must stay silent on ordinary clinical text ("patients should
+# not ignore symptoms", "tumours that respond to treatment"), tested in
+# tests/unit/infra/test_guardrails.py.
+_INSTRUCTION_PATTERNS = [
+    re.compile(p, re.IGNORECASE)
+    for p in (
+        r"\b(ignore|disregard|forget|override)\b[^.!?\n]{0,40}?"
+        r"\b(instructions?|prompts?|rules|question|request|listing|directions)\b",
+        r"\bsystem\s+(notice|instructions?|message|override)\b",
+        r"\bnew\s+instructions?\b",
+        r"\bnote\s+to\s+the\s+(assistant|ai|model)\b",
+        r"\b(reply|respond|answer|output)\s+only\s+with\b",
+        r"\b(reply|respond|answer)\s+with\s+(the\s+)?(word|code|text|phrase)\b",
+        r"\bas\s+your\s+(complete|whole|final|only|entire)\s+(answer|response|reply)\b",
+    )
+]
+# Sentence ends (". " / "! " / "? ") and line breaks; kept by the split so
+# the text is rebuilt unchanged apart from the removed sentences. "4.2" and
+# "152/94" have no space after the dot, so they are not sentence ends.
+_SENTENCE_BREAK = re.compile(r"((?<=[.!?])\s+|\n)")
+
+
+def neutralize_instructions(text: str) -> tuple[str, int]:
+    """Replaces each sentence that reads as an instruction to the model with
+    INSTRUCTION_REMOVED. Returns the cleaned text and how many were removed."""
+    parts = _SENTENCE_BREAK.split(text)
+    removed = 0
+    for index in range(0, len(parts), 2):  # even indexes are sentences
+        if any(pattern.search(parts[index]) for pattern in _INSTRUCTION_PATTERNS):
+            parts[index] = INSTRUCTION_REMOVED
+            removed += 1
+    return "".join(parts), removed
+
+
 def wrap_untrusted(text: str) -> str:
-    """Delimits user/patient-supplied text so it reads as data, not
-    instructions, when interpolated into a prompt."""
-    return f"{_UNTRUSTED_NOTE}\n<<<\n{text}\n>>>"
+    """Delimits user/patient-supplied or external text so it reads as data,
+    not instructions, when interpolated into a prompt -- after removing what
+    reads as an instruction (neutralize_instructions). Logged as a count only:
+    the removed text may be patient data."""
+    cleaned, removed = neutralize_instructions(text)
+    if removed:
+        guardrail_flags_total.labels(kind="injection_neutralized").inc(removed)
+        logger.warning("untrusted_instructions_removed", count=removed)
+    return f"{_UNTRUSTED_NOTE}\n<<<\n{cleaned}\n>>>"
 
 
 def find_allergy_mentions(response_text: str, allergies: list[str]) -> list[str]:

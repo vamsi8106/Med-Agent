@@ -69,8 +69,11 @@ class TrialFinderAgent(BaseAgent):
                 Message(
                     role="user",
                     content=(
-                        f"Summarize these trials for condition '{condition}':\n"
-                        f"{wrap_untrusted(trials_text)}"
+                        # The condition comes from the stored record, so it is
+                        # untrusted too (an instruction saved there would replay).
+                        f"Summarize these trials for the condition in\n"
+                        f"{wrap_untrusted(condition)}\n"
+                        f"Trials:\n{wrap_untrusted(trials_text)}"
                     ),
                 ),
             ]

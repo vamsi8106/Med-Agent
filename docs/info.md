@@ -259,6 +259,7 @@ Safety checks that must not depend on the model's mood live **outside** the LLM 
 | **Output allergy cross-check** | If an LLM answer mentions a drug the patient is allergic to, a warning is added. |
 | **Output sanity checks** | Flags suspiciously short answers and text that looks like a leaked system prompt. |
 | **Prompt-injection delimiting** | `wrap_untrusted` (above). |
+| **Instruction neutralization** | Inside `wrap_untrusted`, `neutralize_instructions` replaces every sentence of untrusted text that reads as an instruction to the model (a fixed, narrow pattern list) with `[instruction-like text removed]`, so the policy is enforced in code rather than only requested in the prompt. Added after the agent eval showed `gpt-oss-20b` following an instruction planted in a PubMed result. It catches the common forms, not every rewording; ordinary clinical phrasing is tested to pass through untouched. |
 | **Figure verification** | Numbers not found in the sources are flagged. |
 | **Lab flags** | Abnormal labs are flagged from each result's own reference range, outside any LLM. |
 | **Changes since last visit** | Computed in code from the record and the last visit's snapshot, never by the model. |

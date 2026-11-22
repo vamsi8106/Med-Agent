@@ -84,7 +84,7 @@ evidence_react_total = Counter(
 guardrail_flags_total = Counter(
     "medagent_guardrail_flags_total",
     "Guardrail findings (allergy_mention, output_validation, unverified_figures, "
-    "outbound_query_redacted)",
+    "outbound_query_redacted, injection_neutralized)",
     labelnames=("kind",),
 )
 

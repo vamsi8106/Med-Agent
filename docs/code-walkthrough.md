@@ -339,7 +339,7 @@ No log line, span attribute or metric label carries patient data; `tests/unit/in
 | `circuit_breaker.py` | Opens after repeated real outages (timeouts, connection errors, 5xx), fails fast while open, then tries again. 4xx and rate limits never count. |
 | `rate_limiter.py` | `TokenBucket` for outbound calls (waits); `KeyedRateLimiter` for incoming abuse limits per user/IP, per process (never waits; returns the retry time; bounded memory). |
 | `context_budget.py` | Token estimate (3.5 characters per token) and `truncate_text`, which records a truncation metric. |
-| `guardrails.py` | `wrap_untrusted` (delimits outside text so it isn't followed as instructions), the allergy-mention check on output, `validate_output` sanity checks, and `outbound_search_query` (removes patient identifiers from queries sent to external APIs). |
+| `guardrails.py` | `wrap_untrusted` (removes instruction-like sentences via `neutralize_instructions`, then delimits outside text so it isn't followed as instructions), the allergy-mention check on output, `validate_output` sanity checks, and `outbound_search_query` (removes patient identifiers from queries sent to external APIs). |
 | `verification.py` | Finds doses, percentages and lab values in an answer that appear in none of its sources, and adds an `UNVERIFIED FIGURES` warning. |
 | `agent_run.py` | `AgentRunTracker`: token budget per run, step records (completed / skipped / failed), and a summary for the logs. |
 

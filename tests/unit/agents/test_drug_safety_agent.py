@@ -204,3 +204,58 @@ async def test_a_failed_interaction_check_keeps_the_kind_of_failure(
 
     assert type(excinfo.value) is expected
     assert "connection refused" in str(excinfo.value)
+
+
+class _RefusingResearchClient:
+    """A research server that fails the way a real one does."""
+
+    def __init__(self, error: MCPError) -> None:
+        self._error = error
+
+    async def __aenter__(self) -> "_RefusingResearchClient":
+        return self
+
+    async def __aexit__(self, *exc_info: object) -> None:
+        return None
+
+    async def comprehensive_analysis(self, drug_name: str, condition: str) -> object:
+        raise self._error
+
+
+@pytest.mark.parametrize(
+    ("error", "reason", "retryable", "retry_after"),
+    [
+        (
+            MCPError("busy", reason="rate_limited", retryable=True, retry_after=12.0),
+            "rate_limited",
+            True,
+            12.0,
+        ),
+        (
+            MCPError("refused", reason="connection_error", retryable=True),
+            "connection_error",
+            True,
+            None,
+        ),
+        (MCPError("bad request", reason="client_error"), "client_error", False, None),
+    ],
+)
+async def test_a_failed_interaction_check_keeps_its_reason_and_wait(
+    error: MCPError, reason: str, retryable: bool, retry_after: float | None
+) -> None:
+    """The reason used to be dropped on the way out of the tool, so a rate limit
+    or an unreachable server read as a generic "error": no Retry-After for the
+    429, no "rate limited, retry in N s" in the report's Note."""
+    from medagent.tools.custom.interaction_checker import InteractionCheckerTool
+
+    agent = DrugSafetyAgent(
+        llm=MockLLMProvider(),
+        interaction_checker=InteractionCheckerTool(_RefusingResearchClient(error)),  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(MCPError) as excinfo:
+        await agent.run(_patient(), "Check interactions for Metformin and Glimepiride")
+
+    assert excinfo.value.reason == reason
+    assert excinfo.value.retryable is retryable
+    assert excinfo.value.retry_after == retry_after

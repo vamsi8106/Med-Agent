@@ -3,7 +3,7 @@
 import re
 
 from medagent.core.config import get_settings
-from medagent.core.exceptions import MCPError, MedAgentError, ProviderError, ToolError
+from medagent.core.exceptions import MCPError, ProviderError, ToolError, UpstreamError
 from medagent.core.interfaces import BaseAgent, BaseLLMProvider
 from medagent.core.models import AgentResult, DrugInteraction, Medication, Message, PatientContext
 from medagent.core.types import AgentRole
@@ -19,7 +19,7 @@ from medagent.tools.custom.interaction_checker import InteractionCheckerTool
 
 logger = get_logger(__name__)
 
-_UPSTREAM_ERRORS: dict[str, type[MedAgentError]] = {
+_UPSTREAM_ERRORS: dict[str, type[UpstreamError]] = {
     "MCPError": MCPError,
     "ProviderError": ProviderError,
 }
@@ -98,8 +98,17 @@ class DrugSafetyAgent(BaseAgent):
         if not result.success:
             # Keep the kind of failure: an unreachable MCP server should read as
             # "data source unavailable" in the report, not the generic wording.
-            error_class = _UPSTREAM_ERRORS.get(result.error_type or "", ToolError)
-            raise error_class(f"Interaction check failed: {result.error}")
+            message = f"Interaction check failed: {result.error}"
+            upstream_class = _UPSTREAM_ERRORS.get(result.error_type or "")
+            if upstream_class is None:
+                raise ToolError(message)
+            # ...and its reason and wait, which the report and a 429 need.
+            raise upstream_class(
+                message,
+                reason=result.reason or "error",
+                retryable=result.retryable,
+                retry_after=result.retry_after,
+            )
 
         # ToolResult.data is intentionally untyped (Any); InteractionCheckerTool
         # always puts a list[DrugInteraction] there.
