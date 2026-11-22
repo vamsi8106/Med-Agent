@@ -85,9 +85,11 @@ services:
       MEDICAL_MCP_URL: http://medical-mcp-bridge:8080
       HEALTHCARE_MCP_URL: http://healthcare-mcp:3000
       RESEARCH_MCP_URL: http://research-mcp:3000
-      LANGCHAIN_TRACING_V2: ${LANGCHAIN_TRACING_V2:-false}
-      LANGCHAIN_API_KEY: ${LANGCHAIN_API_KEY:-}
-      LANGCHAIN_PROJECT: ${LANGCHAIN_PROJECT:-medagent}
+      LANGFUSE_ENABLED: ${LANGFUSE_ENABLED:-false}
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
+      LANGFUSE_BASE_URL: ${LANGFUSE_BASE_URL:-https://cloud.langfuse.com}
+      ALLOW_PROMPT_TRACING_WITH_PHI: ${ALLOW_PROMPT_TRACING_WITH_PHI:-false}
       JWT_SECRET_KEY: ${JWT_SECRET_KEY:-dev-insecure-secret-change-me-in-prod-please}
       JWT_ALGORITHM: ${JWT_ALGORITHM:-HS256}
       JWT_EXPIRE_MINUTES: ${JWT_EXPIRE_MINUTES:-60}

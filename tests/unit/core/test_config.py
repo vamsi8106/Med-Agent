@@ -86,3 +86,56 @@ def test_production_refuses_an_openai_compatible_endpoint_on_a_public_host() -> 
             llm_base_url="https://api.example-llm.com/v1",
             llm_model="m",
         )
+
+
+# --- Langfuse prompt tracing -------------------------------------------------------
+
+_LANGFUSE_KEYS = {"langfuse_public_key": "pk-lf-test", "langfuse_secret_key": "sk-lf-test"}
+
+
+def test_langfuse_is_off_by_default_and_langsmith_settings_are_gone() -> None:
+    settings = Settings(_env_file=None)
+    assert settings.langfuse_enabled is False
+    assert not hasattr(settings, "langchain_tracing_v2")
+
+
+def test_langfuse_without_keys_is_refused_in_any_environment() -> None:
+    with pytest.raises(ValidationError, match="LANGFUSE_PUBLIC_KEY"):
+        Settings(_env_file=None, langfuse_enabled=True)
+
+
+def test_development_allows_langfuse_cloud() -> None:
+    settings = Settings(_env_file=None, langfuse_enabled=True, **_LANGFUSE_KEYS)
+    assert settings.langfuse_base_url == "https://cloud.langfuse.com"
+
+
+def test_production_refuses_langfuse_cloud_without_a_data_agreement() -> None:
+    with pytest.raises(ValidationError, match="ALLOW_PROMPT_TRACING_WITH_PHI"):
+        Settings(
+            **_STRONG,
+            llm_provider="mock",
+            langfuse_enabled=True,
+            **_LANGFUSE_KEYS,
+        )
+
+
+def test_production_allows_langfuse_cloud_when_a_data_agreement_is_asserted() -> None:
+    settings = Settings(
+        **_STRONG,
+        llm_provider="mock",
+        langfuse_enabled=True,
+        allow_prompt_tracing_with_phi=True,
+        **_LANGFUSE_KEYS,
+    )
+    assert settings.langfuse_enabled
+
+
+def test_production_allows_a_self_hosted_langfuse() -> None:
+    settings = Settings(
+        **_STRONG,
+        llm_provider="mock",
+        langfuse_enabled=True,
+        langfuse_base_url="http://langfuse:3000",
+        **_LANGFUSE_KEYS,
+    )
+    assert settings.langfuse_enabled

@@ -22,9 +22,6 @@ class ProviderRegistry:
             return GroqProvider(
                 api_key=settings.groq_api_key,
                 model=settings.groq_model,
-                tracing_enabled=settings.langchain_tracing_v2,
-                langsmith_api_key=settings.langchain_api_key,
-                langsmith_project=settings.langchain_project,
                 timeout_seconds=settings.llm_timeout_seconds,
                 retry_max_wait_seconds=settings.retry_max_wait_seconds,
                 retry_budget_seconds=settings.retry_budget_seconds,

@@ -105,7 +105,18 @@ The provisioned **MedAgent Overview** dashboard shows, from `/metrics`: HTTP rat
 - **Production:** `docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build` — Caddy with automatic HTTPS as the only public service, required secrets, optional Ollama. Full runbook (secrets, model choice, encrypted disks and backups, upgrades, retention schedule, accounts): [docs/deployment.md](docs/deployment.md).
 - **Kubernetes / several replicas:** `deploy/k8s/` (Kustomize). `STATE_BACKEND=postgres` shares drafts and abuse limits through the database; `make k8s-local-up` runs 3 replicas on kind; `overlays/aws` targets EKS + RDS + ALB ([docs/deployment.md](docs/deployment.md#10-kubernetes-and-aws-several-replicas)).
 
-**Privacy note:** `LANGCHAIN_TRACING_V2=true` (LangSmith) sends prompts, which contain patient data, to a third-party service; keep it off for real data.
+**Prompt tracing (Langfuse, optional).** Tempo shows timings and outcomes but never prompt text. To see what each agent sent the model and what it answered, create a project at [cloud.langfuse.com](https://cloud.langfuse.com) (or self-host Langfuse) and set in `.env`:
+
+```bash
+LANGFUSE_ENABLED=true
+LANGFUSE_PUBLIC_KEY=pk-lf-...
+LANGFUSE_SECRET_KEY=sk-lf-...
+LANGFUSE_BASE_URL=https://cloud.langfuse.com   # or https://us.cloud.langfuse.com
+```
+
+Each request then appears in Langfuse as one trace (route → graph nodes → ReAct turns → LLM calls), every LLM call with its messages, answer, tool calls and tokens, under the same `trace_id` as in Tempo. `make eval` runs are sent too. Prompts go to Langfuse only, never to Tempo or the logs.
+
+**Privacy note:** prompts contain patient data. Use a hosted Langfuse only with synthetic data; production refuses a non-local `LANGFUSE_BASE_URL` unless `ALLOW_PROMPT_TRACING_WITH_PHI=true` (you have a data agreement).
 
 **Readiness.** `GET /ready` (no auth) reports `ok` / `degraded` / `down` per dependency; 503 only when Postgres is down. `/health` is liveness only.
 

@@ -75,7 +75,7 @@ When Uvicorn imports `medagent.app`, `create_app()` runs:
 Then the **lifespan** runs when the server actually starts:
 
 1. `configure_logging()` (`infra/logging.py`) and `configure_tracing()` (`infra/tracing.py`).
-2. Warnings if LangSmith tracing is on or the placeholder JWT secret is used.
+2. Warnings if Langfuse prompt tracing is on (naming its host) or the placeholder JWT secret is used. `configure_tracing` (step 1) also attaches Langfuse to the tracer provider when `LANGFUSE_ENABLED`.
 3. `AppState(settings)` (`api/state.py`) builds every long-lived object once:
 
    | Object | From | Used for |

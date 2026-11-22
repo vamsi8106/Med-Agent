@@ -64,6 +64,8 @@ curl -s http://localhost:8000/ready      # ok / degraded / down per dependency (
 
 Open `http://localhost:8000/docs` for the interactive API docs.
 
+**Optional: Langfuse.** Set `LANGFUSE_ENABLED=true` and the project keys in `.env` (README, *Prompt tracing*) and restart; each request's prompts and answers appear in Langfuse. Synthetic data only with a hosted Langfuse.
+
 **Add a guideline (optional)**
 
 ```bash
@@ -116,6 +118,7 @@ make docker-logs                 # follow the logs of every service
 - Grafana: `http://localhost:3000` (user `admin`, password `GRAFANA_ADMIN_PASSWORD`). The **MedAgent Overview** dashboard shows requests, LLM calls, MCP calls and guardrails. Traces: *Explore* → *Tempo*.
 - Prometheus: `http://localhost:9090`.
 
+- Langfuse (optional): the same `.env` settings as stage 1 are passed to the container; prompts appear in your Langfuse project.
 **Add a guideline (optional)**
 
 ```bash

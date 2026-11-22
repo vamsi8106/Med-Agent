@@ -1,5 +1,6 @@
 import asyncio
-import os
+from collections.abc import Iterator
+from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -8,31 +9,6 @@ import pytest
 from medagent.core.exceptions import ProviderError
 from medagent.core.models import Message, ToolCall
 from medagent.llm.groq_provider import GroqProvider
-
-
-def test_tracing_disabled_by_default_leaves_env_untouched() -> None:
-    os.environ.pop("LANGCHAIN_TRACING_V2", None)
-    with patch("medagent.llm.groq_provider.AsyncGroq", return_value=MagicMock()):
-        GroqProvider(api_key="test-key", model="test-model")
-    assert os.environ.get("LANGCHAIN_TRACING_V2") is None
-
-
-def test_tracing_enabled_sets_langsmith_env_vars() -> None:
-    try:
-        with patch("medagent.llm.groq_provider.AsyncGroq", return_value=MagicMock()):
-            GroqProvider(
-                api_key="test-key",
-                model="test-model",
-                tracing_enabled=True,
-                langsmith_api_key="ls-key",
-                langsmith_project="medagent-test",
-            )
-        assert os.environ["LANGCHAIN_TRACING_V2"] == "true"
-        assert os.environ["LANGCHAIN_API_KEY"] == "ls-key"
-        assert os.environ["LANGCHAIN_PROJECT"] == "medagent-test"
-    finally:
-        for key in ("LANGCHAIN_TRACING_V2", "LANGCHAIN_API_KEY", "LANGCHAIN_PROJECT"):
-            os.environ.pop(key, None)
 
 
 async def test_complete_raises_provider_error_on_timeout() -> None:
@@ -346,3 +322,68 @@ async def test_token_usage_and_latency_are_recorded(clock: FakeClock) -> None:
         metric_value("medagent_llm_calls_total", provider="groq", outcome="success") - ok_before
         == 1
     )
+
+
+# --- Langfuse generation (prompt tracing) ----------------------------------------
+
+
+class _RecordedGeneration:
+    def __init__(self) -> None:
+        self.output: dict | None = None
+        self.usage: dict | None = None
+        self.failure: str | None = None
+
+    def finish(self, output: dict, usage: dict) -> None:
+        self.output, self.usage = output, usage
+
+    def fail(self, reason: str) -> None:
+        self.failure = reason
+
+
+def _record_generations(monkeypatch: pytest.MonkeyPatch) -> list[tuple[dict, _RecordedGeneration]]:
+    calls: list[tuple[dict, _RecordedGeneration]] = []
+
+    @contextmanager
+    def fake(name: str, **kwargs: object) -> Iterator[_RecordedGeneration]:
+        generation = _RecordedGeneration()
+        calls.append(({"name": name, **kwargs}, generation))
+        yield generation
+
+    monkeypatch.setattr("medagent.llm.chat_base.llm_generation", fake)
+    return calls
+
+
+async def test_complete_reports_messages_answer_and_usage_as_a_generation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _record_generations(monkeypatch)
+    response = _fake_groq_response(
+        [_tool_call("call_1", "search_guidelines", '{"query": "metformin ckd"}')]
+    )
+    provider, _ = _provider_returning(response)
+    tools = [{"type": "function", "function": {"name": "search_guidelines"}}]
+
+    await provider.complete(_HI, tools=tools)
+
+    ((started, generation),) = calls
+    assert started["model"] == "test-model"
+    assert started["messages"] == [{"role": "user", "content": "hi"}]
+    assert started["metadata"] == {"provider": "groq", "tools": ["search_guidelines"]}
+    assert generation.output == {
+        "content": "",
+        "tool_calls": [{"name": "search_guidelines", "arguments": {"query": "metformin ckd"}}],
+    }
+    assert generation.usage == {"input": 10, "output": 5}
+    assert generation.failure is None
+
+
+async def test_a_failed_call_marks_its_generation_failed(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _record_generations(monkeypatch)
+    provider, _ = _provider(_FakeSDK(_status_error(400)))
+
+    with pytest.raises(ProviderError):
+        await provider.complete(_HI)
+
+    ((_, generation),) = calls
+    assert generation.failure == "client_error"
+    assert generation.output is None

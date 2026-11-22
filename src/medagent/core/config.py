@@ -134,9 +134,15 @@ class Settings(BaseSettings):
     otel_console_exporter: bool = False
     otel_sample_ratio: float = 1.0
 
-    langchain_tracing_v2: bool = False
-    langchain_api_key: str | None = None
-    langchain_project: str = "medagent"
+    # Prompt tracing (Langfuse): every LLM call's messages and answer, which
+    # contain patient data, go to LANGFUSE_BASE_URL. Off by default; production
+    # refuses a non-local host (Langfuse Cloud) unless
+    # ALLOW_PROMPT_TRACING_WITH_PHI asserts a data agreement with that host.
+    langfuse_enabled: bool = False
+    langfuse_public_key: str | None = None
+    langfuse_secret_key: str | None = None
+    langfuse_base_url: str = "https://cloud.langfuse.com"
+    allow_prompt_tracing_with_phi: bool = False
 
     jwt_secret_key: str = INSECURE_JWT_SECRET
     jwt_algorithm: str = "HS256"
@@ -165,6 +171,15 @@ class Settings(BaseSettings):
     # (often 7-10+ years); values under a year are refused as a likely mistake.
     retention_days: int | None = Field(default=None, ge=365)
     audit_retention_days: int | None = Field(default=None, ge=365)
+
+    @model_validator(mode="after")
+    def _require_langfuse_keys(self) -> Self:
+        if self.langfuse_enabled and not (self.langfuse_public_key and self.langfuse_secret_key):
+            raise ValueError(
+                "LANGFUSE_ENABLED=true needs LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY "
+                "(from your Langfuse project's settings)"
+            )
+        return self
 
     @model_validator(mode="after")
     def _refuse_insecure_production_config(self) -> Self:
@@ -196,6 +211,17 @@ class Settings(BaseSettings):
                 f"LLM_PROVIDER={self.llm_provider} sends patient data to a third party; use a "
                 "self-hosted model (LLM_PROVIDER=openai_compatible with a local LLM_BASE_URL) "
                 "or set ALLOW_EXTERNAL_LLM_WITH_PHI=true if you have a data agreement"
+            )
+        if (
+            self.langfuse_enabled
+            and not is_local_host(self.langfuse_base_url)
+            and not self.allow_prompt_tracing_with_phi
+        ):
+            problems.append(
+                "LANGFUSE_ENABLED sends every prompt, which contains patient data, to "
+                f"{urlsplit(self.langfuse_base_url).hostname}; self-host Langfuse (a local "
+                "LANGFUSE_BASE_URL), turn it off, or set ALLOW_PROMPT_TRACING_WITH_PHI=true "
+                "if you have a data agreement with that host"
             )
         if problems:
             raise ValueError("Refusing to start with APP_ENV=production: " + "; ".join(problems))

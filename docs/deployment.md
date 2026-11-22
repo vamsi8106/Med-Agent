@@ -73,7 +73,7 @@ LLM_MODEL=qwen2.5:7b
 
 Any server with an OpenAI-style `/chat/completions` API works the same way (vLLM, LM Studio, a GPU box on your private network). The model **must support tool calling**, because the evidence agent is a ReAct agent. Answer quality depends heavily on the model size. Run `make eval` against your chosen model before relying on it: the evals in this repository were tuned on Groq's `openai/gpt-oss-20b`. Small models (3B and under) run on a CPU but are much weaker. Use a GPU host for 7B and larger.
 
-**External provider.** Only with a signed agreement that covers patient data. Then set `ALLOW_EXTERNAL_LLM_WITH_PHI=true`. Keep `LANGCHAIN_TRACING_V2=false`, because LangSmith would receive full prompts.
+**External provider.** Only with a signed agreement that covers patient data. Then set `ALLOW_EXTERNAL_LLM_WITH_PHI=true`. Keep `LANGFUSE_ENABLED=false` unless Langfuse is self-hosted on your network or covered by an agreement too (`ALLOW_PROMPT_TRACING_WITH_PHI=true`), because it receives full prompts.
 
 ## 5. Encryption at rest and backups (infrastructure)
 
@@ -227,6 +227,7 @@ Patient data is stored only in Postgres, but several components call services ou
 | Component | Calls (HTTPS only) | What is sent |
 |---|---|---|
 | `medagent` (app) | the LLM endpoint (step 4); Hugging Face at startup (embedding and optional re-ranker models); your OTLP collector | prompts (patient data, hence step 4); nothing for model downloads; traces without patient data |
+| `medagent`, only with `LANGFUSE_ENABLED=true` | `LANGFUSE_BASE_URL` (cloud.langfuse.com, us.cloud.langfuse.com, or your own) | every prompt and answer, so patient data: production refuses a non-local host unless `ALLOW_PROMPT_TRACING_WITH_PHI=true` |
 | `medical-mcp-bridge` | api.fda.gov, rxnav.nlm.nih.gov, eutils.ncbi.nlm.nih.gov / pubmed / www.ncbi.nlm.nih.gov, ghoapi.azureedge.net (WHO), clinicaltrials.gov; its unused tools also reach scholar.google.com and cochranelibrary.com | drug names, literature search terms |
 | `healthcare-mcp` | clinicaltrials.gov, clinicaltables.nlm.nih.gov, api.fda.gov, NCBI, odphp.health.gov, medRxiv | conditions, search terms |
 | `research-mcp` | api.fda.gov, eutils.ncbi.nlm.nih.gov, clinicaltrials.gov | drug pairs |

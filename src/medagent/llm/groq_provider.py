@@ -11,7 +11,6 @@ counts toward opening the breaker.
 """
 
 import asyncio
-import os
 import re
 from typing import Any
 
@@ -65,13 +64,6 @@ def _tool_calls_as_dicts(raw_calls: Any) -> list[dict[str, Any]]:
     ]
 
 
-def _enable_langsmith_tracing(api_key: str | None, project: str) -> None:
-    os.environ["LANGCHAIN_TRACING_V2"] = "true"
-    if api_key:
-        os.environ["LANGCHAIN_API_KEY"] = api_key
-    os.environ["LANGCHAIN_PROJECT"] = project
-
-
 class GroqProvider(ChatCompletionProvider):
     provider_name = "groq"
 
@@ -79,9 +71,6 @@ class GroqProvider(ChatCompletionProvider):
         self,
         api_key: str,
         model: str,
-        tracing_enabled: bool = False,
-        langsmith_api_key: str | None = None,
-        langsmith_project: str = "medagent",
         timeout_seconds: float = 30.0,
         retry_max_wait_seconds: float = 10.0,
         retry_budget_seconds: float = 45.0,
@@ -93,8 +82,6 @@ class GroqProvider(ChatCompletionProvider):
             retry_budget_seconds=retry_budget_seconds,
         )
         self._client = AsyncGroq(api_key=api_key, max_retries=0)
-        if tracing_enabled:
-            _enable_langsmith_tracing(langsmith_api_key, langsmith_project)
 
     async def _call_once(
         self, messages: list[Message], tools: list[dict[str, Any]] | None

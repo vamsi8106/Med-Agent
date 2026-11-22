@@ -2,7 +2,9 @@
 
 Reliability and observability live here once: the circuit breaker, the retry
 policy, the `llm.chat` span (model, token counts, outcome -- never the prompt
-or the completion, which carry patient data) and the LLM metrics. A provider
+or the completion, which carry patient data) and the LLM metrics. With
+LANGFUSE_ENABLED, the messages and answer also go to Langfuse as a generation
+(`infra/tracing.py::llm_generation`), and only there. A provider
 subclass only knows how to make one call and classify its errors; it returns a
 ChatResult and raises ProviderError with a reason and a retryable flag.
 
@@ -17,15 +19,13 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from langsmith import traceable
-
 from medagent.core.exceptions import ProviderError
 from medagent.core.interfaces import BaseLLMProvider
 from medagent.core.models import LLMResponse, Message, ToolCall
 from medagent.infra.circuit_breaker import CircuitBreaker
 from medagent.infra.metrics import llm_call_duration_seconds, llm_calls_total, llm_tokens_total
 from medagent.infra.retry import retry
-from medagent.infra.tracing import get_tracer
+from medagent.infra.tracing import get_tracer, llm_generation
 
 tracer = get_tracer(__name__)
 
@@ -140,20 +140,40 @@ class ChatCompletionProvider(BaseLLMProvider):
         self, messages: list[Message], tools: list[dict[str, Any]] | None
     ) -> ChatResult: ...
 
-    @traceable(run_type="llm", name="chat_completion")
     async def complete(
         self, messages: list[Message], tools: list[dict[str, Any]] | None = None
     ) -> LLMResponse:
         started = time.monotonic()
-        with tracer.start_as_current_span("llm.chat") as span:
+        with (
+            tracer.start_as_current_span("llm.chat") as span,
+            llm_generation(
+                "chat_completion",
+                model=self._model,
+                messages=[to_chat_message(m) for m in messages],
+                metadata={
+                    "provider": self.provider_name,
+                    "tools": [t.get("function", {}).get("name") for t in tools or []],
+                },
+            ) as generation,
+        ):
             span.set_attribute("gen_ai.system", self.provider_name)
             span.set_attribute("gen_ai.request.model", self._model)
             try:
                 result = await self._breaker.call(self._call_with_retry, messages, tools)
             except ProviderError as exc:
                 span.set_attribute("medagent.llm.outcome", exc.reason)
+                generation.fail(exc.reason)
                 self._record_call(exc.reason, started)
                 raise
+            generation.finish(
+                {
+                    "content": result.content,
+                    "tool_calls": [
+                        {"name": c.tool_name, "arguments": c.arguments} for c in result.tool_calls
+                    ],
+                },
+                {"input": result.prompt_tokens, "output": result.completion_tokens},
+            )
             self._record_call("success", started)
             span.set_attribute("medagent.llm.outcome", "success")
             span.set_attribute("gen_ai.usage.input_tokens", result.prompt_tokens)

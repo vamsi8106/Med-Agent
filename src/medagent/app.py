@@ -2,6 +2,7 @@
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from urllib.parse import urlsplit
 
 from fastapi import FastAPI
 
@@ -24,11 +25,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         configure_logging(resolved_settings.log_level)
         configure_tracing(resolved_settings)
-        if resolved_settings.langchain_tracing_v2:
+        if resolved_settings.langfuse_enabled:
             logger.warning(
-                "langsmith_tracing_enabled",
-                note="prompts and graph state, which contain patient data, are sent to "
-                "LangSmith; use only with synthetic data",
+                "langfuse_tracing_enabled",
+                host=urlsplit(resolved_settings.langfuse_base_url).hostname,
+                note="every prompt and answer, which contain patient data, is sent to "
+                "Langfuse; use a hosted Langfuse only with synthetic data",
             )
         if resolved_settings.jwt_secret_key == INSECURE_JWT_SECRET:
             logger.warning(

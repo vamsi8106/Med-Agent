@@ -430,7 +430,7 @@ The schema change is migration `5b1e7c2d9a40` (adds `visits.record_snapshot` and
 - **No patient data in telemetry.** Traces, logs and metric labels never carry a patient id, name, medication, allergy, or prompt/response text. Correlation uses `request_id`, `trace_id` and `run_id`. `tests/unit/infra/test_no_phi_in_telemetry.py` fails the build if a distinctive patient string appears in any span or log line.
 - **Error hygiene.** Clients see fixed wording for upstream failures, not raw upstream text.
 - **Local data.** Patient data stays in your Postgres. The uvicorn access log is disabled (`--no-access-log`) because it prints raw URL paths.
-- **LangSmith warning.** LangChain's tracing (`LANGCHAIN_TRACING_V2`) is **off by default** because it would send prompts, which contain patient data, to a third party. If turned on, the app logs a warning at startup.
+- **Prompt tracing (Langfuse).** Off by default (`LANGFUSE_ENABLED`), because it sends every prompt and answer, which contain patient data, to Langfuse. A hosted Langfuse is for synthetic data only: production refuses a non-local `LANGFUSE_BASE_URL` unless `ALLOW_PROMPT_TRACING_WITH_PHI=true`. If turned on, the app logs a warning at startup naming the host. Tempo and the logs still never see prompt text (§16.3).
 - **Outbound queries.** Search terms sent to external medical APIs (PubMed via the MCP servers) pass through `outbound_search_query`, which strips the patient's name and record ID, dates, numbers, e-mail addresses, phone numbers and URLs. The LLM guard doesn't cover that traffic. Which hosts each container calls, and how to restrict egress, is in `docs/deployment.md` §11.
 - **MCP supply chain.** The vendored MCP servers are pinned to commits, install our audited lockfiles, and `make mcp-audit` (CI) fails on high or critical npm advisories (`docs/deployment.md` §12).
 - **Abuse limits.** Login is limited per username (5 per minute) and per client IP (20 per minute), counted even when the password is right, so guessing is capped. Agent runs (`/assess`, `/followup`, `/drug-check`, WebSocket drafts) are limited per user (6 per minute, burst 3) because each one spends LLM quota. Over a limit: 429 with `Retry-After`. Limits are per process with `STATE_BACKEND=memory`, and shared by every replica with `postgres` (`memory/rate_limits.py`).
@@ -496,6 +496,7 @@ POST /patients/{patient_id}/assess          (HTTP span)
 - Spans are always created (they supply the `trace_id` for logs) but are **exported only when `OTEL_EXPORTER_OTLP_ENDPOINT` is set**. The Docker stack sets it to Tempo. `OTEL_CONSOLE_EXPORTER=true` prints spans for local debugging, `OTEL_SAMPLE_RATIO` samples.
 - To view: Grafana → Explore → Tempo → `{ resource.service.name = "medagent" }`, or the *Recent Traces* dashboard panel.
 
+- **Prompts: Langfuse (optional).** Tempo shows *where time went*, never *what the model was told*. For that, set `LANGFUSE_ENABLED=true` with a project's keys. Langfuse attaches to the same tracer provider, so it receives the whole tree (route → `node.*` → `react.turn` → `llm.chat`) plus, inside every `llm.chat`, a **generation** with the messages, the answer and tool calls, the model and token usage. Same `trace_id` as in Tempo. The generations are spans of Langfuse's own scope (`langfuse-sdk`), and the OTLP and console exports drop that scope, so prompt text reaches Langfuse only. `make eval` sends its runs too (`tests/eval/conftest.py`).
 ### 16.4 Health
 
 - **`/health`** — liveness. "The process is up." Docker uses it; it does not depend on other services, so a down dependency never causes a restart loop.
@@ -569,7 +570,8 @@ All settings come from environment variables or `.env` through `Settings`. New s
 | `MEDICAL_MCP_URL`, `HEALTHCARE_MCP_URL`, `RESEARCH_MCP_URL` | Docker service names | MCP endpoints |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | unset | enables trace export |
 | `OTEL_CONSOLE_EXPORTER`, `OTEL_SAMPLE_RATIO` | false, 1.0 | debug output, sampling |
-| `LANGCHAIN_TRACING_V2` | false | LangSmith; sends patient data off-box, keep off |
+| `LANGFUSE_ENABLED`, `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, `LANGFUSE_BASE_URL` | false, unset, unset, `https://cloud.langfuse.com` | prompt tracing to Langfuse (prompts contain patient data) |
+| `ALLOW_PROMPT_TRACING_WITH_PHI` | false | lets production use a non-local Langfuse (asserts a data agreement) |
 | `JWT_SECRET_KEY`, `JWT_ALGORITHM`, `JWT_EXPIRE_MINUTES` | placeholder, HS256, 60 | **change the secret** |
 | `ADMIN_BOOTSTRAP_USERNAME`, `ADMIN_BOOTSTRAP_PASSWORD` | unset | seeds the first admin |
 | `APP_ENV` | development | `production` enforces strong secrets, hides docs, adds HSTS |
